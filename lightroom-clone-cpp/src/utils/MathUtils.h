@@ -1,0 +1,87 @@
+#pragma once
+
+// Small math helpers shared by the engine and catalog layers.
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <string>
+
+namespace lrc {
+
+constexpr double kPi = 3.14159265358979323846;
+
+template <typename T>
+constexpr T clamp(T value, T lo, T hi) {
+    return std::clamp(value, lo, hi);
+}
+
+inline double lerp(double a, double b, double t) { return a + (b - a) * t; }
+
+// Hermite smoothstep in [0,1].
+inline double smoothstep(double edge0, double edge1, double x) {
+    const double t =
+        clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// FNV-1a style 64-bit hash mixing (a single step).
+inline size_t hashCombine(size_t seed, size_t value) {
+    seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+    return seed;
+}
+
+// Converts an exposure delta in stops to a linear multiplier.
+inline double stopsToGain(double ev) { return std::pow(2.0, ev); }
+
+// Maps a -100..100 slider value into a multiplier around 1.0.
+inline double sliderToScale(double value, double range) {
+    return std::pow(2.0, value / 100.0 * range);
+}
+
+// Lightroom's eight colour ranges (red/orange/yellow/green/aqua/blue/purple/
+// magenta) and their centre hue angles in degrees. Shared by the pipeline's HSL
+// handling and the targeted-adjustment colour sampler.
+constexpr float kColorRangeCenters[8] = {
+    0.0f, 30.0f, 60.0f, 120.0f, 180.0f, 240.0f, 290.0f, 330.0f};
+
+// Returns 0..7, the index of the colour range whose centre hue is nearest the
+// given hue in degrees (wrapping around 360°).
+inline int nearestColorRange(float hueDegrees) {
+    int best = 0;
+    float bestDist = 1e9f;
+    for (int i = 0; i < 8; ++i) {
+        float d = std::abs(hueDegrees - kColorRangeCenters[i]);
+        if (d > 180.0f)
+            d = 360.0f - d;
+        if (d < bestDist) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// True if the two floats are bitwise-identical (used by cache keys).
+inline bool bitEqual(double a, double b) {
+    return std::bit_cast<uint64_t>(a) == std::bit_cast<uint64_t>(b);
+}
+
+// --- UTF-8 <-> filesystem::path -------------------------------------------
+// On MSVC, std::filesystem::path(const std::string&) interprets the input in
+// the process ANSI codepage, which corrupts UTF-8 paths (e.g. Chinese
+// filenames). These helpers go through the UTF-16 path type explicitly.
+
+inline std::filesystem::path utf8ToPath(const std::string& utf8) {
+    return std::filesystem::path(std::u8string(
+        reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
+}
+
+inline std::string pathToUtf8(const std::filesystem::path& p) {
+    const std::u8string u8 = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
+
+} // namespace lrc

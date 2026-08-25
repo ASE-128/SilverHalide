@@ -1,0 +1,27 @@
+# Build directories
+build/
+out/
+cmake-build-*/
+
+# Packaged installer output
+dist/
+
+# vcpkg
+vcpkg_installed/
+
+# Qt / IDE
+*.user
+*.autosave
+.vscode/
+.idea/
+
+# Thumbnail cache and catalogs (user data)
+*.lrcat
+cache/
+
+# Third-party sources fetched at configure time
+_build_deps/
+
+# OS
+Thumbs.db
+.DS_Store

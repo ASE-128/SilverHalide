@@ -1,0 +1,13 @@
+{
+  "name": "lightroom-clone-cpp",
+  "version-string": "1.0.0",
+  "description": "C++20 + Qt6 Lightroom Classic clone: non-destructive develop pipeline, catalog, thumbnails.",
+  "dependencies": [
+    "qtbase",
+    "libraw",
+    "lcms",
+    "sqlite3",
+    "opencv4",
+    "catch2"
+  ]
+}

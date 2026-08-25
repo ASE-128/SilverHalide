@@ -1,0 +1,324 @@
+cmake_minimum_required(VERSION 3.25)
+project(lightroom_clone_cpp LANGUAGES C CXX VERSION 2.11.0)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# ---------------------------------------------------------------------------
+# MSVC runtime library & CRT path workaround
+# ---------------------------------------------------------------------------
+# The Ninja+MSVC generator relies on the LIB environment variable (set by a VS
+# developer command prompt) to find the CRT libraries.  When cmake is run from
+# a plain shell (Git Bash, pwsh, …) the LIB variable is absent and the linker
+# cannot resolve _fltused, memset, memcmp, operator new[], etc.
+#
+# We explicitly set the runtime library policy and, when LIB is missing, inject
+# the MSVC CRT and Windows SDK UCRT library directories so the linker can find
+# msvcrt.lib / msvcprt.lib / libucrt.lib.
+if(MSVC)
+  if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL" CACHE STRING
+      "MSVC runtime library (MultiThreadedDLL = /MD)" FORCE)
+  endif()
+
+  # When LIB is not set, the linker search path does not include the CRT
+  # directories.  We derive them from the detected compiler toolchain.
+  if(NOT DEFINED ENV{LIB})
+    # Derive MSVC root directory from the compiler path:
+    #   .../MSVC/14.xx.xxxxx/bin/Hostx64/x64/cl.exe
+    get_filename_component(_msvc_bin_dir  "${CMAKE_CXX_COMPILER}" DIRECTORY)  # .../bin/Hostx64/x64
+    get_filename_component(_msvc_bin_dir  "${_msvc_bin_dir}"     DIRECTORY)  # .../bin/Hostx64
+    get_filename_component(_msvc_host_dir "${_msvc_bin_dir}"     DIRECTORY)  # .../bin
+    get_filename_component(_msvc_root     "${_msvc_host_dir}"    DIRECTORY)  # .../14.xx.xxxxx
+    set(_msvc_lib_dir "${_msvc_root}/lib/x64")
+    if(EXISTS "${_msvc_lib_dir}")
+      link_directories("${_msvc_lib_dir}")
+      message(STATUS "MSVC CRT lib dir: ${_msvc_lib_dir}")
+    else()
+      message(WARNING "Could not find MSVC CRT library directory at ${_msvc_lib_dir}")
+    endif()
+
+    # Windows SDK UCRT library path — pick the newest version available.
+    file(GLOB _ucrt_dirs
+      "C:/Program Files (x86)/Windows Kits/10/Lib/*/ucrt/x64"
+      "C:/Program Files (x86)/Windows Kits/*/Lib/*/ucrt/x64")
+    if(_ucrt_dirs)
+      list(SORT _ucrt_dirs)
+      list(REVERSE _ucrt_dirs)
+      list(GET _ucrt_dirs 0 _ucrt_dir)
+      link_directories("${_ucrt_dir}")
+      message(STATUS "Windows UCRT lib dir: ${_ucrt_dir}")
+    else()
+      message(WARNING "Could not find Windows SDK UCRT library directory")
+    endif()
+  endif()
+
+  # /EHsc: enable C++ exception unwind semantics. Without it MSVC compiles
+  # try/catch but never catches (C4530) and a throw calls std::terminate,
+  # which silently breaks Parallel.cpp's exception guard. (C++ exceptions.)
+  add_compile_options(/EHsc)
+endif()
+
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+option(LRC_BUILD_TESTS "Build the Catch2 test suite" ON)
+option(LRC_ENABLE_QT "Build the Qt6 GUI" ON)
+option(LRC_USE_OPENCV "Enable OpenCV auxiliary helpers (heavy dependency)" OFF)
+
+# ---------------------------------------------------------------------------
+# External dependencies. Two acquisition strategies:
+#   1. vcpkg  -> set CMAKE_TOOLCHAIN_FILE to vcpkg's toolchain (see README).
+#   2. FetchContent from official hosts, with optional GitHub proxy mirror
+#      for restricted networks: -DLRC_PROXY=https://ghfast.top/
+# The order below prefers already-installed CMake packages, then falls back.
+# ---------------------------------------------------------------------------
+include(FetchContent)
+set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_deps")
+
+# GitHub proxy helper: prepends LRC_PROXY to github.com URLs.
+set(LRC_PROXY "" CACHE STRING "GitHub proxy prefix, e.g. https://ghfast.top/")
+function(lrc_proxied_urls OUT_VAR)
+  set(mirrored)
+  foreach(u IN LISTS ARGN)
+    if(LRC_PROXY AND u MATCHES "^https://github\\.com/")
+      string(REPLACE "https://github.com/" "${LRC_PROXY}https://github.com/" mu "${u}")
+      list(APPEND mirrored "${mu}")
+    endif()
+    list(APPEND mirrored "${u}")
+  endforeach()
+  set(${OUT_VAR} "${mirrored}" PARENT_SCOPE)
+endfunction()
+
+find_package(Threads REQUIRED)
+
+# --- libraw ---------------------------------------------------------------
+if(TARGET raw)
+  message(STATUS "libraw: provided by caller")
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/third_party/libraw/CMakeLists.txt")
+  message(STATUS "libraw: vendored under third_party/libraw")
+  add_subdirectory(third_party/libraw)
+else()
+  message(STATUS "libraw: FetchContent")
+  lrc_proxied_urls(LIBRAW_URLS
+    "https://www.libraw.org/data/LibRaw-0.22.0.tar.gz"
+    "https://github.com/LibRaw/LibRaw/archive/refs/tags/0.22.0.tar.gz")
+  FetchContent_Declare(libraw URL ${LIBRAW_URLS} DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  set(ENABLE_SHARED OFF CACHE BOOL "" FORCE)
+  set(ENABLE_STATIC ON CACHE BOOL "" FORCE)
+  set(ENABLE_RAWSPEED OFF CACHE BOOL "" FORCE)
+  set(ENABLE_DCRAW_PROCESS ON CACHE BOOL "" FORCE)
+  set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(ENABLE_OPENMP OFF CACHE BOOL "" FORCE)
+  set(ENABLE_JPEG OFF CACHE BOOL "" FORCE)
+  set(ENABLE_LCMS OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(libraw)
+  # libraw's build interface may not propagate its src/ include dir; make the
+  # header location explicit so `#include <libraw/libraw.h>` always works.
+  if(TARGET raw AND EXISTS "${libraw_SOURCE_DIR}/src")
+    target_include_directories(raw PUBLIC "${libraw_SOURCE_DIR}/src")
+  endif()
+endif()
+
+# --- lcms2 -----------------------------------------------------------------
+if(TARGET lcms2)
+  message(STATUS "lcms2: provided by caller")
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/third_party/lcms2/CMakeLists.txt")
+  message(STATUS "lcms2: vendored under third_party/lcms2")
+  add_subdirectory(third_party/lcms2)
+else()
+  message(STATUS "lcms2: FetchContent")
+  lrc_proxied_urls(LCMS_URLS
+    "https://github.com/mm2/Little-CMS/releases/download/lcms2.17/lcms2-2.17.zip"
+    "https://downloads.sourceforge.net/project/lcms/lcms/2.17/lcms2-2.17.zip")
+  FetchContent_Declare(lcms2 URL ${LCMS_URLS} DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  set(LCMS_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  set(LCMS_DISABLE_TESTS ON CACHE BOOL "" FORCE)
+  set(LCMS_DISABLE_ACCURATE_CACHE FALSE CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(lcms2)
+endif()
+
+# --- stb_image_write (vendored single-header, JPEG encode) -----------------
+if(NOT TARGET stb_image_write)
+  add_library(stb_image_write INTERFACE)
+  target_include_directories(stb_image_write INTERFACE
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/stb")
+endif()
+
+# --- sqlite3 (amalgamation) ------------------------------------------------
+if(TARGET sqlite3)
+  message(STATUS "sqlite3: provided by caller")
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/third_party/sqlite/sqlite3.c")
+  message(STATUS "sqlite3: vendored under third_party/sqlite")
+  add_library(sqlite3 STATIC third_party/sqlite/sqlite3.c)
+  target_include_directories(sqlite3 PUBLIC third_party/sqlite)
+else()
+  message(STATUS "sqlite3: FetchContent")
+  lrc_proxied_urls(SQLITE_URLS
+    "https://www.sqlite.org/2025/sqlite-amalgamation-3490000.zip")
+  FetchContent_Declare(sqlite3fc URL ${SQLITE_URLS} DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  FetchContent_GetProperties(sqlite3fc)
+  if(NOT sqlite3fc_POPULATED)
+    FetchContent_Populate(sqlite3fc)
+  endif()
+  add_library(sqlite3 STATIC "${sqlite3fc_SOURCE_DIR}/sqlite3.c")
+  target_include_directories(sqlite3 PUBLIC "${sqlite3fc_SOURCE_DIR}")
+endif()
+target_compile_definitions(sqlite3 PUBLIC SQLITE_THREADSAFE=1 SQLITE_USE_URI=1)
+
+# --- pugixml (vendored single-header-pair XML parser, XMP sidecars) ---------
+if(NOT TARGET pugixml)
+  add_library(pugixml STATIC third_party/pugixml/pugixml.cpp)
+  target_include_directories(pugixml PUBLIC third_party/pugixml)
+  if(MSVC)
+    target_compile_options(pugixml PRIVATE /W4 /wd4100 /wd4244 /wd4996)
+  endif()
+endif()
+
+# --- catch2 (tests only) ---------------------------------------------------
+if(LRC_BUILD_TESTS)
+  if(TARGET Catch2::Catch2)
+    message(STATUS "catch2: provided by caller")
+  elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/third_party/Catch2/CMakeLists.txt")
+    message(STATUS "catch2: vendored under third_party/Catch2")
+    set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(CATCH_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+    set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/Catch2)
+  else()
+    message(STATUS "catch2: FetchContent")
+    lrc_proxied_urls(CATCH_URLS
+      "https://github.com/catchorg/Catch2/archive/refs/tags/v3.7.1.tar.gz")
+    FetchContent_Declare(catch2fc URL ${CATCH_URLS} DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    set(CATCH_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(catch2fc)
+  endif()
+endif()
+
+# --- Qt6 (GUI only) --------------------------------------------------------
+if(LRC_ENABLE_QT)
+  # CMake 4.x with Ninja+MSVC sometimes rejects Qt6's version file due to
+  # CMAKE_SIZEOF_VOID_P not being set at find_package time.  Bypass the check.
+  set(QT_NO_PACKAGE_VERSION_CHECK TRUE)
+  find_package(Qt6 REQUIRED COMPONENTS Widgets)
+endif()
+
+# ---------------------------------------------------------------------------
+# Core libraries
+# ---------------------------------------------------------------------------
+set(LRC_ENGINE_SOURCES
+  src/engine/ImageBuffer.cpp
+  src/engine/Adjustments.cpp
+  src/engine/ColorManager.cpp
+  src/engine/ImageFormats.cpp
+  src/engine/RawDecoder.cpp
+  src/engine/Pipeline.cpp
+  src/engine/ExportEngine.cpp
+  src/engine/ImageIO.cpp
+  src/engine/HdrMerge.cpp
+  src/engine/DngConverter.cpp
+  src/engine/ZoneCurve.cpp
+  src/engine/Xmp.cpp
+  src/engine/XmpSidecar.cpp
+  src/engine/PanoramaStitcher.cpp)
+set(LRC_CATALOG_SOURCES
+  src/catalog/CatalogDatabase.cpp
+  src/catalog/ThumbnailCache.cpp
+  src/catalog/FolderMonitor.cpp
+  src/catalog/LibraryManager.cpp
+  src/catalog/StandardPreview.cpp)
+set(LRC_UTILS_SOURCES
+  src/utils/MathUtils.cpp
+  src/utils/Json.cpp
+  src/utils/ProfileIO.cpp
+  src/utils/XmpProfile.cpp
+  src/utils/Parallel.cpp)
+
+# engine: pure C++, Qt-free core
+add_library(lrc_engine STATIC ${LRC_ENGINE_SOURCES} ${LRC_UTILS_SOURCES})
+target_include_directories(lrc_engine PUBLIC src)
+target_link_libraries(lrc_engine PUBLIC raw lcms2 sqlite3 stb_image_write pugixml Threads::Threads)
+# libraw pulls in <windows.h>, whose min/max macros clobber std::min/std::max.
+target_compile_definitions(lrc_engine PUBLIC LIBRAW_NODLL=1 NOMINMAX)
+
+if(MSVC)
+  target_compile_options(lrc_engine PRIVATE /W4 /wd4100 /wd4244 /wd4996)
+  target_compile_options(lrc_engine PUBLIC /bigobj)
+else()
+  target_compile_options(lrc_engine PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif()
+
+# catalog: pure C++, depends on engine
+add_library(lrc_catalog STATIC ${LRC_CATALOG_SOURCES})
+target_include_directories(lrc_catalog PUBLIC src)
+target_link_libraries(lrc_catalog PUBLIC lrc_engine)
+
+# ---------------------------------------------------------------------------
+# Application (GUI)
+# ---------------------------------------------------------------------------
+if(LRC_ENABLE_QT)
+  set(CMAKE_AUTOMOC ON)
+  set(CMAKE_AUTORCC ON)
+  set(CMAKE_AUTOUIC ON)
+  set(LRC_UI_SOURCES
+    src/app/Application.cpp
+    src/ui/MainWindow.cpp
+    src/ui/ImportDialog.cpp
+    src/ui/ExportDialog.cpp
+    src/ui/HdrMergeDialog.cpp
+    src/ui/ImageViewport.cpp
+    src/ui/DevelopPanel.cpp
+    src/ui/HistogramWidget.cpp
+    src/ui/FilmstripWidget.cpp
+    src/ui/NavigatorWidget.cpp
+    src/ui/CurveEditor.cpp
+    src/ui/PanelSection.cpp
+    src/ui/ColorWheelWidget.cpp
+    src/ui/ImportWorker.cpp
+    src/ui/PreviewWorker.cpp
+    src/ui/EditHistoryDialog.cpp
+    src/ui/CollectionsDialog.cpp
+    src/ui/SmartCollectionsDialog.cpp
+    src/ui/PanoramaDialog.cpp
+    src/ui/PanoramaWorker.cpp)
+  # WIN32 => GUI-subsystem executable: no console window on launch. The
+  # Qt6::EntryPointPrivate (qtmain) target supplies the WinMain shim that
+  # forwards to the app's own main().
+  add_executable(lrc_lightroom WIN32 src/main.cpp ${LRC_UI_SOURCES}
+                 resources/resources.qrc)
+  if(WIN32)
+    # Embed the application icon and version info into the .exe via a resource
+    # script. The relative path in resources/app.rc is resolved against the
+    # script's own directory; a copy is also staged into the build dir so the
+    # icon is found whichever way rc.exe looks it up.
+    # /utf-8 makes rc.exe read the .rc as UTF-8 so the (c) sign in the
+    # LegalCopyright string compiles correctly (default codepage is GBK).
+    set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} /utf-8")
+    configure_file(resources/icons/app.ico
+                   ${CMAKE_CURRENT_BINARY_DIR}/icons/app.ico COPYONLY)
+    target_sources(lrc_lightroom PRIVATE resources/app.rc)
+  endif()
+  target_link_libraries(lrc_lightroom PRIVATE
+    lrc_catalog lrc_engine Qt6::Widgets Qt6::EntryPointPrivate)
+  target_include_directories(lrc_lightroom PRIVATE src)
+  if(MSVC)
+    target_compile_options(lrc_lightroom PRIVATE /W3)
+    target_compile_definitions(lrc_lightroom PRIVATE _CRT_SECURE_NO_WARNINGS)
+  endif()
+  # User-facing executable name. The CMake target stays `lrc_lightroom`
+  # internally, but the produced binary is SilverHalide.exe.
+  set_target_properties(lrc_lightroom PROPERTIES OUTPUT_NAME "SilverHalide")
+endif()
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+if(LRC_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
