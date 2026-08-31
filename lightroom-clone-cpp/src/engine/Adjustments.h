@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace lrc {
@@ -66,6 +67,7 @@ enum class MaskType : uint8_t {
     RadialGradient,
     Brush,
     ColorRange,
+    AiMask,                // PHASE_13: AI-generated subject / sky / background
 };
 
 // Linear gradient mask. The masked region is the infinite strip between the two
@@ -120,6 +122,32 @@ struct ColorRangeMask {
     bool operator==(const ColorRangeMask&) const = default;
 };
 
+// --- AI Mask parameters (PHASE_13) -----------------------------------------
+// Attached to a Mask whose `type == AiMask`.  The `target` selects which
+// segmentation model to run; the resulting weight field is refined by the
+// threshold/feather/invert knobs.  `cachedWeightVersion` increments whenever
+// Pipeline should regenerate the weight from scratch (e.g. user switched
+// target, or the underlying model updated on disk).
+
+enum class AiMaskTarget : uint8_t {
+    Subject = 0,
+    Sky = 1,
+    Background = 2,
+};
+
+struct AiMaskParams {
+    AiMaskTarget target = AiMaskTarget::Subject;
+    float threshold = 0.5f;       // 0..1 soft knee at the mask boundary
+    float feather = 0.05f;        // 0..1 blur radius relative to image diag
+    bool invert = false;
+    int modelInputSize = 1024;    // 320 / 512 / 1024 depending on the model
+    int cachedWeightVersion = 0;  // bump to invalidate any rasterised weight
+    // Optional model override — defaults come from AiMaskGenerator.
+    std::string modelIdOverride;
+
+    bool operator==(const AiMaskParams&) const = default;
+};
+
 // A local-adjustment mask: weight = maskWeight * opacity, optionally inverted.
 // The local adjustments mirror a subset of the global stack.
 struct Mask {
@@ -128,6 +156,7 @@ struct Mask {
     RadialGradientMask radial;
     std::vector<BrushDab> brush;
     ColorRangeMask color;        // only meaningful when type == ColorRange
+    AiMaskParams ai;             // only meaningful when type == AiMask (PHASE_13)
     bool invert = false;
     double opacity = 1.0; // 0..1
 
@@ -183,11 +212,13 @@ struct Mask {
     size_t geometryHash() const;
 
     bool hasEffect() const {
+        if (opacity <= 0.0) return false;   // fully transparent: never contributes
         return exposure != 0.0 || contrast != 0.0 || highlights != 0.0 ||
                shadows != 0.0 || whites != 0.0 || blacks != 0.0 ||
                clarity != 0.0 || dehaze != 0.0 || saturation != 0.0 ||
                temperature != 0.0 || tint != 0.0 ||
-               useColorRange || useLuminance;
+               useColorRange || useLuminance ||
+               (type == MaskType::AiMask);  // AI mask always contributes weight
     }
 };
 
@@ -216,6 +247,32 @@ struct SpotRemoval {
 
     bool operator==(const SpotRemoval&) const = default;
 };
+
+// --- AI Denoise (PHASE_12) ------------------------------------------------
+// Non-destructive AI denoise parameters.  The actual denoise buffer is NOT
+// stored here — only the "what / how strong" metadata.  Pipeline computes
+// the denoised pixels on demand (cached by `imageId + aiDenoise.version`)
+// and the strength slider mixes between the original and the cached result.
+
+enum class AiDenoiseMode : uint8_t {
+    LuminanceAndColor = 0,
+    LuminanceOnly = 1,
+};
+
+struct AiDenoise {
+    bool enabled = false;
+    float strength = 100.0f;       // 0..100, user-facing percentage
+    AiDenoiseMode mode = AiDenoiseMode::LuminanceAndColor;
+    int modelVersion = 0;         // bumped automatically on update
+
+    bool operator==(const AiDenoise& o) const = default;
+    bool hasEffect() const { return enabled && strength > 0.0f; }
+};
+
+// --- AI Mask parameters (PHASE_13) -----------------------------------------
+// NOTE: the real definition lives above `struct Mask` — kept here as a
+// navigational anchor only so the Doxygen group for AI features in this file
+// reads consistently top-to-bottom.
 
 // Point colour target: sample a colour from the image (reference linear RGB),
 // then apply hue/saturation/luminance adjustments to pixels within `range` of
@@ -310,6 +367,9 @@ struct Adjustments {
     // over earlier ones). Empty means no spot correction (the pipeline takes
     // the fast path and stays bit-exact).
     std::vector<SpotRemoval> spotRemovals;
+
+    // --- AI Denoise (PHASE_12) ------------------------------------------------
+    AiDenoise aiDenoise;
 
     bool operator==(const Adjustments& other) const;
     bool operator!=(const Adjustments& other) const { return !(*this == other); }

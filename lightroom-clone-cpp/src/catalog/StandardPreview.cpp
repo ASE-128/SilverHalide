@@ -17,13 +17,16 @@ namespace {
 
 // Blob layout (little-endian header, native-order float payload):
 //   [ 0.. 4)  "SHSP"  magic
-//   [ 4.. 8)  uint32  version (== 1)
-//   [ 8..12)  uint32  width
-//   [12..16)  uint32  height
+//   [ 4.. 8)  uint32  version (== 1 or 2)
+//   [ 8..12)  uint32  width    (preview width)
+//   [12..16)  uint32  height   (preview height)
 //   [16..20)  uint32  channels (== 3)
 //   [20..24)  uint32  format   (== 2, PixelFormat::F32)
-//   [24.. )   width*height*3 little-endian float32 samples
-constexpr size_t kHeaderBytes = 24;
+//   [24..28)  uint32  nativeWidth    (v2 only; absent in v1)
+//   [28..32)  uint32  nativeHeight   (v2 only; absent in v1)
+//   [header..)  width*height*3 little-endian float32 samples
+constexpr size_t kHeaderV1Bytes = 24;
+constexpr size_t kHeaderV2Bytes = 32;
 
 void appendU32(std::vector<uint8_t>& out, uint32_t v) {
     out.push_back(static_cast<uint8_t>(v & 0xFFu));
@@ -45,6 +48,10 @@ bool readU32(const std::vector<uint8_t>& blob, size_t off, uint32_t& out) {
 } // namespace
 
 std::shared_ptr<ImageBuffer> buildStandardPreview(const std::string& filePath) {
+    return buildStandardPreview2(filePath).buf;
+}
+
+BuiltStandardPreview buildStandardPreview2(const std::string& filePath) {
     // UTF-8 path -> filesystem::path through the UTF-16 layer, so Chinese
     // filenames survive on MSVC (see utils/MathUtils.h).
     const std::filesystem::path path = lrc::utf8ToPath(filePath);
@@ -65,7 +72,14 @@ std::shared_ptr<ImageBuffer> buildStandardPreview(const std::string& filePath) {
     params.maxDim = kStandardPreviewMaxDim * 2;
     auto decoded = decoder.decode(path, params);
     if (!decoded || !decoded->linear || decoded->linear->empty())
-        return nullptr;
+        return {};
+
+    // Record the native full-resolution dimensions before the downscale below
+    // throws them away. The decoder fills nativeWidth/Height from the RAW
+    // metadata (or the source image size for non-RAW files); either way this
+    // is what Pipeline::previewSigmaScale needs to scale spatial kernels.
+    const int nativeW = decoded->meta.nativeWidth;
+    const int nativeH = decoded->meta.nativeHeight;
 
     // Work in F32 linear ProPhoto. The decode buffer is owned by this call, so
     // it can be edited in place (the pipeline's in-place apply is safe).
@@ -78,7 +92,7 @@ std::shared_ptr<ImageBuffer> buildStandardPreview(const std::string& filePath) {
     const int w = f32->width();
     const int h = f32->height();
     if (w <= 0 || h <= 0)
-        return nullptr;
+        return {};
     float* data = reinterpret_cast<float*>(f32->data().data());
     const size_t pixelCount = static_cast<size_t>(w) * h;
 
@@ -97,10 +111,36 @@ std::shared_ptr<ImageBuffer> buildStandardPreview(const std::string& filePath) {
         const int nh = std::max(1, static_cast<int>(h * scale));
         f32 = f32->resize(nw, nh);
     }
-    return f32;
+    return {f32, nativeW, nativeH};
+}
+
+static void encodeHeaderV1(std::vector<uint8_t>& out,
+                           uint32_t w, uint32_t h) {
+    const char magic[4] = {'S', 'H', 'S', 'P'};
+    out.insert(out.end(), magic, magic + 4);
+    appendU32(out, 1u); // version
+    appendU32(out, w);
+    appendU32(out, h);
+    appendU32(out, 3u); // channels
+    appendU32(out, 2u); // PixelFormat::F32
+}
+
+static void encodeHeaderV2(std::vector<uint8_t>& out,
+                           uint32_t w, uint32_t h,
+                           uint32_t nativeW, uint32_t nativeH) {
+    const char magic[4] = {'S', 'H', 'S', 'P'};
+    out.insert(out.end(), magic, magic + 4);
+    appendU32(out, 2u); // version
+    appendU32(out, w);
+    appendU32(out, h);
+    appendU32(out, 3u); // channels
+    appendU32(out, 2u); // PixelFormat::F32
+    appendU32(out, nativeW);
+    appendU32(out, nativeH);
 }
 
 std::vector<uint8_t> encodeStandardPreview(const ImageBuffer& buf) {
+    // Legacy v1 overload (no native dimensions in the header).
     std::vector<uint8_t> out;
     if (buf.empty() || buf.format() != PixelFormat::F32 ||
         buf.channels() != 3)
@@ -112,49 +152,78 @@ std::vector<uint8_t> encodeStandardPreview(const ImageBuffer& buf) {
 
     const size_t dataBytes =
         static_cast<size_t>(w) * h * 3 * sizeof(float);
-    out.reserve(kHeaderBytes + dataBytes);
-
-    const char magic[4] = {'S', 'H', 'S', 'P'};
-    out.insert(out.end(), magic, magic + 4);
-    appendU32(out, 1u); // version
-    appendU32(out, w);
-    appendU32(out, h);
-    appendU32(out, 3u); // channels
-    appendU32(out, 2u); // PixelFormat::F32
+    out.reserve(kHeaderV1Bytes + dataBytes);
+    encodeHeaderV1(out, w, h);
     const uint8_t* src = buf.data().data();
     out.insert(out.end(), src, src + dataBytes);
     return out;
 }
 
-std::shared_ptr<ImageBuffer> decodeStandardPreview(
+std::vector<uint8_t> encodeStandardPreview(const ImageBuffer& buf,
+                                           int nativeWidth,
+                                           int nativeHeight) {
+    // Preferred v2 overload: carries native dimensions for correct spatial-
+    // kernel sigma scaling on the Develop panel.
+    std::vector<uint8_t> out;
+    if (buf.empty() || buf.format() != PixelFormat::F32 ||
+        buf.channels() != 3)
+        return out;
+    const uint32_t w = static_cast<uint32_t>(buf.width());
+    const uint32_t h = static_cast<uint32_t>(buf.height());
+    if (w == 0 || h == 0)
+        return out;
+
+    const size_t dataBytes =
+        static_cast<size_t>(w) * h * 3 * sizeof(float);
+    out.reserve(kHeaderV2Bytes + dataBytes);
+    encodeHeaderV2(out, w, h,
+                   static_cast<uint32_t>(nativeWidth > 0 ? nativeWidth : 0),
+                   static_cast<uint32_t>(nativeHeight > 0 ? nativeHeight : 0));
+    const uint8_t* src = buf.data().data();
+    out.insert(out.end(), src, src + dataBytes);
+    return out;
+}
+
+DecodedStandardPreview decodeStandardPreview(
     const std::vector<uint8_t>& blob) {
-    if (blob.size() < kHeaderBytes)
-        return nullptr;
+    if (blob.size() < kHeaderV1Bytes)
+        return {};
     if (blob[0] != 'S' || blob[1] != 'H' || blob[2] != 'S' || blob[3] != 'P')
-        return nullptr;
+        return {};
 
     uint32_t version = 0, w = 0, h = 0, channels = 0, format = 0;
     if (!readU32(blob, 4, version) || !readU32(blob, 8, w) ||
         !readU32(blob, 12, h) || !readU32(blob, 16, channels) ||
         !readU32(blob, 20, format))
-        return nullptr;
-    if (version != 1 || w == 0 || h == 0 || channels != 3 || format != 2)
-        return nullptr;
+        return {};
+    if (version == 0 || version > 2 || w == 0 || h == 0 ||
+        channels != 3 || format != 2)
+        return {};
     // A standard preview never exceeds kStandardPreviewMaxDim; reject absurd
     // dimensions from a corrupted blob before they reach the allocator.
     if (w > 8192u || h > 8192u)
-        return nullptr;
+        return {};
+
+    uint32_t nativeW = 0, nativeH = 0;
+    size_t headerBytes = kHeaderV1Bytes;
+    if (version == 2) {
+        headerBytes = kHeaderV2Bytes;
+        if (blob.size() < kHeaderV2Bytes)
+            return {};
+        if (!readU32(blob, 24, nativeW) || !readU32(blob, 28, nativeH))
+            return {};
+    }
 
     const size_t expected =
-        kHeaderBytes + static_cast<size_t>(w) * h * 3 * sizeof(float);
+        headerBytes + static_cast<size_t>(w) * h * 3 * sizeof(float);
     if (blob.size() != expected)
-        return nullptr;
+        return {};
 
     auto out = ImageBuffer::create(static_cast<int>(w), static_cast<int>(h),
                                    PixelFormat::F32);
-    std::memcpy(out->data().data(), blob.data() + kHeaderBytes,
-                blob.size() - kHeaderBytes);
-    return out;
+    std::memcpy(out->data().data(), blob.data() + headerBytes,
+                blob.size() - headerBytes);
+    return {out, static_cast<int>(nativeW), static_cast<int>(nativeH)};
 }
 
 } // namespace lrc

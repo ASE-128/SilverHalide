@@ -71,6 +71,7 @@
 #include "ui/ImageViewport.h"
 #include "ui/ImportDialog.h"
 #include "ui/ImportWorker.h"
+#include "ui/ModelManagementWidget.h"
 #include "ui/NavigatorWidget.h"
 #include "ui/PanoramaDialog.h"
 #include "ui/PreviewWorker.h"
@@ -81,13 +82,6 @@
 
 namespace {
 
-// M2-1: coarse preview frames arrive at up to ~33Hz; histogram + status-bar
-// refresh coalesce to this interval (ms). Viewport updates stay immediate.
-constexpr int kHistogramThrottleMs = 150;
-// M2-4: adjustment DB writes (JSON serialize + 2 sqlite statements) leave the
-// slider hot path and coalesce on this debounce (ms). The latest value always
-// wins and is flushed on timeout / image switch / window close.
-constexpr int kAdjustmentSaveDebounceMs = 500;
 // M3-3: filmstrip lazy-thumbnail requests not yet dispatched. When the queue
 // hits this bound the oldest pending request is dropped, so a huge filmstrip
 // cannot build an unbounded decode backlog.
@@ -174,23 +168,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     folderTimer_->setInterval(2000);
     connect(folderTimer_, &QTimer::timeout, this, &MainWindow::watchFolderPoll);
 
-    // M2-1: histogram/status-bar updates coalesce to kHistogramThrottleMs. The
-    // one-shot timer guarantees the last coarse frame of a throttle window
-    // still lands. Children of `this`, so they are destroyed with the window.
+    // M2-1: histogram/status-bar updates coalesce to
+    // app::throttle::kHistogramThrottleMs. The one-shot timer guarantees the
+    // last coarse frame of a throttle window still lands. Children of `this`,
+    // so they are destroyed with the window.
     histogramThrottle_ = new QTimer(this);
     histogramThrottle_->setSingleShot(true);
-    histogramThrottle_->setInterval(kHistogramThrottleMs);
+    histogramThrottle_->setInterval(lrc::app::throttle::kHistogramThrottleMs);
     connect(histogramThrottle_, &QTimer::timeout, this,
             &MainWindow::flushHistogramThrottle);
     histogramClock_.start();
     lastHistogramMs_ = -10000;  // force the first update through immediately
 
-    // M2-4: adjustment persistence leaves the hot path and coalesces on a
-    // kAdjustmentSaveDebounceMs debounce; the timer always writes the latest
-    // value (flushPendingSave is idempotent).
+    // M2-4: adjustment persistence leaves the hot path and coalesces on
+    // app::throttle::kAdjustmentSaveDebounceMs; the timer always writes the
+    // latest value (flushPendingSave is idempotent).
     saveDebounceTimer_ = new QTimer(this);
     saveDebounceTimer_->setSingleShot(true);
-    saveDebounceTimer_->setInterval(kAdjustmentSaveDebounceMs);
+    saveDebounceTimer_->setInterval(lrc::app::throttle::kAdjustmentSaveDebounceMs);
     connect(saveDebounceTimer_, &QTimer::timeout, this,
             &MainWindow::onSaveDebounceTimeout);
 
@@ -199,7 +194,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // A short idle debounce turns the trailing emissions into one undo entry.
     spotCommitTimer_ = new QTimer(this);
     spotCommitTimer_->setSingleShot(true);
-    spotCommitTimer_->setInterval(250);
+    spotCommitTimer_->setInterval(lrc::app::throttle::kSpotCommitDebounceMs);
     connect(spotCommitTimer_, &QTimer::timeout, this,
             &MainWindow::onSpotCommitTimeout);
 
@@ -526,6 +521,12 @@ void MainWindow::buildMenus() {
     viewMenu->addAction(tr("缩小"), viewport_, &ImageViewport::zoomOut,
                         QKeySequence::ZoomOut);
 
+    QMenu* settingsMenu = menuBar()->addMenu(tr("设置"));
+    settingsMenu->addAction(tr("模型管理…"), this, [this]() {
+        ModelManagementWidget dlg(this);
+        dlg.exec();
+    });
+
     QMenu* helpMenu = menuBar()->addMenu(tr("帮助"));
     helpMenu->addAction(tr("关于"), this, [this]() {
         QMessageBox::about(
@@ -699,7 +700,7 @@ void MainWindow::buildToolbar() {
     toolBar->addWidget(searchEdit_);
     searchDebounceTimer_ = new QTimer(this);
     searchDebounceTimer_->setSingleShot(true);
-    searchDebounceTimer_->setInterval(300);
+    searchDebounceTimer_->setInterval(lrc::app::throttle::kSearchDebounceMs);
     connect(searchDebounceTimer_, &QTimer::timeout, this,
             &MainWindow::applySearchFilter);
     connect(searchEdit_, &QLineEdit::returnPressed, this,
@@ -921,7 +922,7 @@ void MainWindow::startWorkers() {
 
     importThread_ = new QThread(this);
     importWorker_ = new ImportWorker(*catalog_, *thumbnailCache_, decoder_,
-                                     *pipeline_);
+                                     *pipeline_, colorManager_);
     importWorker_->moveToThread(importThread_);
     connect(importThread_, &QThread::finished, importWorker_,
             &QObject::deleteLater);
@@ -1164,7 +1165,8 @@ void MainWindow::exportImage() {
         previewWorker_, "exportImage", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(QString, currentFilePath_),
         Q_ARG(lrc::Adjustments, exportAdj), Q_ARG(QString, out),
-        Q_ARG(int, dlg.formatIndex()), Q_ARG(int, dlg.jpegQuality()));
+        Q_ARG(int, dlg.formatIndex()), Q_ARG(int, dlg.jpegQuality()),
+        Q_ARG(int, dlg.maxDim()));
 }
 
 void MainWindow::convertToDng() {
@@ -1986,7 +1988,8 @@ void MainWindow::requestHistogramUpdate(const QImage& image) {
     // throttle window still gets its histogram/status update.
     pendingHistogramImage_ = image;
     if (histogramClock_.isValid() &&
-        histogramClock_.elapsed() - lastHistogramMs_ < kHistogramThrottleMs) {
+        histogramClock_.elapsed() - lastHistogramMs_ <
+            lrc::app::throttle::kHistogramThrottleMs) {
         histogramPending_ = true;
         if (histogramThrottle_)
             histogramThrottle_->start();

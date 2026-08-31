@@ -34,7 +34,8 @@ bool Adjustments::operator==(const Adjustments& other) const {
            curve == other.curve && hsl == other.hsl &&
            splitTone == other.splitTone && masks == other.masks &&
            colorTargets == other.colorTargets &&
-           spotRemovals == other.spotRemovals;
+           spotRemovals == other.spotRemovals &&
+           aiDenoise == other.aiDenoise;
 }
 
 void Adjustments::reset() { *this = Adjustments::defaults(); }
@@ -81,7 +82,8 @@ bool Mask::operator==(const Mask& other) const {
            luminanceRef == other.luminanceRef &&
            luminanceRange == other.luminanceRange &&
            luminanceSmoothness == other.luminanceSmoothness &&
-           maskUnion == other.maskUnion;
+           maskUnion == other.maskUnion &&
+           ai == other.ai;
 }
 
 size_t Mask::hash() const {
@@ -138,6 +140,17 @@ size_t Mask::hash() const {
     mixFloat(h, luminanceRange);
     mixFloat(h, luminanceSmoothness);
     h = hashCombine(h, static_cast<size_t>(maskUnion));
+    // PHASE_13: AI mask target / threshold / feather / invert / model selection
+    // all shape the weight raster (and thus the final image value via the
+    // local-adjustment blend — include them in the full Mask::hash).
+    h = hashCombine(h, static_cast<size_t>(ai.target));
+    mixFloat(h, ai.threshold);
+    mixFloat(h, ai.feather);
+    h = hashCombine(h, static_cast<size_t>(ai.invert));
+    h = hashCombine(h, static_cast<size_t>(ai.modelInputSize));
+    h = hashCombine(h, static_cast<size_t>(ai.cachedWeightVersion));
+    h = hashCombine(h, ai.modelIdOverride.size());
+    for (char c : ai.modelIdOverride) h = hashCombine(h, static_cast<size_t>(c));
     return h;
 }
 
@@ -190,6 +203,17 @@ size_t Mask::geometryHash() const {
     mixFloat(h, luminanceRange);
     mixFloat(h, luminanceSmoothness);
     h = hashCombine(h, static_cast<size_t>(maskUnion));
+    // PHASE_13: AI mask geometry.  target/threshold/feather/invert and the
+    // cachedWeightVersion all contribute directly to the per-pixel weight
+    // raster that is keyed by geometryHash() in Pipeline::brushWeightField.
+    h = hashCombine(h, static_cast<size_t>(ai.target));
+    mixFloat(h, ai.threshold);
+    mixFloat(h, ai.feather);
+    h = hashCombine(h, static_cast<size_t>(ai.invert));
+    h = hashCombine(h, static_cast<size_t>(ai.modelInputSize));
+    h = hashCombine(h, static_cast<size_t>(ai.cachedWeightVersion));
+    h = hashCombine(h, ai.modelIdOverride.size());
+    for (char c : ai.modelIdOverride) h = hashCombine(h, static_cast<size_t>(c));
     return h;
 }
 
@@ -279,6 +303,12 @@ size_t Adjustments::hash() const {
         mixFloat(h, s.radius);
         h = hashCombine(h, static_cast<size_t>(s.visible));
     }
+    // PHASE_12: AI denoise parameters — global participation in the overall
+    // cache key (see hashStageE for the stage-specific participation).
+    h = hashCombine(h, static_cast<size_t>(aiDenoise.enabled));
+    mixFloat(h, aiDenoise.strength);
+    h = hashCombine(h, static_cast<size_t>(aiDenoise.mode));
+    h = hashCombine(h, static_cast<size_t>(aiDenoise.modelVersion));
     return h;
 }
 
@@ -370,6 +400,13 @@ size_t Adjustments::hashStageE() const {
         mixFloat(h, s.radius);
         h = hashCombine(h, static_cast<size_t>(s.visible));
     }
+    // PHASE_12: AI denoise is a spatial-stage operation (it runs after the
+    // manual NR inside the spatial kernel block), so any change in its
+    // parameters should trigger a stage-E restart in the incremental cache.
+    h = hashCombine(h, static_cast<size_t>(aiDenoise.enabled));
+    mixFloat(h, aiDenoise.strength);
+    h = hashCombine(h, static_cast<size_t>(aiDenoise.mode));
+    h = hashCombine(h, static_cast<size_t>(aiDenoise.modelVersion));
     return h;
 }
 

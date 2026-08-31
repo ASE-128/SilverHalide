@@ -22,6 +22,10 @@ cache/
 # Third-party sources fetched at configure time
 _build_deps/
 
+# AI models (downloaded at runtime, never in VCS)
+models/
+resources/models/*.onnx
+
 # OS
 Thumbs.db
 .DS_Store

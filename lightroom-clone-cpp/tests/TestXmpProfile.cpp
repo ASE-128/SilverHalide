@@ -109,7 +109,13 @@ TEST_CASE("XmpProfile: export -> import round-trips every group", "[xmpprofile]"
     REQUIRE(r.colorNoiseReduction == Approx(35.0).margin(1e-6));
     REQUIRE(r.colorNoiseReductionSmoothness == Approx(70.0).margin(1e-6));
 
+    // Vignette (amount + shape + style).
     REQUIRE(r.vignette == Approx(-20.0).margin(1e-6));
+    REQUIRE(r.vignetteMidpoint == Approx(50.0).margin(1e-6));
+    REQUIRE(r.vignetteRoundness == Approx(0.0).margin(1e-6));
+    REQUIRE(r.vignetteFeather == Approx(50.0).margin(1e-6));
+    REQUIRE(r.vignetteHighlights == Approx(0.0).margin(1e-6));
+    REQUIRE(r.vignetteStyle == 2);   // Highlight Priority default
 
     REQUIRE(r.grain == Approx(15.0).margin(1e-6));
     REQUIRE(r.grainSize == Approx(40.0).margin(1e-6));
@@ -432,4 +438,200 @@ TEST_CASE("XmpProfile: empty spot list emits no SpotCorrections element",
         {"ToneCurveName2012", "Linear"}};
     const std::string doc = XmpDocument::serializeFull(attrs, "", nullptr, &xml);
     REQUIRE(doc.find("SpotCorrections") == std::string::npos);
+}
+
+TEST_CASE("XmpProfile: PHASE_3 vignette style round-trips (Paint/Color/Highlight)",
+          "[xmpprofile][phase3]") {
+    for (int style = 0; style < 3; ++style) {
+        Adjustments a;
+        a.vignette = -20.0;
+        a.vignetteMidpoint = 60.0;
+        a.vignetteRoundness = 20.0;
+        a.vignetteFeather = 70.0;
+        a.vignetteHighlights = 10.0;
+        a.vignetteStyle = style;
+
+        const auto attrs = XmpProfile::toCrsAttrs(a);
+        // Always-on fields exist:
+        REQUIRE(attrs.count("PostCropVignetteAmount") == 1);
+        REQUIRE(attrs.count("PostCropVignetteMidpoint") == 1);
+        // Style 2 (Highlight Priority) is the default — it is omitted so
+        // fully-default Adjustments keep a 1-key export. Styles 0 and 1 are
+        // written explicitly because they diverge from the default.
+        if (style == 0) {
+            REQUIRE(attrs.count("PostCropVignetteStyle") == 1);
+            REQUIRE(attrs.at("PostCropVignetteStyle") == "Paint Overlay");
+        }
+        if (style == 1) {
+            REQUIRE(attrs.count("PostCropVignetteStyle") == 1);
+            REQUIRE(attrs.at("PostCropVignetteStyle") == "Color Priority");
+        }
+        if (style == 2) {
+            REQUIRE(attrs.count("PostCropVignetteStyle") == 0);
+        }
+
+        // Unknown style string (from a future LR) maps back to Highlight Priority (2).
+        {
+            auto copy = attrs;
+            copy["PostCropVignetteStyle"] = "DeepSpace 9000";
+            const Adjustments r = XmpProfile::fromCrsAttrs(copy);
+            REQUIRE(r.vignetteStyle == 2);
+        }
+
+        // Real round-trip: all shape + style values preserved.
+        const Adjustments r = XmpProfile::fromCrsAttrs(attrs);
+        REQUIRE(r.vignetteStyle == style);
+        REQUIRE(r.vignette == Approx(-20.0).margin(1e-6));
+        REQUIRE(r.vignetteMidpoint == Approx(60.0).margin(1e-6));
+        REQUIRE(r.vignetteRoundness == Approx(20.0).margin(1e-6));
+        REQUIRE(r.vignetteFeather == Approx(70.0).margin(1e-6));
+        REQUIRE(r.vignetteHighlights == Approx(10.0).margin(1e-6));
+    }
+}
+
+TEST_CASE("XmpProfile: PHASE_4 standalone ColorRange mask round-trips",
+          "[xmpprofile][phase4]") {
+    Adjustments a;
+    Mask crm;
+    crm.type = MaskType::ColorRange;
+    crm.color.hasReference = true;
+    crm.color.refR = 0.75f;
+    crm.color.refG = 0.25f;
+    crm.color.refB = 0.10f;
+    crm.color.hueTolerance = 60.0;
+    crm.color.satTolerance = 0.6;
+    crm.color.lumaTolerance = 0.4;
+    crm.color.softness = 0.7;
+    a.masks.push_back(crm);
+
+    const auto attrs = XmpProfile::toCrsAttrs(a);
+    REQUIRE(attrs.count("SH_ColorRangeMask_HasRef") == 1);
+    REQUIRE(attrs.at("SH_ColorRangeMask_HasRef") == "true");
+    // Floats: check values round-trip numerically rather than string-match,
+    // because to_chars(double(static_cast<float>(x))) may preserve tail bits
+    // of the IEEE-754 approximation (0.1f -> "0.10000000149...").
+    auto asDouble = [](const std::string& s) { return std::strtod(s.c_str(), nullptr); };
+    REQUIRE(asDouble(attrs.at("SH_ColorRangeMask_RefR")) == Approx(0.75).margin(1e-4));
+    REQUIRE(asDouble(attrs.at("SH_ColorRangeMask_RefG")) == Approx(0.25).margin(1e-4));
+    REQUIRE(asDouble(attrs.at("SH_ColorRangeMask_RefB")) == Approx(0.10).margin(1e-4));
+    REQUIRE(asDouble(attrs.at("SH_ColorRangeMask_HueTol")) == Approx(60.0).margin(1e-4));
+    REQUIRE(asDouble(attrs.at("SH_ColorRangeMask_SatTol")) == Approx(0.6).margin(1e-4));
+    REQUIRE(asDouble(attrs.at("SH_ColorRangeMask_LumaTol")) == Approx(0.4).margin(1e-4));
+    REQUIRE(asDouble(attrs.at("SH_ColorRangeMask_Softness")) == Approx(0.7).margin(1e-4));
+
+    const Adjustments back = XmpProfile::fromCrsAttrs(attrs);
+    REQUIRE(back.masks.size() >= 1);
+    bool found = false;
+    for (const Mask& m : back.masks) {
+        if (m.type != MaskType::ColorRange) continue;
+        found = true;
+        REQUIRE(m.color.hasReference);
+        REQUIRE(m.color.refR == Approx(0.75).margin(1e-6));
+        REQUIRE(m.color.refG == Approx(0.25).margin(1e-6));
+        REQUIRE(m.color.refB == Approx(0.10).margin(1e-6));
+        REQUIRE(m.color.hueTolerance == Approx(60.0).margin(1e-6));
+        REQUIRE(m.color.satTolerance == Approx(0.6).margin(1e-6));
+        REQUIRE(m.color.lumaTolerance == Approx(0.4).margin(1e-6));
+        REQUIRE(m.color.softness == Approx(0.7).margin(1e-6));
+    }
+    REQUIRE(found);
+}
+
+TEST_CASE("XmpProfile: PHASE_4 geometric mask sub-range modifiers round-trip",
+          "[xmpprofile][phase4]") {
+    Adjustments a;
+
+    // Mask #0: linear gradient with both colour and luminance sub-masks,
+    // Intersect mode (default).
+    Mask g0;
+    g0.type = MaskType::LinearGradient;
+    g0.useColorRange = true;
+    g0.colorRefR = 0.2f; g0.colorRefG = 0.6f; g0.colorRefB = 0.9f;
+    g0.colorRange = 40.0f;
+    g0.colorSmoothness = 55.0f;
+    g0.useLuminance = true;
+    g0.luminanceRef = 70.0f;
+    g0.luminanceRange = 25.0f;
+    g0.luminanceSmoothness = 60.0f;
+    g0.maskUnion = false;
+    a.masks.push_back(g0);
+
+    // Mask #1: radial gradient with colour-only sub-mask, Union mode.
+    Mask g1;
+    g1.type = MaskType::RadialGradient;
+    g1.useColorRange = true;
+    g1.colorRefR = 0.95f; g1.colorRefG = 0.80f; g1.colorRefB = 0.10f;
+    g1.colorRange = 80.0f;
+    g1.colorSmoothness = 40.0f;
+    g1.useLuminance = false;
+    g1.maskUnion = true;
+    a.masks.push_back(g1);
+
+    const auto attrs = XmpProfile::toCrsAttrs(a);
+    REQUIRE(attrs.count("SH_Mask0_UseColor") == 1);
+    REQUIRE(attrs.at("SH_Mask0_UseColor") == "true");
+    REQUIRE(attrs.at("SH_Mask0_UseLuma") == "true");
+    REQUIRE(attrs.at("SH_Mask0_Combine") == "Intersect");
+    REQUIRE(attrs.at("SH_Mask0_ColorRange") == "40");
+    REQUIRE(attrs.at("SH_Mask0_LumaRange") == "25");
+    REQUIRE(attrs.count("SH_Mask1_UseColor") == 1);
+    REQUIRE(attrs.count("SH_Mask1_UseLuma") == 0);  // UseLuma=false -> not emitted
+    REQUIRE(attrs.at("SH_Mask1_Combine") == "Union");
+    REQUIRE(attrs.at("SH_Mask1_ColorRange") == "80");
+
+    const Adjustments r = XmpProfile::fromCrsAttrs(attrs);
+    REQUIRE(r.masks.size() >= 2);
+
+    // Geometry types are intentionally not restored by the importer yet
+    // (only range-modifier fields round-trip), but the field count and
+    // values must match.
+    const Mask& m0 = r.masks[0];
+    REQUIRE(m0.useColorRange);
+    REQUIRE(m0.useLuminance);
+    REQUIRE_FALSE(m0.maskUnion);
+    REQUIRE(m0.colorRefR == Approx(0.2).margin(1e-6));
+    REQUIRE(m0.colorRefG == Approx(0.6).margin(1e-6));
+    REQUIRE(m0.colorRefB == Approx(0.9).margin(1e-6));
+    REQUIRE(m0.colorRange == Approx(40.0).margin(1e-6));
+    REQUIRE(m0.colorSmoothness == Approx(55.0).margin(1e-6));
+    REQUIRE(m0.luminanceRef == Approx(70.0).margin(1e-6));
+    REQUIRE(m0.luminanceRange == Approx(25.0).margin(1e-6));
+    REQUIRE(m0.luminanceSmoothness == Approx(60.0).margin(1e-6));
+
+    const Mask& m1 = r.masks[1];
+    REQUIRE(m1.useColorRange);
+    REQUIRE_FALSE(m1.useLuminance);
+    REQUIRE(m1.maskUnion);
+    REQUIRE(m1.colorRefR == Approx(0.95).margin(1e-6));
+    REQUIRE(m1.colorRefG == Approx(0.80).margin(1e-6));
+    REQUIRE(m1.colorRefB == Approx(0.10).margin(1e-6));
+    REQUIRE(m1.colorRange == Approx(80.0).margin(1e-6));
+    REQUIRE(m1.colorSmoothness == Approx(40.0).margin(1e-6));
+}
+
+TEST_CASE("XmpProfile: PHASE_4 mask range out-of-range imports clamp",
+          "[xmpprofile][phase4]") {
+    std::map<std::string, std::string> attrs;
+    attrs["SH_Mask0_UseColor"] = "true";
+    attrs["SH_Mask0_ColorRefR"] = "100";      // > 1.0 -> clamp to 1.0
+    attrs["SH_Mask0_ColorRange"] = "-500";    // clamp to 0
+    attrs["SH_Mask0_ColorSmooth"] = "9999";   // clamp to 100
+    attrs["SH_Mask0_UseLuma"] = "true";
+    attrs["SH_Mask0_LumaRef"] = "500";        // clamp to 100
+    attrs["SH_Mask0_LumaRange"] = "-5";       // clamp to 0
+    attrs["SH_Mask0_LumaSmooth"] = "300";     // clamp to 100
+    attrs["SH_Mask0_Combine"] = "Intersect";
+
+    const Adjustments r = XmpProfile::fromCrsAttrs(attrs);
+    REQUIRE(r.masks.size() >= 1);
+    const Mask& m = r.masks[0];
+    REQUIRE(m.useColorRange);
+    REQUIRE(m.useLuminance);
+    REQUIRE_FALSE(m.maskUnion);
+    REQUIRE(m.colorRefR == Approx(1.0).margin(1e-6));
+    REQUIRE(m.colorRange == Approx(0.0).margin(1e-6));
+    REQUIRE(m.colorSmoothness == Approx(100.0).margin(1e-6));
+    REQUIRE(m.luminanceRef == Approx(100.0).margin(1e-6));
+    REQUIRE(m.luminanceRange == Approx(0.0).margin(1e-6));
+    REQUIRE(m.luminanceSmoothness == Approx(100.0).margin(1e-6));
 }

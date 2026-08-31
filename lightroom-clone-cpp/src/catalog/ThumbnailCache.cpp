@@ -5,10 +5,12 @@
 #include <string>
 #include <vector>
 
+#include "catalog/StandardPreview.h"
 #include "engine/Adjustments.h"
 #include "engine/ImageIO.h"
 #include "engine/Pipeline.h"
 #include "engine/RawDecoder.h"
+#include "utils/MathUtils.h"
 
 namespace lrc {
 
@@ -225,6 +227,31 @@ std::optional<ThumbnailCache::RenderedJpeg> ThumbnailCache::renderFullResJpeg(
         return std::nullopt;
     out.width = u8->width();
     out.height = u8->height();
+    return out;
+}
+
+std::optional<ThumbnailCache::RenderedStandardPreview>
+ThumbnailCache::renderStandardPreviewBlob(
+    const std::filesystem::path& rawPath) {
+    // S5: one-call wrapper around buildStandardPreview2 + encodeStandardPreview
+    // (v2 header). Lets ImportWorker's batch loop produce the catalog blob
+    // without pulling in StandardPreview.h or wiring a decoder/pipeline.
+    const auto built =
+        buildStandardPreview2(lrc::pathToUtf8(rawPath));
+    if (!built.buf || built.buf->empty())
+        return std::nullopt;
+
+    auto blob = encodeStandardPreview(*built.buf, built.nativeWidth,
+                                       built.nativeHeight);
+    if (blob.empty())
+        return std::nullopt;
+
+    RenderedStandardPreview out;
+    out.blob = std::move(blob);
+    out.previewWidth = built.buf->width();
+    out.previewHeight = built.buf->height();
+    out.nativeWidth = built.nativeWidth;
+    out.nativeHeight = built.nativeHeight;
     return out;
 }
 

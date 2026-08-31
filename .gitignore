@@ -5,6 +5,8 @@ out/
 cmake-build-*/
 .vs/
 .idea/
+.venv/
+onnxruntime/
 
 # ===== CMake 生成文件 =====
 CMakeCache.txt
@@ -36,6 +38,7 @@ qrc_*.cpp
 *.qmlc
 *.jsc
 qt/
+
 # ===== vcpkg =====
 vcpkg_installed/
 
@@ -55,6 +58,17 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# ===== Agent相关 =====
-.aiderignore
+# ===== Aider 个人状态文件（不提交）=====
+# 历史文件
+.aider.chat.history.md
 .aider.input.history
+.aiderignore
+
+# 注意：以下项目级配置保留在版本控制中：
+# .aider.conf.yml
+# .aider.model.settings.yml
+.aider*
+
+#=====IDE======
+.trae/
+.claude/

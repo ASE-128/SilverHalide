@@ -774,6 +774,53 @@ TEST_CASE("Pipeline: texture+clarity+sharpening is deterministic with pooled scr
     REQUIRE(px3 == golden);
 }
 
+TEST_CASE("Pipeline: renderPreview with full adj stack is bit-exact across "
+          "re-renders (ScratchBuffer hot path)",
+          "[pipeline][scratch][S12]") {
+    // S12: the gaussianBlur / lumaImage hot path uses thread-local ScratchBuffer
+    // pools instead of per-call heap vectors. Two consecutive renderPreview
+    // calls with identical inputs must produce byte-identical sRGB output,
+    // proving the scratch path is deterministic (no stale-buffer corruption,
+    // no per-frame heap allocation affecting the result).
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+
+    // 256x192 F32 RGB gradient source.
+    const int w = 256, h = 192;
+    auto src = ImageBuffer::create(w, h, PixelFormat::F32);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            src->setPixel(x, y, 0, static_cast<float>(x) / (w - 1));
+            src->setPixel(x, y, 1, static_cast<float>(y) / (h - 1));
+            src->setPixel(x, y, 2, 0.3f);
+        }
+
+    Adjustments a;
+    a.exposure = 0.3;
+    a.contrast = 12.0;
+    a.texture = 35.0;
+    a.clarity = 25.0;
+    a.sharpness = 50.0;
+    a.sharpnessRadius = 1.5;
+    a.grain = 15.0;
+    a.vignette = -10.0;
+
+    const Size target{w, h};
+    auto r1 = pipeline.renderPreview(*src, a, target, w, 1);
+    REQUIRE(r1);
+    // Second call: cache hit (no recompute) — same buffer object returned.
+    auto r2 = pipeline.renderPreview(*src, a, target, w, 1);
+    REQUIRE(r2.get() == r1.get());
+
+    // Force a full recompute by changing imageId: scratch pool must produce
+    // the exact same pixels as the first render.
+    auto r3 = pipeline.renderPreview(*src, a, target, w, 99);
+    REQUIRE(r3);
+    REQUIRE(r3->sizeBytes() == r1->sizeBytes());
+    REQUIRE(std::memcmp(r3->data().data(), r1->data().data(),
+                         r1->sizeBytes()) == 0);
+}
+
 TEST_CASE("Pipeline: fully neutral adjustments are a pass-through",
           "[pipeline]") {
     // A spread of values (including extremes) across [0,1].

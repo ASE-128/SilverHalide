@@ -8,6 +8,7 @@
     "lcms",
     "sqlite3",
     "opencv4",
+    "onnxruntime-gpu",
     "catch2"
   ]
 }

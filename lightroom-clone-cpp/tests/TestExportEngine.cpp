@@ -200,6 +200,101 @@ TEST_CASE("ExportEngine: TIFF rejects invalid bit depths", "[export]") {
     std::filesystem::remove(outPath, ec);
 }
 
+TEST_CASE("ExportEngine: S16 strip-parallel TIFF16 matches single-threaded",
+          "[export][S16]") {
+    // The strip-parallel quantizeToU16Parallel must produce bit-for-bit
+    // identical output to the old serial loop. We verify by exporting a
+    // non-trivial gradient twice (once here, once as a reference written by
+    // ImageIO::writeTiff from a U16 buffer that we quantize by hand in the
+    // old serial way) and comparing the TIFF payload bytes.
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+    ExportEngine exporter(cm, pipeline);
+    const auto linear = makeLinearGradient(64, 48);
+
+    // S16 export path.
+    const auto t16 = std::filesystem::temp_directory_path() / "lrc_s16.tif";
+    REQUIRE(exporter.exportTiff(t16, 7, *linear, Adjustments::defaults(), 16));
+    const auto b16 = readBytes(t16);
+    REQUIRE(b16.size() > 100);
+    REQUIRE(b16[0] == 'I');
+    REQUIRE(b16[1] == 'I');
+
+    // Reference: serial quantization of the same linear buffer.
+    // (Pipeline::renderLinearFull with default adjustments is a no-op on
+    // linear ProPhoto, so we can quantize `linear` directly.)
+    auto u16 = ImageBuffer::create(linear->width(), linear->height(),
+                                   PixelFormat::U16);
+    const float* src = reinterpret_cast<const float*>(linear->data().data());
+    auto* dst = reinterpret_cast<uint16_t*>(u16->data().data());
+    const size_t total = static_cast<size_t>(linear->width()) *
+                         linear->height() * 3;
+    // Apply the same linear-ProPhoto -> sRGB convert that ExportEngine uses.
+    std::vector<float> srgb(total);
+    cm->linearProPhotoToSRGB(src, srgb.data(), total / 3);
+    for (size_t i = 0; i < total; ++i)
+        dst[i] = static_cast<uint16_t>(std::clamp(srgb[i], 0.0f, 1.0f) * 65535.0f);
+
+    const auto tRef = std::filesystem::temp_directory_path() / "lrc_s16_ref.tif";
+    REQUIRE(ImageIO::writeTiff(tRef, *u16));
+    const auto bRef = readBytes(tRef);
+
+    // The TIFF header bytes are identical (same dimensions, same tags).
+    // The pixel payload starts after the 8-byte TIFF header + IFD; we just
+    // compare the whole file — any byte difference means the parallel path
+    // diverged from the serial reference.
+    REQUIRE(b16.size() == bRef.size());
+    REQUIRE(b16 == bRef);
+
+    std::error_code ec;
+    std::filesystem::remove(t16, ec);
+    std::filesystem::remove(tRef, ec);
+}
+
+TEST_CASE("ExportEngine: S16 encodeAndWrite dispatches all formats",
+          "[export][S16]") {
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+    ExportEngine exporter(cm, pipeline);
+    const auto linear = makeLinearGradient(16, 12);
+    const auto tmp = std::filesystem::temp_directory_path();
+
+    ExportEngine::ExportSpec spec;
+    spec.quality = 85;
+
+    std::error_code ec;
+
+    spec.format = ExportEngine::ExportSpec::Format::Jpeg;
+    const auto jp = tmp / "lrc_s16_enc.jpg";
+    REQUIRE(exporter.encodeAndWrite(jp, 1, *linear, Adjustments::defaults(), spec));
+    REQUIRE(std::filesystem::file_size(jp) > 2);
+    std::filesystem::remove(jp, ec);
+
+    spec.format = ExportEngine::ExportSpec::Format::Png;
+    const auto pn = tmp / "lrc_s16_enc.png";
+    REQUIRE(exporter.encodeAndWrite(pn, 2, *linear, Adjustments::defaults(), spec));
+    REQUIRE(std::filesystem::file_size(pn) > 8);
+    std::filesystem::remove(pn, ec);
+
+    spec.format = ExportEngine::ExportSpec::Format::Tiff8;
+    const auto t8 = tmp / "lrc_s16_enc8.tif";
+    REQUIRE(exporter.encodeAndWrite(t8, 3, *linear, Adjustments::defaults(), spec));
+    REQUIRE(std::filesystem::file_size(t8) > 100);
+    std::filesystem::remove(t8, ec);
+
+    spec.format = ExportEngine::ExportSpec::Format::Tiff16;
+    const auto t16 = tmp / "lrc_s16_enc16.tif";
+    REQUIRE(exporter.encodeAndWrite(t16, 4, *linear, Adjustments::defaults(), spec));
+    REQUIRE(std::filesystem::file_size(t16) > 100);
+    std::filesystem::remove(t16, ec);
+
+    spec.format = ExportEngine::ExportSpec::Format::Dng;
+    const auto dn = tmp / "lrc_s16_enc.dng";
+    REQUIRE(exporter.encodeAndWrite(dn, 5, *linear, Adjustments::defaults(), spec));
+    REQUIRE(std::filesystem::file_size(dn) > 100);
+    std::filesystem::remove(dn, ec);
+}
+
 TEST_CASE("ExportEngine: DNG export carries the DNGVersion tag", "[export]") {
     auto cm = std::make_shared<ColorManager>();
     Pipeline pipeline(cm);
@@ -441,4 +536,94 @@ TEST_CASE("ExportEngine: export does not pollute the preview LRU",
     REQUIRE(pipeline.cacheBytes() == before);
     std::error_code ec;
     std::filesystem::remove(outPath, ec);
+}
+
+TEST_CASE("ExportEngine: S17-18 encodeAndWrite honours maxDim downscale",
+          "[export][S17-18]") {
+    // The size preset in ExportDialog routes through encodeAndWrite's maxDim
+    // branch: a >0 cap must shrink the longest edge to maxDim (area-average,
+    // never upscales) and preserve aspect ratio. A cap >= the native longest
+    // edge must be a no-op. We verify by re-importing the lossless PNG and
+    // checking the decoded dimensions.
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+    ExportEngine exporter(cm, pipeline);
+    // 64x48 gradient (4:3, longest edge = 64).
+    const auto linear = makeLinearGradient(64, 48);
+    const auto tmp = std::filesystem::temp_directory_path();
+
+    ExportEngine::ExportSpec spec;
+    spec.format = ExportEngine::ExportSpec::Format::Png;
+    spec.quality = 90;
+
+    auto roundTripSize = [&](const std::filesystem::path& p) -> std::pair<int,int> {
+        auto img = ImageIO::loadImage(p);
+        if (!img || img->empty())
+            return {-1, -1};
+        return {img->width(), img->height()};
+    };
+
+    std::error_code ec;
+
+    // Downscale to longest edge 32 -> 32x24 (preserve 4:3).
+    spec.maxDim = 32;
+    const auto p32 = tmp / "lrc_s17_32.png";
+    REQUIRE(exporter.encodeAndWrite(p32, 1, *linear, Adjustments::defaults(),
+                                    spec));
+    {
+        const auto [w, h] = roundTripSize(p32);
+        REQUIRE(w == 32);
+        REQUIRE(h == 24);
+    }
+    std::filesystem::remove(p32, ec);
+
+    // maxDim == native longest edge -> no resize (64x48).
+    spec.maxDim = 64;
+    const auto p64 = tmp / "lrc_s17_64.png";
+    REQUIRE(exporter.encodeAndWrite(p64, 2, *linear, Adjustments::defaults(),
+                                    spec));
+    {
+        const auto [w, h] = roundTripSize(p64);
+        REQUIRE(w == 64);
+        REQUIRE(h == 48);
+    }
+    std::filesystem::remove(p64, ec);
+
+    // maxDim > native longest edge -> never upscales (64x48).
+    spec.maxDim = 256;
+    const auto pBig = tmp / "lrc_s17_big.png";
+    REQUIRE(exporter.encodeAndWrite(pBig, 3, *linear, Adjustments::defaults(),
+                                    spec));
+    {
+        const auto [w, h] = roundTripSize(pBig);
+        REQUIRE(w == 64);
+        REQUIRE(h == 48);
+    }
+    std::filesystem::remove(pBig, ec);
+
+    // maxDim = 0 -> native resolution (64x48).
+    spec.maxDim = 0;
+    const auto p0 = tmp / "lrc_s17_0.png";
+    REQUIRE(exporter.encodeAndWrite(p0, 4, *linear, Adjustments::defaults(),
+                                    spec));
+    {
+        const auto [w, h] = roundTripSize(p0);
+        REQUIRE(w == 64);
+        REQUIRE(h == 48);
+    }
+    std::filesystem::remove(p0, ec);
+
+    // Non-square source: 40x10 gradient, maxDim=20 -> 20x5 (longest=20, the
+    // 10px short edge becomes 10 * 20/40 = 5).
+    const auto wide = makeLinearGradient(40, 10);
+    spec.maxDim = 20;
+    const auto pWide = tmp / "lrc_s17_wide.png";
+    REQUIRE(exporter.encodeAndWrite(pWide, 5, *wide, Adjustments::defaults(),
+                                    spec));
+    {
+        const auto [w, h] = roundTripSize(pWide);
+        REQUIRE(w == 20);
+        REQUIRE(h == 5);
+    }
+    std::filesystem::remove(pWide, ec);
 }

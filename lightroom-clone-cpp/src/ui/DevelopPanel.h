@@ -392,8 +392,8 @@ private:
     QTimer debounce_;
     QTimer coarseDebounce_;
     // M11: leading-edge one-shot timer that bounds adjustmentsCommitted during a
-    // mask/brush stroke to roughly one emit per kMaskGeometryCommitMs (instead
-    // of once per mouse move).
+    // mask/brush stroke to roughly one emit per app::throttle::kMaskGeometryCommitMs
+    // (instead of once per mouse move).
     QTimer maskGeometryCommitTimer_;
     bool maskGeometryDirty_ = false;
     bool dragging_ = false;

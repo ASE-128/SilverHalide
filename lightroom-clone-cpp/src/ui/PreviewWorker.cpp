@@ -69,16 +69,31 @@ void PreviewWorker::loadImage(qint64 imageId, const QString& filePath,
     if (imageId != fullResImageId_)
         clearFullRes();
 
-    // PHASE_2: prefer the import-time standard preview (2048px linear ProPhoto
-    // F32) when rendering the Fit/<=1:1 view at viewport resolution. The
-    // standard preview carries no native size (writer-A contract gap), so
-    // imageMeta is not emitted on this path and fullLongEdge_ keeps whatever the
-    // last decode recorded (0 on a first load -> source-relative sigma scale).
+    // PHASE_2 / S8b: prefer the import-time standard preview (2048px linear
+    // ProPhoto F32) when rendering the Fit/<=1:1 view at viewport resolution.
+    // The v2 blob carries the native full-res dimensions, so we emit imageMeta
+    // here too — the UI gets the true photo size without a RAW decode. For v1
+    // blobs (native==0) we fall back to a 2x estimate so the spatial-kernel
+    // sigma scaling stays conservative (slightly larger kernels are safe; too
+    // small would under-sharpen).
     if (!viewportSize_.isEmpty() && catalog_.hasStandardPreview(imageId)) {
-        if (auto sp = catalog_.getStandardPreview(imageId)) {
-            if (*sp && !(*sp)->empty()) {
-                linear_ = *sp;
+        if (auto sp = catalog_.getStandardPreviewWithMeta(imageId)) {
+            if (sp->buf && !sp->buf->empty()) {
+                linear_ = sp->buf;
                 loadedImageId_ = imageId;
+                if (sp->nativeWidth > 0 && sp->nativeHeight > 0) {
+                    fullLongEdge_ = std::max(sp->nativeWidth,
+                                             sp->nativeHeight);
+                    if (generation == latestGeneration_)
+                        emit imageMeta(imageId, sp->nativeWidth,
+                                       sp->nativeHeight);
+                } else {
+                    // v1 blob: no native dimensions. Use 2x the preview's
+                    // long edge as a conservative estimate (the standard
+                    // preview was built from a 2x-oversampled decode).
+                    fullLongEdge_ = std::max(sp->buf->width(),
+                                             sp->buf->height()) * 2;
+                }
                 auto out = pipeline_.renderPreview(
                     *linear_, adjustments,
                     lrc::Size{viewportSize_.width(), viewportSize_.height()},
@@ -479,13 +494,19 @@ void PreviewWorker::requestReference(qint64 refImageId, qint64 generation,
         return;
     }
     lrc::ImageBufferPtr refLinear;
-    int refFullLongEdge = 0;  // 标准预览不记录原生尺寸 -> 0 = 源图自身缩放 (source-relative).
+    int refFullLongEdge = 0;  // 标准预览 v1 无原生尺寸 -> 0 = 源图自身缩放 (source-relative).
     // 优先复用导入时预建的标准预览 (2048px 线性 ProPhoto F32),免 RAW 解码 (prefer
-    // the import-time standard preview, skipping the raw decode).
+    // the import-time standard preview, skipping the raw decode). S8b: v2 blobs
+    // carry the native dimensions so the reference render's kernel scaling is
+    // correct too; v1 blobs leave refFullLongEdge at 0 (source-relative).
     if (catalog_.hasStandardPreview(refImageId)) {
-        if (auto sp = catalog_.getStandardPreview(refImageId)) {
-            if (*sp && !(*sp)->empty())
-                refLinear = *sp;
+        if (auto sp = catalog_.getStandardPreviewWithMeta(refImageId)) {
+            if (sp->buf && !sp->buf->empty()) {
+                refLinear = sp->buf;
+                if (sp->nativeWidth > 0 && sp->nativeHeight > 0)
+                    refFullLongEdge = std::max(sp->nativeWidth,
+                                               sp->nativeHeight);
+            }
         }
     }
     if (!refLinear) {
@@ -603,7 +624,13 @@ bool PreviewWorker::decodeFullRes(qint64 imageId, const QString& filePath) {
 void PreviewWorker::exportImage(qint64 imageId, const QString& filePath,
                                 const lrc::Adjustments& adjustments,
                                 const QString& outPath, int format,
-                                int quality) {
+                                int quality, int maxDim) {
+    // S17-18: route the single-shot export through the unified
+    // ExportEngine::encodeAndWrite entry point so the size preset (maxDim)
+    // from ExportDialog is applied in linear F32 space before the format-
+    // specific encode. The dispatch is the same as the legacy switch but
+    // collapses five branches into one call. maxDim=0 keeps native
+    // resolution (a no-op resize).
     if (abort_.load())
         return;  // 已请求取消 (abort requested).
     lrc::DecodeParams params; // full resolution
@@ -612,34 +639,97 @@ void PreviewWorker::exportImage(qint64 imageId, const QString& filePath,
         emit exportFinished(false, tr("无法解码原始文件: %1").arg(filePath));
         return;
     }
-    const auto fmt = static_cast<ExportFormat>(format);
-    const auto& linear = *decoded->linear;
-    bool ok = false;
-    switch (fmt) {
+    lrc::ExportEngine::ExportSpec spec;
+    switch (static_cast<ExportFormat>(format)) {
     case ExportFormat::Jpeg:
-        ok = exportEngine_->exportJpeg(toStdPath(outPath), imageId, linear,
-                                       adjustments, quality);
-        break;
+        spec.format = lrc::ExportEngine::ExportSpec::Format::Jpeg; break;
     case ExportFormat::Png:
-        ok = exportEngine_->exportPng(toStdPath(outPath), imageId, linear,
-                                      adjustments);
-        break;
+        spec.format = lrc::ExportEngine::ExportSpec::Format::Png; break;
     case ExportFormat::Tiff8:
-        ok = exportEngine_->exportTiff(toStdPath(outPath), imageId, linear,
-                                       adjustments, 8);
-        break;
+        spec.format = lrc::ExportEngine::ExportSpec::Format::Tiff8; break;
     case ExportFormat::Tiff16:
-        ok = exportEngine_->exportTiff(toStdPath(outPath), imageId, linear,
-                                       adjustments, 16);
-        break;
+        spec.format = lrc::ExportEngine::ExportSpec::Format::Tiff16; break;
     case ExportFormat::Dng:
-        ok = exportEngine_->exportDng(toStdPath(outPath), imageId, linear,
-                                      adjustments);
-        break;
+        spec.format = lrc::ExportEngine::ExportSpec::Format::Dng; break;
     }
+    spec.quality = quality;
+    spec.maxDim = maxDim;
+
+    const bool ok = exportEngine_->encodeAndWrite(
+        toStdPath(outPath), static_cast<uint64_t>(imageId),
+        *decoded->linear, adjustments, spec);
     emit exportFinished(ok, ok ? tr("导出成功") : tr("导出失败: %1")
                                             .arg(QString::fromStdString(
                                                 exportEngine_->lastError())));
+}
+
+void PreviewWorker::batchExport(const QList<ExportItem>& items) {
+    // S17-18: serial decode + encode + write per item. The export bottleneck
+    // is the encode pass (TIFF16 is already strip-parallel from S16), so a
+    // serial loop keeps memory bounded (one linear buffer at a time) while
+    // the per-strip work still saturates the pool. Aborting mid-batch breaks
+    // the loop; the success/fail counts then reflect only the items actually
+    // attempted. `lastError` carries the most recent failure (empty when
+    // every item succeeded).
+    int success = 0;
+    int fail = 0;
+    std::string lastError;
+    const int total = items.size();
+
+    for (int i = 0; i < total; ++i) {
+        if (abort_.load())
+            break;  // 已请求取消,跳出批量循环 (abort mid-batch).
+
+        const ExportItem& item = items[i];
+
+        // Map the UI-side ExportFormat onto ExportEngine's ExportSpec. Same
+        // ordering as exportImage's switch, but routed through encodeAndWrite
+        // so maxDim (if set) is applied uniformly before the format dispatch.
+        lrc::ExportEngine::ExportSpec spec;
+        switch (item.format) {
+        case ExportFormat::Jpeg:
+            spec.format = lrc::ExportEngine::ExportSpec::Format::Jpeg; break;
+        case ExportFormat::Png:
+            spec.format = lrc::ExportEngine::ExportSpec::Format::Png; break;
+        case ExportFormat::Tiff8:
+            spec.format = lrc::ExportEngine::ExportSpec::Format::Tiff8; break;
+        case ExportFormat::Tiff16:
+            spec.format = lrc::ExportEngine::ExportSpec::Format::Tiff16; break;
+        case ExportFormat::Dng:
+            spec.format = lrc::ExportEngine::ExportSpec::Format::Dng; break;
+        }
+        spec.quality = item.quality;
+        spec.maxDim = item.maxDim;
+
+        // Full-resolution decode (DecodeParams{} == halfSize=false, maxDim=0,
+        // i.e. native resolution; the export path must never use the cached
+        // preview-resolution buffer). A decode failure counts as a per-item
+        // failure rather than aborting the whole batch — the remaining items
+        // may still be perfectly exportable.
+        lrc::DecodeParams params;  // 全分辨率 (full resolution).
+        auto decoded = decoder_.decode(toStdPath(item.filePath), params);
+        bool ok = false;
+        if (decoded && decoded->linear && !decoded->linear->empty()) {
+            ok = exportEngine_->encodeAndWrite(
+                toStdPath(item.outPath),
+                static_cast<uint64_t>(item.imageId),
+                *decoded->linear, item.adjustments, spec);
+            if (!ok)
+                lastError = exportEngine_->lastError();
+        } else {
+            lastError = "decode failed: " + item.filePath.toStdString();
+        }
+
+        if (ok)
+            ++success;
+        else
+            ++fail;
+
+        emit batchExportProgress(i + 1, total);
+    }
+
+    emit batchExportFinished(success, fail,
+                             QString::fromStdString(lastError));
 }
 
 void PreviewWorker::computeAutoAdjust(qint64 imageId,

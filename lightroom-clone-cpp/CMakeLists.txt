@@ -70,6 +70,7 @@ endif()
 option(LRC_BUILD_TESTS "Build the Catch2 test suite" ON)
 option(LRC_ENABLE_QT "Build the Qt6 GUI" ON)
 option(LRC_USE_OPENCV "Enable OpenCV auxiliary helpers (heavy dependency)" OFF)
+option(LRC_ENABLE_AI "Enable AI features (ONNX Runtime)" ON)
 
 # ---------------------------------------------------------------------------
 # External dependencies. Two acquisition strategies:
@@ -200,12 +201,63 @@ if(LRC_BUILD_TESTS)
   endif()
 endif()
 
+# --- ONNX Runtime (AI, optional, engine-level) ----------------------------
+# Attempt to find ONNX Runtime when AI is enabled. If not found, gracefully
+# disable LRC_ENABLE_AI so the rest of the project still builds.
+set(LRC_ONNXRUNTIME_FOUND FALSE)
+if(LRC_ENABLE_AI)
+  find_package(ONNXRuntime QUIET)
+  if(ONNXRuntime_FOUND OR ONNXRUNTIME_FOUND)
+    set(LRC_ONNXRUNTIME_FOUND TRUE)
+    message(STATUS "ONNX Runtime: found (AI enabled)")
+  else()
+    # Also try the lowercase name that vcpkg sometimes exports
+    find_package(onnxruntime QUIET)
+    if(onnxruntime_FOUND)
+      set(LRC_ONNXRUNTIME_FOUND TRUE)
+      message(STATUS "ONNX Runtime: found via onnxruntime (AI enabled)")
+    else()
+      # Fallback: a prebuilt official release package (the github asset
+      # onnxruntime-win-x64-<ver>.zip) unpacked to a dir with include/ and
+      # lib/onnxruntime.{lib,dll}. Point -DONNXRUNTIME_ROOT=<that dir>.
+      if(ONNXRUNTIME_ROOT)
+        set(_ort_inc "${ONNXRUNTIME_ROOT}/include")
+        set(_ort_lib "${ONNXRUNTIME_ROOT}/lib/onnxruntime.lib")
+        if(EXISTS "${_ort_inc}" AND EXISTS "${_ort_lib}")
+          if(NOT TARGET ONNXRuntime::onnxruntime)
+            add_library(ONNXRuntime::onnxruntime UNKNOWN IMPORTED)
+            set_target_properties(ONNXRuntime::onnxruntime PROPERTIES
+              IMPORTED_LOCATION "${_ort_lib}"
+              IMPORTED_IMPLIB "${_ort_lib}"
+              INTERFACE_INCLUDE_DIRECTORIES "${_ort_inc}")
+          endif()
+          set(LRC_ONNXRUNTIME_FOUND TRUE)
+          message(STATUS "ONNX Runtime: found via ONNXRUNTIME_ROOT="
+                         "${ONNXRUNTIME_ROOT} (prebuilt package, AI enabled)")
+        else()
+          message(WARNING "ONNXRUNTIME_ROOT set but "
+                  "${_ort_inc} / ${_ort_lib} not found — check the path "
+                  "points at the unpacked release top dir (containing "
+                  "include/ and lib/).")
+        endif()
+      endif()
+      if(NOT LRC_ONNXRUNTIME_FOUND)
+        message(STATUS "ONNX Runtime: NOT found — forcing LRC_ENABLE_AI=OFF. "
+                       "Install via vcpkg (onnxruntime), set -DONNXRuntime_DIR, "
+                       "or -DONNXRUNTIME_ROOT=<unpacked release dir>. "
+                       "AI features (PHASE_11/12/13/14) will be stubbed out.")
+        set(LRC_ENABLE_AI OFF CACHE BOOL "Enable AI features (ONNX Runtime)" FORCE)
+      endif()
+    endif()
+  endif()
+endif()
+
 # --- Qt6 (GUI only) --------------------------------------------------------
 if(LRC_ENABLE_QT)
   # CMake 4.x with Ninja+MSVC sometimes rejects Qt6's version file due to
   # CMAKE_SIZEOF_VOID_P not being set at find_package time.  Bypass the check.
   set(QT_NO_PACKAGE_VERSION_CHECK TRUE)
-  find_package(Qt6 REQUIRED COMPONENTS Widgets)
+  find_package(Qt6 REQUIRED COMPONENTS Widgets Network Concurrent)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -225,7 +277,18 @@ set(LRC_ENGINE_SOURCES
   src/engine/ZoneCurve.cpp
   src/engine/Xmp.cpp
   src/engine/XmpSidecar.cpp
-  src/engine/PanoramaStitcher.cpp)
+  src/engine/PanoramaStitcher.cpp
+  # --- PHASE_11: AI inference infrastructure (pure C++, Qt-free) ---------
+  src/engine/AiInference.cpp
+  # --- PHASE_12: AI denoise processor ------------------------------------
+  src/engine/AiDenoiseProcessor.cpp
+  # --- PHASE_13: AI mask generator ---------------------------------------
+  src/engine/AiMaskGenerator.cpp
+  # --- PHASE_15: Soft proofing (lcms2, no AI dependency) -----------------
+  src/engine/SoftProofing.cpp
+  # --- PHASE_14: DuplicateDetector (pure C++, lives in app/ per spec, but
+  #            must build in headless tests too: no Qt includes in it) ----
+  src/app/DuplicateDetector.cpp)
 set(LRC_CATALOG_SOURCES
   src/catalog/CatalogDatabase.cpp
   src/catalog/ThumbnailCache.cpp
@@ -237,7 +300,8 @@ set(LRC_UTILS_SOURCES
   src/utils/Json.cpp
   src/utils/ProfileIO.cpp
   src/utils/XmpProfile.cpp
-  src/utils/Parallel.cpp)
+  src/utils/Parallel.cpp
+  src/utils/Sha256.cpp)
 
 # engine: pure C++, Qt-free core
 add_library(lrc_engine STATIC ${LRC_ENGINE_SOURCES} ${LRC_UTILS_SOURCES})
@@ -245,10 +309,32 @@ target_include_directories(lrc_engine PUBLIC src)
 target_link_libraries(lrc_engine PUBLIC raw lcms2 sqlite3 stb_image_write pugixml Threads::Threads)
 # libraw pulls in <windows.h>, whose min/max macros clobber std::min/std::max.
 target_compile_definitions(lrc_engine PUBLIC LIBRAW_NODLL=1 NOMINMAX)
+# Path used by ModelManager.cpp to locate the shipped manifest when the
+# executable runs from a build directory (rather than the installed layout).
+target_compile_definitions(lrc_engine PRIVATE
+    "LRC_PROJECT_MANIFEST_DIR=\"${CMAKE_CURRENT_LIST_DIR}\"")
+# --- Optional AI (ONNX Runtime) ------------------------------------------
+if(LRC_ENABLE_AI AND LRC_ONNXRUNTIME_FOUND)
+  target_compile_definitions(lrc_engine PUBLIC LRC_ENABLE_AI=1)
+  # Accept both CMake package-naming conventions for onnxruntime.
+  if(TARGET ONNXRuntime::onnxruntime)
+    target_link_libraries(lrc_engine PUBLIC ONNXRuntime::onnxruntime)
+  elseif(TARGET ONNXRuntime::OnnxRuntime)
+    target_link_libraries(lrc_engine PUBLIC ONNXRuntime::OnnxRuntime)
+  elseif(TARGET onnxruntime::onnxruntime)
+    target_link_libraries(lrc_engine PUBLIC onnxruntime::onnxruntime)
+  elseif(TARGET onnxruntime)
+    target_link_libraries(lrc_engine PUBLIC onnxruntime)
+  endif()
+else()
+  target_compile_definitions(lrc_engine PUBLIC LRC_ENABLE_AI=0)
+endif()
 
 if(MSVC)
-  target_compile_options(lrc_engine PRIVATE /W4 /wd4100 /wd4244 /wd4996)
-  target_compile_options(lrc_engine PUBLIC /bigobj)
+  # /utf-8: force source charset to UTF-8 so non-ASCII comments and Chinese
+  # characters in headers compile correctly on GBK-codepage systems.
+  target_compile_options(lrc_engine PRIVATE /utf-8 /W4 /wd4100 /wd4244 /wd4996)
+  target_compile_options(lrc_engine PUBLIC /bigobj /utf-8)
 else()
   target_compile_options(lrc_engine PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
@@ -267,6 +353,8 @@ if(LRC_ENABLE_QT)
   set(CMAKE_AUTOUIC ON)
   set(LRC_UI_SOURCES
     src/app/Application.cpp
+    # --- PHASE_11: ModelManager (uses Qt Network for downloads) ---------
+    src/app/ModelManager.cpp
     src/ui/MainWindow.cpp
     src/ui/ImportDialog.cpp
     src/ui/ExportDialog.cpp
@@ -285,7 +373,11 @@ if(LRC_ENABLE_QT)
     src/ui/CollectionsDialog.cpp
     src/ui/SmartCollectionsDialog.cpp
     src/ui/PanoramaDialog.cpp
-    src/ui/PanoramaWorker.cpp)
+    src/ui/PanoramaWorker.cpp
+    # --- PHASE_14 / 15: Dialogs -----------------------------------------
+    src/ui/DuplicateResultsDialog.cpp
+    src/ui/SoftProofingDialog.cpp
+    src/ui/ModelManagementWidget.cpp)
   # WIN32 => GUI-subsystem executable: no console window on launch. The
   # Qt6::EntryPointPrivate (qtmain) target supplies the WinMain shim that
   # forwards to the app's own main().
@@ -304,15 +396,57 @@ if(LRC_ENABLE_QT)
     target_sources(lrc_lightroom PRIVATE resources/app.rc)
   endif()
   target_link_libraries(lrc_lightroom PRIVATE
-    lrc_catalog lrc_engine Qt6::Widgets Qt6::EntryPointPrivate)
+    lrc_catalog lrc_engine
+    Qt6::Widgets Qt6::Network Qt6::Concurrent Qt6::EntryPointPrivate
+    Qt6::CorePrivate)  # for QZipReader (private API) — used by ModelManager to extract .onnx from .zip download_url (Qualcomm NAFNet)
   target_include_directories(lrc_lightroom PRIVATE src)
+  # Propagate LRC_ENABLE_AI to the GUI layer so UI buttons can be conditionally
+  # compiled.  The engine target already sets the same define; we set it here
+  # explicitly so the GUI layer does not accidentally diverge.
+  if(LRC_ENABLE_AI)
+    target_compile_definitions(lrc_lightroom PRIVATE LRC_ENABLE_AI=1)
+  else()
+    target_compile_definitions(lrc_lightroom PRIVATE LRC_ENABLE_AI=0)
+  endif()
+  # Propagate LRC_ENABLE_QT as a compile macro so ModelManager.cpp's
+  # `#if LRC_ENABLE_QT` blocks (QNetworkAccessManager download + the QZipReader
+  # extraction path) are actually compiled in the GUI build. Without this the
+  # entire Qt download path is dead code (#if 0).
+  target_compile_definitions(lrc_lightroom PRIVATE LRC_ENABLE_QT=1)
+  # So ModelManager.cpp (compiled into lrc_lightroom) can find the shipped
+  # manifest JSON at build time (same path as the engine target, defined above).
+  target_compile_definitions(lrc_lightroom PRIVATE
+      "LRC_PROJECT_MANIFEST_DIR=\"${CMAKE_CURRENT_LIST_DIR}\"")
   if(MSVC)
-    target_compile_options(lrc_lightroom PRIVATE /W3)
+    target_compile_options(lrc_lightroom PRIVATE /utf-8 /W3)
     target_compile_definitions(lrc_lightroom PRIVATE _CRT_SECURE_NO_WARNINGS)
   endif()
   # User-facing executable name. The CMake target stays `lrc_lightroom`
   # internally, but the produced binary is SilverHalide.exe.
   set_target_properties(lrc_lightroom PROPERTIES OUTPUT_NAME "SilverHalide")
+
+  # --- NAFNet end-to-end smoke test (GUI-only, NOT part of the headless
+  # Catch2 suite). Compiles ModelManager.cpp (the only app/ source it needs)
+  # so it can drive a real 410 MB ZIP download + QZipReader extraction + an
+  # AiInferenceEngine inference pass — none of which the headless tests cover.
+  if(LRC_BUILD_TESTS AND LRC_ENABLE_AI)
+    add_executable(lrc_nafnet_smoke
+      tests/nafnet_smoke.cpp
+      src/app/ModelManager.cpp)
+    target_link_libraries(lrc_nafnet_smoke PRIVATE
+      lrc_catalog lrc_engine
+      Qt6::Network Qt6::CorePrivate)
+    target_include_directories(lrc_nafnet_smoke PRIVATE src)
+    target_compile_definitions(lrc_nafnet_smoke PRIVATE
+      LRC_ENABLE_QT=1
+      "LRC_PROJECT_MANIFEST_DIR=\"${CMAKE_CURRENT_LIST_DIR}\"")
+    if(MSVC)
+      target_compile_options(lrc_nafnet_smoke PRIVATE /utf-8 /W3 /EHsc)
+      target_compile_definitions(lrc_nafnet_smoke PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    set_target_properties(lrc_nafnet_smoke PROPERTIES
+      OUTPUT_NAME "nafnet_smoke")
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 
+#include "app/Constants.h"
 #include "catalog/CatalogDatabase.h"
 #include "ui/ColorWheelWidget.h"
 #include "ui/CurveEditor.h"
@@ -29,18 +30,6 @@
 #include "ui/PanelSection.h"
 
 namespace {
-
-// Coarse live-preview throttle while dragging a slider (ms). The refine path
-// keeps debounce_ at 50 ms; this only gates the coarse pass.
-static constexpr int kCoarseDebounceMs = 30;
-
-// Mask/brush-stroke geometry commit throttle (ms). Every mouse move reaches
-// DevelopPanel::updateMaskGeometry; without a bound, each one emits
-// adjustmentsCommitted, which forces MainWindow into a full panel re-sync
-// (60+ rows) plus a synchronous DB write per move (audit M11). A leading-edge
-// one-shot timer limits that to roughly one commit per interval while the
-// stroke runs; the final state is persisted by the stroke-end path.
-static constexpr int kMaskGeometryCommitMs = 150;
 
 const char* kColorNames[8] = {
     QT_TR_NOOP("红"), QT_TR_NOOP("橙"), QT_TR_NOOP("黄"), QT_TR_NOOP("绿"),
@@ -313,7 +302,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
 
     auto commitFromWheel = [this]() { emit adjustmentsCommitted(current_); };
     wheelCommit_.setSingleShot(true);
-    wheelCommit_.setInterval(600);
+    wheelCommit_.setInterval(lrc::app::throttle::kColorWheelCommitMs);
     connect(&wheelCommit_, &QTimer::timeout, this, commitFromWheel);
 
     auto wheelChanged = [this](bool highlight) {
@@ -1011,11 +1000,11 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     root->addStretch(1);
 
     debounce_.setSingleShot(true);
-    debounce_.setInterval(50);
+    debounce_.setInterval(lrc::app::throttle::kSliderDebounceMs);
     connect(&debounce_, &QTimer::timeout, this, &DevelopPanel::applyDebounce);
 
     coarseDebounce_.setSingleShot(true);
-    coarseDebounce_.setInterval(kCoarseDebounceMs);
+    coarseDebounce_.setInterval(lrc::app::throttle::kSliderCoarseDebounceMs);
     connect(&coarseDebounce_, &QTimer::timeout, this,
             &DevelopPanel::applyCoarseDebounce);
 
@@ -1023,14 +1012,14 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     // when not already armed, so continuous moves coalesce to ~one commit per
     // interval instead of one per move).
     maskGeometryCommitTimer_.setSingleShot(true);
-    maskGeometryCommitTimer_.setInterval(kMaskGeometryCommitMs);
+    maskGeometryCommitTimer_.setInterval(lrc::app::throttle::kMaskGeometryCommitMs);
     connect(&maskGeometryCommitTimer_, &QTimer::timeout, this,
             &DevelopPanel::flushMaskGeometryCommit);
 
     // M8: metadata edits debounce while the user types a caption (line edits
     // and focus-out commit immediately via emitMetadataEdited).
     metadataCommit_.setSingleShot(true);
-    metadataCommit_.setInterval(600);
+    metadataCommit_.setInterval(lrc::app::throttle::kMetadataCommitMs);
     connect(&metadataCommit_, &QTimer::timeout, this,
             &DevelopPanel::emitMetadataEdited);
 }
@@ -1473,9 +1462,9 @@ void DevelopPanel::updateMaskGeometry(int index, const lrc::Mask& mask) {
     // reaches here, and emitting adjustmentsCommitted per move made MainWindow
     // re-sync the whole panel (60+ rows) and write the DB synchronously each
     // time. The leading-edge timer bounds that to about one commit per
-    // kMaskGeometryCommitMs; the stroke-end path persists the final state and
-    // setAdjustments cancels any still-pending flush, so a late timer can never
-    // double-push an undo entry.
+    // app::throttle::kMaskGeometryCommitMs; the stroke-end path persists the
+    // final state and setAdjustments cancels any still-pending flush, so a
+    // late timer can never double-push an undo entry.
     scheduleMaskGeometryCommit();
 }
 

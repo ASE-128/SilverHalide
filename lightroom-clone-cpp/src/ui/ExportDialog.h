@@ -34,6 +34,9 @@ public:
     // Combo index == PreviewWorker::ExportFormat value.
     int formatIndex() const;
     int jpegQuality() const;
+    // S17-18: longest-edge pixel cap for the exported image. 0 = keep native
+    // resolution (no downscale). Read from the size-preset combo.
+    int maxDim() const;
 
     // --- virtual-copy / variant selection (M6) -----------------------------
     // Fills the variant selector with the master plus every virtual copy of
@@ -68,6 +71,7 @@ private:
 
     QComboBox* variantCombo_ = nullptr;
     QComboBox* formatCombo_ = nullptr;
+    QComboBox* sizeCombo_ = nullptr;  // S17-18: longest-edge preset.
     QLineEdit* pathEdit_ = nullptr;
     QWidget* qualityRow_ = nullptr;
     QSlider* qualitySlider_ = nullptr;

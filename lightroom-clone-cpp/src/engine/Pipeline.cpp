@@ -2789,6 +2789,24 @@ int Pipeline::lastReuseStartStage() const {
     return lastReuseStartStage_;
 }
 
+void Pipeline::dropIncrementalStageForTest(int stage) {
+    // Test-only: deliberately release a single retained intermediate so the
+    // renderPreview restart heuristic can be exercised. Only stages 0..3 are
+    // retained (A-D; stage E is never kept) so stage 4 is a no-op, matching
+    // real eviction behaviour.
+    std::lock_guard<std::mutex> lock(renderStateMutex_);
+    if (stage < 0 || stage > 3)
+        return;
+    if (!renderState_.present[stage])
+        return;
+    renderState_.bytes -= renderState_.stages[stage]->sizeBytes();
+    renderState_.stages[stage].reset();
+    renderState_.present[stage] = false;
+    // Invalidate the hash so a subsequent render that would otherwise think
+    // it's still valid will correctly fall back to rebuilding.
+    renderState_.stageHashes[stage] = 0;
+}
+
 void Pipeline::touchStageLocked(int stage) {
     renderState_.accessTick[stage] = ++renderState_.tick;
 }

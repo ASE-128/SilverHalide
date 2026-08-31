@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <map>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -182,6 +183,73 @@ std::map<std::string, std::string> XmpProfile::toCrsAttrs(
     putScalar(out, "PostCropVignetteFeather", adj.vignetteFeather, 50.0);
     putScalar(out, "PostCropVignetteHighlightContrast",
               adj.vignetteHighlights, 0.0);
+    // PostCropVignetteStyle: Lightroom ships the three modes as strings.
+    // 0 -> "Paint Overlay", 1 -> "Color Priority", 2 -> "Highlight Priority"
+    // (default; matches the only implemented rendering mode for now).
+    // Only emitted when non-default (2 = "Highlight Priority" is the
+    // project default, aligned with Adjustments::vignetteStyle = 2).
+    if (adj.vignetteStyle != 2) {
+        switch (adj.vignetteStyle) {
+            case 0: out["PostCropVignetteStyle"] = "Paint Overlay"; break;
+            case 1: out["PostCropVignetteStyle"] = "Color Priority"; break;
+            default: out["PostCropVignetteStyle"] = "Highlight Priority"; break;
+        }
+    }
+
+    // --- PHASE_4 range masks ------------------------------------------------
+    // Standalone ColorRange mask (MaskType::ColorRange).  Lightroom does not
+    // expose this shape in a public crs attribute, so we use a namespaced
+    // project-specific prefix plus the 4 independent mask channels (per-mask
+    // geometry is not round-trippable).  The last ColorRange mask exported is
+    // the one a re-import picks up (consistent with spot-correction import
+    // ordering semantics where the list is rebuilt in-order from the RDF bag).
+    //
+    // For sub-mask modifiers (useColorRange / useLuminance on geometric
+    // masks), we write the same attributes prefixed with the mask index so a
+    // single Adjustments that carries N geometric masks with range modifiers
+    // survives the round trip.  Unknown Lightroom attributes are silently
+    // skipped on import by design, so introducing these new keys is safe.
+    int maskIdx = 0;
+    for (const Mask& m : adj.masks) {
+        const std::string prefix = (m.type == MaskType::ColorRange)
+                                       ? std::string("SH_ColorRangeMask_")
+                                       : "SH_Mask" + std::to_string(maskIdx) + "_";
+
+        if (m.type == MaskType::ColorRange) {
+            const ColorRangeMask& cr = m.color;
+            if (cr.hasReference) {
+                out[prefix + "HasRef"] = "true";
+                out[prefix + "RefR"] = formatDouble(static_cast<double>(cr.refR));
+                out[prefix + "RefG"] = formatDouble(static_cast<double>(cr.refG));
+                out[prefix + "RefB"] = formatDouble(static_cast<double>(cr.refB));
+            }
+            putScalar(out, prefix + "HueTol", cr.hueTolerance, 40.0);
+            putScalar(out, prefix + "SatTol", cr.satTolerance, 0.5);
+            putScalar(out, prefix + "LumaTol", cr.lumaTolerance, 0.5);
+            putScalar(out, prefix + "Softness", cr.softness, 0.5);
+        }
+
+        // Geometric-mask sub-mask modifiers (colour-range + luminance).
+        if (m.useColorRange) {
+            out[prefix + "UseColor"] = "true";
+            out[prefix + "ColorRefR"] = formatDouble(static_cast<double>(m.colorRefR));
+            out[prefix + "ColorRefG"] = formatDouble(static_cast<double>(m.colorRefG));
+            out[prefix + "ColorRefB"] = formatDouble(static_cast<double>(m.colorRefB));
+            putScalar(out, prefix + "ColorRange", static_cast<double>(m.colorRange), 50.0);
+            putScalar(out, prefix + "ColorSmooth", static_cast<double>(m.colorSmoothness), 50.0);
+        }
+        if (m.useLuminance) {
+            out[prefix + "UseLuma"] = "true";
+            putScalar(out, prefix + "LumaRef", static_cast<double>(m.luminanceRef), 50.0);
+            putScalar(out, prefix + "LumaRange", static_cast<double>(m.luminanceRange), 50.0);
+            putScalar(out, prefix + "LumaSmooth", static_cast<double>(m.luminanceSmoothness), 50.0);
+        }
+        if (m.useColorRange || m.useLuminance) {
+            out[prefix + "Combine"] = m.maskUnion ? "Union" : "Intersect";
+        }
+
+        ++maskIdx;
+    }
 
     putScalar(out, "GrainAmount", adj.grain, 0.0);
     putScalar(out, "GrainSize", adj.grainSize, 25.0);
@@ -291,6 +359,113 @@ Adjustments XmpProfile::fromCrsAttrs(
         a.vignetteFeather = clamp(v, 0.0, 100.0);
     if (parse("PostCropVignetteHighlightContrast", v))
         a.vignetteHighlights = clamp(v, 0.0, 100.0);
+    {
+        const auto sit = attrs.find("PostCropVignetteStyle");
+        if (sit != attrs.end()) {
+            const std::string& sv = sit->second;
+            if (sv.find("Paint") != std::string::npos || sv == "0") a.vignetteStyle = 0;
+            else if (sv.find("Color") != std::string::npos || sv == "1") a.vignetteStyle = 1;
+            else a.vignetteStyle = 2; // "Highlight Priority" or any unknown
+        }
+    }
+
+    // --- PHASE_4 range masks ------------------------------------------------
+    // We rebuild the geometric-mask list lazily.  Import scans every key for
+    // the known prefixes: SH_ColorRangeMask_* (standalone mask) and
+    // SH_MaskN_* (range sub-mask modifiers for geometric mask #N).  For any
+    // N we haven't seen yet, a default Mask is appended; the type stays None
+    // unless explicit geometry was supplied by a future revision of this
+    // importer -- we only restore the range-modifier / ColorRange
+    // components so parity with export is exact.
+    auto ensureMask = [&](int idx) -> Mask& {
+        while (static_cast<int>(a.masks.size()) <= idx) {
+            Mask empty;
+            empty.type = MaskType::None;  // no geometry until a future exporter writes it
+            a.masks.push_back(empty);
+        }
+        return a.masks[idx];
+    };
+    ColorRangeMask* standaloneColorRange = nullptr;
+    for (const auto& kv : attrs) {
+        const std::string& k = kv.first;
+        const std::string& val = kv.second;
+        if (k.rfind("SH_ColorRangeMask_", 0) == 0) {
+            static constexpr std::string_view kPrefix = "SH_ColorRangeMask_";
+            const std::string suffix = k.substr(kPrefix.size());
+            if (suffix == "HasRef") {
+                // ensure standalone ColorRange mask exists
+                if (standaloneColorRange == nullptr) {
+                    Mask cm;
+                    cm.type = MaskType::ColorRange;
+                    cm.color = ColorRangeMask{};
+                    a.masks.push_back(cm);
+                    standaloneColorRange = &a.masks.back().color;
+                }
+                if (val == "true" || val == "True" || val == "1")
+                    standaloneColorRange->hasReference = true;
+            } else if (suffix == "RefR") {
+                if (!standaloneColorRange) { Mask cm; cm.type=MaskType::ColorRange; a.masks.push_back(cm); standaloneColorRange=&a.masks.back().color; }
+                double r; if (parseDouble(val, r)) standaloneColorRange->refR = static_cast<float>(clamp(r,0.0,1.0));
+            } else if (suffix == "RefG") {
+                if (!standaloneColorRange) { Mask cm; cm.type=MaskType::ColorRange; a.masks.push_back(cm); standaloneColorRange=&a.masks.back().color; }
+                double r; if (parseDouble(val, r)) standaloneColorRange->refG = static_cast<float>(clamp(r,0.0,1.0));
+            } else if (suffix == "RefB") {
+                if (!standaloneColorRange) { Mask cm; cm.type=MaskType::ColorRange; a.masks.push_back(cm); standaloneColorRange=&a.masks.back().color; }
+                double r; if (parseDouble(val, r)) standaloneColorRange->refB = static_cast<float>(clamp(r,0.0,1.0));
+            } else if (suffix == "HueTol") {
+                if (!standaloneColorRange) { Mask cm; cm.type=MaskType::ColorRange; a.masks.push_back(cm); standaloneColorRange=&a.masks.back().color; }
+                double r; if (parseDouble(val, r)) standaloneColorRange->hueTolerance = clamp(r,0.0,180.0);
+            } else if (suffix == "SatTol") {
+                if (!standaloneColorRange) { Mask cm; cm.type=MaskType::ColorRange; a.masks.push_back(cm); standaloneColorRange=&a.masks.back().color; }
+                double r; if (parseDouble(val, r)) standaloneColorRange->satTolerance = clamp(r,0.0,1.0);
+            } else if (suffix == "LumaTol") {
+                if (!standaloneColorRange) { Mask cm; cm.type=MaskType::ColorRange; a.masks.push_back(cm); standaloneColorRange=&a.masks.back().color; }
+                double r; if (parseDouble(val, r)) standaloneColorRange->lumaTolerance = clamp(r,0.0,1.0);
+            } else if (suffix == "Softness") {
+                if (!standaloneColorRange) { Mask cm; cm.type=MaskType::ColorRange; a.masks.push_back(cm); standaloneColorRange=&a.masks.back().color; }
+                double r; if (parseDouble(val, r)) standaloneColorRange->softness = clamp(r,0.0,1.0);
+            }
+        } else if (k.rfind("SH_Mask", 0) == 0) {
+            // SH_Mask<N>_<Suffix>
+            const size_t afterMask = 7; // len("SH_Mask")
+            size_t underscore = k.find('_', afterMask);
+            if (underscore == std::string::npos) continue;
+            int idx = 0;
+            bool idxOk = false;
+            {
+                const std::string numPart = k.substr(afterMask, underscore - afterMask);
+                if (!numPart.empty()) {
+                    try { idx = std::stoi(numPart); idxOk = true; } catch (...) {}
+                }
+            }
+            if (!idxOk || idx < 0) continue;
+            Mask& m = ensureMask(idx);
+            const std::string suffix = k.substr(underscore + 1);
+            if (suffix == "UseColor") {
+                m.useColorRange = (val == "true" || val == "True" || val == "1");
+            } else if (suffix == "UseLuma") {
+                m.useLuminance = (val == "true" || val == "True" || val == "1");
+            } else if (suffix == "ColorRefR") {
+                double r; if (parseDouble(val,r)) m.colorRefR = static_cast<float>(clamp(r,0.0,1.0));
+            } else if (suffix == "ColorRefG") {
+                double r; if (parseDouble(val,r)) m.colorRefG = static_cast<float>(clamp(r,0.0,1.0));
+            } else if (suffix == "ColorRefB") {
+                double r; if (parseDouble(val,r)) m.colorRefB = static_cast<float>(clamp(r,0.0,1.0));
+            } else if (suffix == "ColorRange") {
+                double r; if (parseDouble(val,r)) m.colorRange = static_cast<float>(clamp(r,0.0,100.0));
+            } else if (suffix == "ColorSmooth") {
+                double r; if (parseDouble(val,r)) m.colorSmoothness = static_cast<float>(clamp(r,0.0,100.0));
+            } else if (suffix == "LumaRef") {
+                double r; if (parseDouble(val,r)) m.luminanceRef = static_cast<float>(clamp(r,0.0,100.0));
+            } else if (suffix == "LumaRange") {
+                double r; if (parseDouble(val,r)) m.luminanceRange = static_cast<float>(clamp(r,0.0,100.0));
+            } else if (suffix == "LumaSmooth") {
+                double r; if (parseDouble(val,r)) m.luminanceSmoothness = static_cast<float>(clamp(r,0.0,100.0));
+            } else if (suffix == "Combine") {
+                m.maskUnion = (val == "Union" || val == "union" || val == "U" || val == "1");
+            }
+        }
+    }
 
     if (parse("GrainAmount", v))
         a.grain = clamp(v, 0.0, 100.0);

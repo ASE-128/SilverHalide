@@ -1,13 +1,29 @@
 #pragma once
 
 // Background import worker: adds raw files to the catalog and builds previews
-// (thumbnail + full-res JPEG) that are embedded in the catalog file at import
-// time, without blocking the UI. Runs in its own QThread. All engine objects
-// it touches (database, thumbnail cache, decoder, pipeline) are internally
-// thread-safe. The whole batch is wrapped in one SQLite transaction so a large
-// import commits once instead of once per file.
+// (thumbnail + standard preview) that are embedded in the catalog file at
+// import time, without blocking the UI. Runs in its own QThread.
+//
+// S3-4: the import runs as a three-stage pipeline so the IO-bound (DNG
+// conversion + file copy/move), CPU-bound (RAW decode + thumbnail/standard
+// preview rendering) and DB-bound (catalog inserts) stages no longer block
+// each other. Stage 1 runs on QtConcurrent (IO + light CPU); Stage 2 runs on
+// a dedicated QThreadPool (heavy decode + render); Stage 3 writes the catalog
+// in batches of 100 rows per commit so a crash mid-import only loses the last
+// partial batch instead of the whole import.
+//
+// All engine objects the worker touches (database, thumbnail cache) are
+// thread-safe. The decoder and pipeline are *not*, so each Stage-2 task owns
+// its own RawDecoder + Pipeline built from a shared ColorManager — that keeps
+// the colour transforms consistent while avoiding per-pixel cross-thread
+// sharing of stateful objects.
 
 #include <atomic>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <vector>
 
 #include <QImage>
 #include <QMetaType>
@@ -15,12 +31,13 @@
 #include <QStringList>
 
 #include "catalog/LibraryManager.h"
+#include "catalog/ThumbnailCache.h"
 
 namespace lrc {
 class CatalogDatabase;
+class ColorManager;
 class Pipeline;
 class RawDecoder;
-class ThumbnailCache;
 } // namespace lrc
 
 class ImportWorker : public QObject {
@@ -28,6 +45,7 @@ class ImportWorker : public QObject {
 public:
     ImportWorker(lrc::CatalogDatabase& catalog, lrc::ThumbnailCache& cache,
                  lrc::RawDecoder& decoder, lrc::Pipeline& pipeline,
+                 std::shared_ptr<const lrc::ColorManager> colorManager,
                  QObject* parent = nullptr);
 
     // 请求取消:importPaths 在下一轮循环退出 (request shutdown; the running
@@ -63,7 +81,33 @@ private:
     lrc::ThumbnailCache& cache_;
     lrc::RawDecoder& decoder_;
     lrc::Pipeline& pipeline_;
+    std::shared_ptr<const lrc::ColorManager> cm_;
     std::atomic<bool> abort_{false};
+
+    // S3-4 pipeline stage records. `PerFileStage1` is the output of the
+    // IO/DNG stage (Stage 1); `PerFileFinal` carries the render output that
+    // Stage 2 produces, and is consumed by the DB-batch stage (Stage 3). The
+    // `imageId` is assigned by Stage 3 (only after the row is in the catalog)
+    // so the field stays 0 between Stages 1 and 3.
+    struct PerFileStage1 {
+        QString src;                       // original path (for diagnostics)
+        std::filesystem::path catalogPath; // resolved on-disk path
+        bool ok = false;
+        QString warn;
+        bool convertedToDng = false;
+    };
+
+    struct PerFileFinal {
+        QString src;
+        std::filesystem::path catalogPath;
+        bool ok = false;
+        QString warn;
+        bool convertedToDng = false;
+        int64_t imageId = 0;
+        std::optional<lrc::ThumbnailCache::RenderedJpeg> thumb;
+        std::optional<lrc::ThumbnailCache::RenderedStandardPreview> standard;
+        int conversionFailureIndex = -1; // -1 = no failure
+    };
 };
 
 // Registered in main() so the enum can cross a queued connection (ImportWorker

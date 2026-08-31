@@ -569,6 +569,16 @@ bool CatalogDatabase::open() {
         "ON DELETE CASCADE,"
         "  PRIMARY KEY (panorama_image_id, source_image_id)"
         ");"
+        // PHASE_14: perceptual hash + 64-dim deep embedding per image.  Both
+        // are updated atomically via storePhotoFeatures(); the stack_id
+        // column lives on images itself (ensureColumn'd after this CREATE).
+        "CREATE TABLE IF NOT EXISTS photo_features ("
+        "  image_id INTEGER PRIMARY KEY NOT NULL REFERENCES images(id) "
+        "ON DELETE CASCADE,"
+        "  phash INTEGER NOT NULL DEFAULT 0,"
+        "  model_version INTEGER NOT NULL DEFAULT 1,"
+        "  embedding BLOB NOT NULL DEFAULT X''"
+        ");"
         "CREATE TABLE IF NOT EXISTS folders ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  path TEXT NOT NULL UNIQUE,"
@@ -615,6 +625,8 @@ bool CatalogDatabase::open() {
     ensureColumn("date_taken", "TEXT NOT NULL DEFAULT ''");
     ensureColumn("camera", "TEXT NOT NULL DEFAULT ''");
     ensureColumn("lens", "TEXT NOT NULL DEFAULT ''");
+    // PHASE_14: stack id for duplicate / burst stacking — 0 = unstacked.
+    ensureColumn("stack_id", "INTEGER NOT NULL DEFAULT 0");
 
     // M6: edit_history gains variant_id (the edits table needs a full rebuild,
     // handled by ensureEditsVariant below because its old primary key cannot be
@@ -969,6 +981,21 @@ std::optional<ImageRecord> CatalogDatabase::findImageByPath(
     return readImageRecord(s.stmt);
 }
 
+std::optional<ImageRecord> CatalogDatabase::findImageById(int64_t id) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_ || id <= 0)
+        return std::nullopt;
+    const std::string sql = std::string("SELECT ") + kImageColumns +
+                            " FROM images WHERE id = ?1;";
+    Stmt s(db_, sql.c_str(), &stmtCache_);
+    if (!s.ok())
+        return std::nullopt;
+    sqlite3_bind_int64(s.stmt, 1, id);
+    if (s.step() != SQLITE_ROW)
+        return std::nullopt;
+    return readImageRecord(s.stmt);
+}
+
 bool CatalogDatabase::storePreviewImpl(sqlite3* db, int64_t imageId,
                                        PreviewKind kind,
                                        const std::vector<uint8_t>& data,
@@ -1094,10 +1121,38 @@ CatalogDatabase::getStandardPreview(int64_t imageId) const {
     if (!p)
         return std::nullopt;
     std::vector<uint8_t> blob(p, p + bytes);
-    auto buf = decodeStandardPreview(blob);
-    if (!buf || buf->empty())
+    auto decoded = decodeStandardPreview(blob);
+    if (!decoded.buf || decoded.buf->empty())
         return std::nullopt;
-    return buf;
+    return decoded.buf;
+}
+
+std::optional<CatalogDatabase::DecodedStandardPreviewEntry>
+CatalogDatabase::getStandardPreviewWithMeta(int64_t imageId) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return std::nullopt;
+    Stmt s(db_, "SELECT data FROM previews WHERE image_id=?1 AND kind=?2;",
+           &stmtCache_);
+    if (!s.ok())
+        return std::nullopt;
+    sqlite3_bind_int64(s.stmt, 1, imageId);
+    sqlite3_bind_int(s.stmt, 2, static_cast<int>(PreviewKind::Standard));
+    if (s.step() != SQLITE_ROW)
+        return std::nullopt;
+    const int bytes = sqlite3_column_bytes(s.stmt, 0);
+    if (bytes == 0)
+        return std::nullopt;
+    const auto* p =
+        static_cast<const uint8_t*>(sqlite3_column_blob(s.stmt, 0));
+    if (!p)
+        return std::nullopt;
+    std::vector<uint8_t> blob(p, p + bytes);
+    auto decoded = decodeStandardPreview(blob);
+    if (!decoded.buf || decoded.buf->empty())
+        return std::nullopt;
+    return DecodedStandardPreviewEntry{decoded.buf, decoded.nativeWidth,
+                                       decoded.nativeHeight};
 }
 
 bool CatalogDatabase::hasStandardPreview(int64_t imageId) const {
@@ -2574,6 +2629,148 @@ bool CatalogDatabase::optimize() {
     if (!exec("VACUUM;"))
         return false;
     return true;
+}
+
+// --- photo_features (PHASE_14: duplicate detection / stacking) -----------
+
+bool CatalogDatabase::storePhotoFeatures(int64_t imageId, uint64_t perceptualHash,
+                                         const std::vector<float>& embedding,
+                                         int modelVersion) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return false;
+    Stmt s(db_,
+           "INSERT INTO photo_features(image_id, phash, model_version, embedding) "
+           "VALUES(?1, ?2, ?3, ?4) "
+           "ON CONFLICT(image_id) DO UPDATE SET "
+           "  phash=excluded.phash, "
+           "  model_version=excluded.model_version, "
+           "  embedding=excluded.embedding;",
+           &stmtCache_);
+    if (!s.ok())
+        return false;
+    sqlite3_bind_int64(s.stmt, 1, imageId);
+    // Store the 64-bit phash as a signed integer since SQLite's integer type
+    // is signed 64-bit.  The hamming distance computation below reads it back
+    // via the same bit_cast, preserving all 64 bits.
+    sqlite3_bind_int64(s.stmt, 2, std::bit_cast<int64_t>(perceptualHash));
+    sqlite3_bind_int(s.stmt, 3, modelVersion);
+    if (!embedding.empty()) {
+        sqlite3_bind_blob(s.stmt, 4, embedding.data(),
+                          static_cast<int>(embedding.size() * sizeof(float)),
+                          SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_null(s.stmt, 4);
+    }
+    return s.step() == SQLITE_DONE;
+}
+
+std::optional<CatalogDatabase::PhotoFeatureRow>
+CatalogDatabase::getPhotoFeatures(int64_t imageId) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return std::nullopt;
+    Stmt s(db_,
+           "SELECT phash, model_version, embedding FROM photo_features "
+           "WHERE image_id = ?1 LIMIT 1;",
+           &stmtCache_);
+    if (!s.ok())
+        return std::nullopt;
+    sqlite3_bind_int64(s.stmt, 1, imageId);
+    if (s.step() != SQLITE_ROW)
+        return std::nullopt;
+    PhotoFeatureRow row;
+    row.perceptualHash = std::bit_cast<uint64_t>(sqlite3_column_int64(s.stmt, 0));
+    row.modelVersion = sqlite3_column_int(s.stmt, 1);
+    const int bytes = sqlite3_column_bytes(s.stmt, 2);
+    const void* blob = sqlite3_column_blob(s.stmt, 2);
+    if (bytes > 0 && blob && (bytes % static_cast<int>(sizeof(float)) == 0)) {
+        const int count = bytes / static_cast<int>(sizeof(float));
+        row.embedding.resize(count);
+        std::memcpy(row.embedding.data(), blob, bytes);
+    }
+    return row;
+}
+
+std::vector<CatalogDatabase::PhashCandidatePair>
+CatalogDatabase::scanPhashCandidates(int maxHamming) const {
+    std::vector<PhashCandidatePair> out;
+    if (!db_)
+        return out;
+    if (maxHamming < 0)
+        maxHamming = 0;
+    // Materialize all (id, phash) rows then do the pairwise comparison in C++
+    // — SQLite has no built-in popcount; doing the O(N^2/2) loop here lets us
+    // use std::popcount on 64-bit words, which is several times faster than
+    // any byte-at-a-time SQL UDF the engine would otherwise call.
+    std::vector<std::pair<int64_t, uint64_t>> rows;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        Stmt s(db_, "SELECT image_id, phash FROM photo_features;", &stmtCache_);
+        if (!s.ok())
+            return out;
+        while (s.step() == SQLITE_ROW) {
+            const int64_t id = sqlite3_column_int64(s.stmt, 0);
+            const uint64_t h = std::bit_cast<uint64_t>(sqlite3_column_int64(s.stmt, 1));
+            rows.emplace_back(id, h);
+        }
+    }
+    for (size_t i = 0; i < rows.size(); ++i) {
+        for (size_t j = i + 1; j < rows.size(); ++j) {
+            const uint64_t diff = rows[i].second ^ rows[j].second;
+            const int dist = static_cast<int>(std::popcount(diff));
+            if (dist <= maxHamming) {
+                out.push_back(PhashCandidatePair{rows[i].first, rows[j].first, dist});
+            }
+        }
+    }
+    return out;
+}
+
+bool CatalogDatabase::setStackId(int64_t imageId, int64_t stackId) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return false;
+    if (imageId <= 0)
+        return false;
+    if (stackId < 0)
+        stackId = 0;
+    Stmt s(db_, "UPDATE images SET stack_id = ?1 WHERE id = ?2;", &stmtCache_);
+    if (!s.ok())
+        return false;
+    sqlite3_bind_int64(s.stmt, 1, stackId);
+    sqlite3_bind_int64(s.stmt, 2, imageId);
+    return s.step() == SQLITE_DONE;
+}
+
+std::vector<int64_t> CatalogDatabase::getStackMembers(int64_t stackId) const {
+    std::vector<int64_t> out;
+    if (stackId <= 0)
+        return out;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return out;
+    Stmt s(db_, "SELECT id FROM images WHERE stack_id = ?1 ORDER BY id;", &stmtCache_);
+    if (!s.ok())
+        return out;
+    sqlite3_bind_int64(s.stmt, 1, stackId);
+    while (s.step() == SQLITE_ROW)
+        out.push_back(sqlite3_column_int64(s.stmt, 0));
+    return out;
+}
+
+int64_t CatalogDatabase::nextStackId() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return 1;
+    Stmt s(db_, "SELECT COALESCE(MAX(stack_id), 0) FROM images WHERE stack_id > 0;",
+           &stmtCache_);
+    if (!s.ok())
+        return 1;
+    if (s.step() != SQLITE_ROW)
+        return 1;
+    const int64_t v = sqlite3_column_int64(s.stmt, 0);
+    return (v <= 0) ? 1 : (v + 1);
 }
 
 } // namespace lrc

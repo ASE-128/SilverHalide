@@ -1,4 +1,4 @@
-﻿; ---------------------------------------------------------------------------
+; ---------------------------------------------------------------------------
 ; Silver Halide — NSIS installer script.
 ;
 ; Compile (from project root):
@@ -101,6 +101,19 @@ Section "Install" SEC_APP
   SetOutPath "$INSTDIR\tls"
   File "${STAGE_DIR}\tls\*.dll"
 
+  ; AI model manifest + bundled small models (test_add_2x2.onnx is generated
+  ; at build time by the engine test target; the large nafnet-denoise /
+  ; rmbg2-subject / u2net-sky ONNX files are download-on-demand via
+  ; ModelManager at runtime — see resources/models/manifest.json).
+  ; onnxruntime.dll is staged to $INSTDIR root by the existing
+  ; `File "${STAGE_DIR}\*.dll"` line above (windeployqt does NOT grab it
+  ; automatically; the build script must copy it to install_stage).
+  SetOutPath "$INSTDIR\models"
+  File "..\resources\models\manifest.json"
+  ${If} ${FileExists} "${STAGE_DIR}\models\test_add_2x2.onnx"
+    File "${STAGE_DIR}\models\test_add_2x2.onnx"
+  ${EndIf}
+
   ; Install dir + Add/Remove Programs registry entries
   WriteRegStr HKLM "Software\${APP_NAME}" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "${APP_UNINST_KEY}" "DisplayName"     "${APP_NAME}"
@@ -147,6 +160,12 @@ Section "Uninstall"
   RMDir  "$INSTDIR\networkinformation"
   RMDir  "$INSTDIR\styles"
   RMDir  "$INSTDIR\tls"
+  ; AI models manifest + bundled small ONNX (user-cached large ONNX files in
+  ; %LOCALAPPDATA%/Silver Halide/models/ are NOT removed — those are per-user
+  ; and may still be wanted if the user reinstalls).
+  Delete "$INSTDIR\models\manifest.json"
+  Delete "$INSTDIR\models\test_add_2x2.onnx"
+  RMDir  "$INSTDIR\models"
   RMDir  "$INSTDIR"
 
   DeleteRegKey HKLM "${APP_UNINST_KEY}"

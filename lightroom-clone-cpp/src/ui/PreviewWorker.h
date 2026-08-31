@@ -8,6 +8,8 @@
 #include <vector>
 
 #include <QImage>
+#include <QList>
+#include <QMetaType>
 #include <QObject>
 #include <QSize>
 #include <QString>
@@ -26,6 +28,22 @@ enum class ExportFormat : int {
     Tiff16,
     Dng,
 };
+
+// S17-18: one entry in a batch export. `maxDim` is the longest-edge cap in
+// pixels (0 = original / native resolution). `quality` is the JPEG quality
+// (0..100, ignored for lossless formats). Crosses the queued connection from
+// MainWindow to PreviewWorker::batchExport; registered in main().
+struct ExportItem {
+    qint64 imageId = 0;
+    QString filePath;
+    lrc::Adjustments adjustments;
+    QString outPath;
+    ExportFormat format = ExportFormat::Jpeg;
+    int quality = 92;
+    int maxDim = 0;
+};
+Q_DECLARE_METATYPE(ExportItem)
+Q_DECLARE_METATYPE(QList<ExportItem>)
 
 namespace lrc {
 class CatalogDatabase;
@@ -70,10 +88,19 @@ public slots:
                              const lrc::Adjustments& adjustments);
     // Full-resolution decode + render + write. `format` is an ExportFormat
     // value, `quality` the JPEG quality (0..100, ignored for lossless
-    // formats). Emits exportFinished.
+    // formats). `maxDim` (S17-18) is the longest-edge cap; 0 keeps native
+    // resolution. Emits exportFinished.
     void exportImage(qint64 imageId, const QString& filePath,
                      const lrc::Adjustments& adjustments,
-                     const QString& outPath, int format, int quality);
+                     const QString& outPath, int format, int quality,
+                     int maxDim = 0);
+    // S17-18: serial batch export. Each item is decoded + rendered + written
+    // in turn (the export bottleneck is encode, not decode; TIFF16 is already
+    // strip-parallel from S16). Emits batchExportProgress per item and a
+    // single batchExportFinished at the end with aggregate success/fail
+    // counts. Aborts mid-batch when requestAbort() was called; the counts
+    // then reflect only the items actually attempted.
+    void batchExport(const QList<ExportItem>& items);
     // Decodes (or reuses the cached linear image) and computes the auto-adjust
     // suggestion for the current photo.
     void computeAutoAdjust(qint64 imageId, const QString& filePath);
@@ -150,6 +177,12 @@ signals:
     void imageMeta(qint64 imageId, int nativeWidth, int nativeHeight);
     void loadFailed(const QString& filePath);
     void exportFinished(bool ok, const QString& message);
+    // S17-18: batch export progress (1-based done count, total == items.size()).
+    void batchExportProgress(int done, int total);
+    // S17-18: aggregate result of a batch export. `lastError` carries the
+    // engine's last error message when any item failed (empty on full success).
+    void batchExportFinished(int successCount, int failCount,
+                             const QString& lastError);
     void autoAdjustReady(const lrc::Adjustments& adjustments);
     void visualizationReady(qint64 imageId, qint64 generation,
                             const lrc::ImageBufferPtr& overlay);

@@ -85,6 +85,12 @@ public:
     // input (A=0..E=4); -1 when the last render started from the source.
     int lastReuseStartStage() const;
 
+    // Test-only hook that drops a single retained intermediate stage from the
+    // incremental cache so tests can exercise the "find-nearest-retained-
+    // ancestor" backtrack branch of renderPreview. Silently ignores stages
+    // outside [0..4] or stages that are not currently retained.
+    void dropIncrementalStageForTest(int stage);
+
     // --- Preview-resolution kernel scaling (PHASE_2) ------------------------
     // sigma-scale factor for a preview whose working long edge is
     // `workingLongEdge` and whose native full-res long edge is `fullLongEdge`.

@@ -161,6 +161,8 @@ public:
     // Filtered listing (empty/default filter returns everything).
     std::vector<ImageRecord> listImages(const ImageFilter& filter) const;
     std::optional<ImageRecord> findImageByPath(const std::string& filePath) const;
+    /** Look up a single image by primary key. Empty when id <= 0 or absent. */
+    std::optional<ImageRecord> findImageById(int64_t id) const;
     // Stores an embedded preview (thumbnail or full-res JPEG) inside the
     // catalog file, replacing any previous value. (embedded preview blob)
     bool storePreview(int64_t imageId, PreviewKind kind,
@@ -184,6 +186,19 @@ public:
     // when the stored blob is malformed. Never crashes on a corrupt record.
     std::optional<std::shared_ptr<ImageBuffer>> getStandardPreview(
         int64_t imageId) const;
+
+    // S8b: same as getStandardPreview but also returns the native full-res
+    // dimensions carried in the v2 blob header (0 for v1 blobs). The preview
+    // pipeline uses these to scale spatial kernels correctly; the UI uses them
+    // to report the photo's native size without a RAW decode.
+    struct DecodedStandardPreviewEntry {
+        ImageBufferPtr buf;
+        int nativeWidth = 0;
+        int nativeHeight = 0;
+    };
+    std::optional<DecodedStandardPreviewEntry> getStandardPreviewWithMeta(
+        int64_t imageId) const;
+
     // True when a Standard preview record exists for the image (regardless of
     // whether its blob is decodable -- use getStandardPreview to check that).
     bool hasStandardPreview(int64_t imageId) const;
@@ -296,6 +311,46 @@ public:
     bool recordPanoramaSources(int64_t panoramaImageId,
                                const std::vector<int64_t>& sourceImageIds);
     std::vector<int64_t> listPanoramaSources(int64_t panoramaImageId) const;
+
+    // --- photo_features (PHASE_14: duplicate detection / stacking) ---------
+    // pHash (64-bit perceptual), 64-dim embedding (raw BLOB), and an
+    // automatically-bumped model_version so the deep-embedding stage can be
+    // re-run when the model is updated. Duplicate scanning compares phash
+    // first (fast) then re-ranks by embedding cosine distance for pairs whose
+    // phash hamming-distance is within the configured threshold.
+    bool storePhotoFeatures(int64_t imageId, uint64_t perceptualHash,
+                            const std::vector<float>& embedding,
+                            int modelVersion = 1);
+    // Returns (phash, model_version, embedding-vector) for an image, or
+    // nullopt when the row does not exist.  The returned embedding is always
+    // empty when the database BLOB is malformed — never crashes on legacy
+    // catalogs or on corrupt records (catch-all per-call error handling).
+    struct PhotoFeatureRow {
+        uint64_t perceptualHash = 0;
+        int modelVersion = 0;
+        std::vector<float> embedding;
+    };
+    std::optional<PhotoFeatureRow> getPhotoFeatures(int64_t imageId) const;
+    // Returns image_ids whose phash hamming distance <= `maxHamming` against
+    // every row in the catalog — the call site then re-ranks by embedding
+    // cosine distance (so distances larger than maxHamming never reach the
+    // expensive re-rank step).  Result is (aId, bId, hammingDistance) for
+    // every unique aId < bId pair.
+    struct PhashCandidatePair {
+        int64_t aId;
+        int64_t bId;
+        int hamming;
+    };
+    std::vector<PhashCandidatePair> scanPhashCandidates(
+        int maxHamming = 8) const;
+    // Stack management (duplicate groups).  stackId == 0 means "not stacked".
+    bool setStackId(int64_t imageId, int64_t stackId);
+    // Returns every image id belonging to the same stack (including the
+    // passed-in id itself).  Empty when the image is not in a stack.
+    std::vector<int64_t> getStackMembers(int64_t stackId) const;
+    // Next available stack id: MAX(stack_id) + 1 from the rows that are
+    // stacked at all, or 1 when no stack has ever been created.
+    int64_t nextStackId() const;
 
     // --- transactions (primary connection) --------------------------------
     // Wrap a batch of writes on the primary connection. The import worker must

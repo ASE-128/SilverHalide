@@ -171,6 +171,64 @@ TEST_CASE("renderPreview: incremental cache recomputes from the first changed "
     REQUIRE(pipeline.lastRecomputeStage() == 0);
 }
 
+TEST_CASE("renderPreview: stage-E-only change restarts from spatial stage",
+          "[incremental][renderPreview][S9]") {
+    // Stage E (spatial) covers texture/clarity/sharpness/vignette/grain/etc.
+    // Because E's output is deliberately NOT retained, the incremental cache
+    // must still reuse stages A-D (present[0..3]) and restart from stage 4.
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+    auto src = makeGradientImage(1024, 683);
+    const Size target{1024, 683};
+    constexpr uint64_t imageId = 42;
+
+    Adjustments base = sampleAdjustments();
+    auto r1 = pipeline.renderPreview(*src, base, target, 1024, imageId);
+    REQUIRE(r1);
+    REQUIRE(pipeline.lastRecomputeStage() == 0);
+
+    Adjustments grain = base;
+    grain.grain += 30.0;            // only hashStageE changes
+    grain.grainSize += 10.0;
+    auto r2 = pipeline.renderPreview(*src, grain, target, 1024, imageId);
+    REQUIRE(r2);
+    REQUIRE(pipeline.lastRecomputeStage() == 4);      // Stage E
+    REQUIRE(pipeline.lastReuseStartStage() == 3);     // reused D's output
+}
+
+TEST_CASE("renderPreview: evicted intermediate stage backtracks start to "
+          "nearest retained ancestor",
+          "[incremental][renderPreview][S9]") {
+    // After a warm render that keeps A(0),B(1),C(2),D(3) retained, simulate an
+    // eviction that drops D (stages[3]) and C (stages[2]) but keeps B (stage
+    // 1) and the final frame (stage 5). Now a D-only change (firstChanged=3)
+    // has to walk the present[] bits backwards: stages[2] is missing, so it
+    // must restart from stage 2 using stages[1] (B) as input.
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+    auto src = makeGradientImage(1024, 683);
+    const Size target{1024, 683};
+    constexpr uint64_t imageId = 42;
+
+    Adjustments base = sampleAdjustments();
+    auto r1 = pipeline.renderPreview(*src, base, target, 1024, imageId);
+    REQUIRE(r1);
+    // Confirm warm state has D retained (so we have something to evict).
+    REQUIRE(pipeline.lastRecomputeStage() == 0);
+
+    // Drop two retained intermediates (C and D) while leaving earlier stages.
+    pipeline.dropIncrementalStageForTest(2);
+    pipeline.dropIncrementalStageForTest(3);
+
+    // Only D changes. firstChanged=3, present[2]=false, must restart from 2.
+    Adjustments hsl = base;
+    hsl.hsl[static_cast<size_t>(ColorRange::Red)].saturation = 40.0;
+    auto r2 = pipeline.renderPreview(*src, hsl, target, 1024, imageId);
+    REQUIRE(r2);
+    REQUIRE(pipeline.lastRecomputeStage() == 2);      // restarted from C
+    REQUIRE(pipeline.lastReuseStartStage() == 1);     // reused B's output
+}
+
 TEST_CASE("renderPreview: spatial kernels scale with the preview/full ratio",
           "[incremental][renderPreview]") {
     Adjustments a;

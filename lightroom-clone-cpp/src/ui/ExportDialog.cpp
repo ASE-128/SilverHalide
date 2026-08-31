@@ -61,6 +61,20 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
         formatCombo_->addItem(tr(kFormatNames[i]));
     form->addRow(tr("格式:"), formatCombo_);
 
+    // S17-18: longest-edge size preset. 0 = native resolution; the other
+    // entries cap the longest edge of the exported image (area-average
+    // downscale, never upscales). ExportEngine::encodeAndWrite applies the
+    // cap in linear F32 space before the format-specific encode, so every
+    // format takes the same path.
+    sizeCombo_ = new QComboBox(this);
+    sizeCombo_->addItem(tr("原始尺寸"), QVariant(0));
+    sizeCombo_->addItem(tr("1024 px"), QVariant(1024));
+    sizeCombo_->addItem(tr("1920 px"), QVariant(1920));
+    sizeCombo_->addItem(tr("2048 px"), QVariant(2048));
+    sizeCombo_->addItem(tr("4096 px"), QVariant(4096));
+    sizeCombo_->setCurrentIndex(0);
+    form->addRow(tr("尺寸:"), sizeCombo_);
+
     // Output path + browse.
     auto* pathRow = new QHBoxLayout;
     pathRow->setSpacing(6);
@@ -115,6 +129,14 @@ QString ExportDialog::outputPath() const { return pathEdit_->text().trimmed(); }
 int ExportDialog::formatIndex() const { return formatCombo_->currentIndex(); }
 
 int ExportDialog::jpegQuality() const { return qualitySlider_->value(); }
+
+int ExportDialog::maxDim() const {
+    // S17-18: 0 (the first entry, "原始尺寸") leaves the export at native
+    // resolution; any other preset caps the longest edge.
+    bool ok = false;
+    const int v = sizeCombo_ ? sizeCombo_->currentData().toInt(&ok) : 0;
+    return ok ? v : 0;
+}
 
 void ExportDialog::setVariants(const std::vector<lrc::EditVariant>& variants) {
     // Block signals while repopulating so variantChosen() reflects only real

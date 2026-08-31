@@ -32,7 +32,15 @@ add_executable(lrc_tests
   test_postcrop_vignette.cpp
   test_range_masks.cpp
   TestSpotRemoval.cpp
-  TestPanoramaStitcher.cpp)
+  TestPanoramaStitcher.cpp
+  TestRenderScratch.cpp
+  TestSha256.cpp
+  # PHASE_11..15 — AI inference + feature tests.
+  TestAiInference.cpp
+  TestAiDenoise.cpp
+  TestAiMask.cpp
+  TestDuplicateDetection.cpp
+  TestSoftProofing.cpp)
 
 target_link_libraries(lrc_tests PRIVATE lrc_catalog Catch2::Catch2WithMain)
 target_include_directories(lrc_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)

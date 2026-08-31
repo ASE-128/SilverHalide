@@ -75,6 +75,21 @@ public:
         const std::filesystem::path& rawPath, RawDecoder& decoder,
         Pipeline& pipeline);
 
+    // S5: renders + encodes a standard preview blob (linear ProPhoto F32,
+    // 2048px longest edge, v2 header carrying native dimensions). Self-
+    // contained — builds its own decoder/colour manager, so callers do not
+    // need to thread a RawDecoder/Pipeline through just to produce the
+    // catalog blob. Returns blob + dimensions, or nullopt on failure.
+    struct RenderedStandardPreview {
+        std::vector<uint8_t> blob;   // v2 header + F32 RGB payload
+        int previewWidth = 0;
+        int previewHeight = 0;
+        int nativeWidth = 0;
+        int nativeHeight = 0;
+    };
+    std::optional<RenderedStandardPreview> renderStandardPreviewBlob(
+        const std::filesystem::path& rawPath);
+
 private:
     std::filesystem::path diskDir_;
 
