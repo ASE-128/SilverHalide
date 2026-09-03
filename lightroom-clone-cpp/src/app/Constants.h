@@ -6,7 +6,7 @@
 namespace lrc::app {
 
 inline constexpr const char* kAppName = "Silver Halide";
-inline constexpr const char* kAppVersion = "2.12.0";
+inline constexpr const char* kAppVersion = "1.0.0";
 inline constexpr const char* kAppOrganization = "ASE-128";
 
 // Name of the built-in default catalog. When no catalog has been chosen

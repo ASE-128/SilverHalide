@@ -47,6 +47,23 @@ std::string ModelManager::sha256File(const std::filesystem::path& path) {
 #  include <cstdlib>   // getenv_s
 #endif
 
+namespace {
+// Version-qualified leaf name: nafnet-denoise_v2.onnx so bumping the manifest
+// version automatically invalidates any stale old download. v1 keeps the
+// manifest filename verbatim. Shared by cachePathFor (writable per-user cache)
+// and readPathFor (read-only bundled / cache fallback).
+std::string versionedFilename(const ModelManifestEntry& e) {
+    if (e.version > 1) {
+        const auto ext  = std::filesystem::path(e.filename).extension();
+        const auto stem = std::filesystem::path(e.filename).stem();
+        std::ostringstream oss;
+        oss << stem.string() << "_v" << e.version << ext.string();
+        return oss.str();
+    }
+    return e.filename;
+}
+}  // namespace
+
 std::filesystem::path ModelManager::cacheRoot() {
     std::filesystem::path base;
 #if defined(_WIN32)
@@ -74,23 +91,50 @@ std::filesystem::path ModelManager::cacheRoot() {
 }
 
 std::filesystem::path ModelManager::cachePathFor(const ModelManifestEntry& e) const {
-    auto root = cacheRoot();
-    // Version-qualified filename: nafnet-denoise_v2.onnx so bumping version
-    // automatically invalidates any stale old download.
-    if (e.version > 1) {
-        const auto ext  = std::filesystem::path(e.filename).extension();
-        const auto stem = std::filesystem::path(e.filename).stem();
-        std::ostringstream oss;
-        oss << stem.string() << "_v" << e.version << ext.string();
-        return root / oss.str();
-    }
-    return root / e.filename;
+    return cacheRoot() / versionedFilename(e);
+}
+
+std::filesystem::path ModelManager::bundledRoot() {
+    // The installer ships models read-only at $INSTDIR\models. Resolve that to
+    // <applicationDirPath>/models so an installed copy finds its bundled
+    // models without a re-download. In headless builds (no Qt) or before the
+    // QApplication exists, return an empty path so readPathFor falls back to
+    // the per-user cache — preserving prior behavior for unit tests.
+#if LRC_ENABLE_QT
+    if (QCoreApplication::instance() != nullptr)
+        return std::filesystem::path(
+                   QCoreApplication::applicationDirPath().toStdU16String())
+               / "models";
+#endif
+    return {};
+}
+
+std::filesystem::path ModelManager::readPathFor(const ModelManifestEntry& e) const {
+    const auto bundled = bundledRoot() / versionedFilename(e);
+    std::error_code ec;
+    if (!bundled.empty() && std::filesystem::exists(bundled, ec))
+        return bundled;
+    return cachePathFor(e);
 }
 
 std::filesystem::path ModelManager::defaultManifestPath() {
-    // Prefer the absolute path baked in at compile time (CMake passes the
-    // project source dir via LRC_PROJECT_MANIFEST_DIR) so the manifest is
-    // resolvable regardless of the runtime working directory.
+    // Highest priority: the manifest bundled beside the installed executable
+    // at <applicationDirPath>/models/manifest.json. This is the only location
+    // that exists on an end-user machine after running the Inno Setup
+    // installer — both LRC_PROJECT_MANIFEST_DIR (the dev source tree) and the
+    // CWD-relative fallback below are dev-machine only. Probing it here means
+    // a default-constructed ModelManager (e.g. ModelManagementWidget::mm_)
+    // finds the same manifest as MainWindow::initializeAiEngine() without
+    // every caller having to special-case the bundled root.
+    const auto bundled = bundledRoot();
+    if (!bundled.empty()) {
+        const auto p = bundled / "manifest.json";
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) return p;
+    }
+    // Dev-build path: the absolute source-tree location baked in at compile
+    // time via LRC_PROJECT_MANIFEST_DIR. Lets the manifest resolve regardless
+    // of the runtime working directory during development.
 #if defined(LRC_PROJECT_MANIFEST_DIR)
     {
         auto p = std::filesystem::path(LRC_PROJECT_MANIFEST_DIR)
@@ -322,9 +366,16 @@ ModelManager::ModelManager(std::filesystem::path manifestPath)
         reloadManifest(manifestPath);
         impl_->manifestPath = std::move(manifestPath);
     } else {
-        // Try the default relative path plus a couple of build-tree relatives
+        // Fall back through plausible manifest locations. Order matters: the
+        // bundled <appdir>/models/manifest.json is the only one that exists on
+        // an end-user machine after running the Inno Setup installer; the
+        // remaining entries cover dev-tree / CWD-relative layouts used during
+        // development and headless tests.
+        const auto bundled = bundledRoot();
         const auto tryPaths = {
             manifestPath,
+            bundled.empty() ? std::filesystem::path{}
+                             : (bundled / "manifest.json"),
             std::filesystem::path(LRC_PROJECT_MANIFEST_DIR) / "resources" / "models" / "manifest.json",
             std::filesystem::current_path() / "resources" / "models" / "manifest.json",
             std::filesystem::current_path() / "lightroom-clone-cpp" / "resources" / "models" / "manifest.json",
@@ -378,7 +429,7 @@ std::optional<ModelManifestEntry> ModelManager::findModel(const std::string& id)
 }
 
 bool ModelManager::isModelReady(const ModelManifestEntry& entry) const {
-    const auto p = cachePathFor(entry);
+    const auto p = readPathFor(entry);
     if (!std::filesystem::exists(p)) return false;
     // Placeholder / TBD SHA: accept the file if size matches (best-effort).
     // This keeps the model usable on a development machine before the first

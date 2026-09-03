@@ -61,6 +61,13 @@
 #include "engine/RawDecoder.h"
 #include "engine/Xmp.h"
 #include "engine/XmpSidecar.h"
+// PHASE_12/13: AI inference wiring. ModelManager reads the bundled manifest
+// and probes <applicationDirPath>/models (read-only, ships with the installer)
+// before the per-user cache, so an installed copy finds its bundled models
+// without a re-download. AiInferenceEngine wraps ONNX Runtime sessions
+// (per-thread) and is exposed to Pipeline via setGlobalAiEngine.
+#include "app/ModelManager.h"
+#include "engine/AiInference.h"
 #include "ui/CollectionsDialog.h"
 #include "ui/DevelopPanel.h"
 #include "ui/EditHistoryDialog.h"
@@ -117,6 +124,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Lets the decoder convert imported JPEG/PNG/TIFF into linear ProPhoto.
     decoder_.setColorManager(colorManager_);
     pipeline_ = std::make_unique<lrc::Pipeline>(colorManager_);
+
+    // PHASE_12/13: AI engine + model manager. The bundled installer ships
+    // models at <applicationDirPath>/models; ModelManager probes that
+    // directory via readPathFor() before the per-user cache, so an installed
+    // copy finds its models without triggering a re-download. Each ready
+    // model is registered with the engine (per-thread ONNX sessions). The
+    // engine is then exposed process-wide via Pipeline::setGlobalAiEngine
+    // so the static applySpatialAdjustments / applyLocalAdjustments entry
+    // points can reach it. When LRC_ENABLE_AI is off (CMake toggle) or the
+    // bundled manifest is missing, the engine stays null and Pipeline
+    // silently falls back to its pure-C++ NR / heuristic mask paths.
+    initializeAiEngine();
 
     // Catalog path: honour a previously chosen catalog (QSettings), otherwise
     // fall back to the default location. Persist the path once the catalog
@@ -1564,6 +1583,72 @@ void MainWindow::setSidePanelsVisible(bool visible) {
     navigator_->setVisible(visible);
     if (developScroll_)
         developScroll_->setVisible(visible);
+}
+
+// PHASE_12/13: AI engine bootstrap. The body is #ifdef-guarded so a
+// LRC_ENABLE_AI=OFF GUI build links cleanly (no ONNX Runtime symbols). When
+// AI is enabled but the bundled manifest is missing (dev build without the
+// installer stage), this logs a single warning and leaves aiEngine_ null;
+// Pipeline then runs its pure-C++ fallback paths exactly as before.
+void MainWindow::initializeAiEngine() {
+#ifdef LRC_ENABLE_AI
+    try {
+        // Prefer the manifest bundled beside the exe (<appDir>/models/
+        // manifest.json); fall back to ModelManager's default search path
+        // (the Qt resource :/models/manifest.json or the dev source tree).
+        const auto bundled = lrc::ModelManager::bundledRoot();
+        const std::filesystem::path manifestPath =
+            !bundled.empty() && std::filesystem::exists(bundled / "manifest.json")
+                ? (bundled / "manifest.json")
+                : lrc::ModelManager::defaultManifestPath();
+        modelManager_ = std::make_unique<lrc::ModelManager>(manifestPath);
+        aiEngine_ = std::make_unique<lrc::AiInferenceEngine>();
+
+        // Register every bundled model that resolves to a ready file on disk
+        // (installer-shipped or already cached). Failures are logged but do
+        // not abort startup: the engine simply reports hasModel(id)==false
+        // for the missing entries, and Pipeline falls back per-mask.
+        const auto& models = modelManager_->allModels();
+        int loaded = 0;
+        for (const auto& entry : models) {
+            if (entry.internalOnly)
+                continue;  // test stub, never registered in production
+            if (!modelManager_->isModelReady(entry))
+                continue;
+            const auto path = modelManager_->readPathFor(entry);
+            lrc::ModelInfo info;
+            info.id = entry.id;
+            info.onnxPath = path;
+            info.inputShape.dims = entry.inputShape;
+            info.inputShape.layout = "NCHW";
+            info.outputShape.dims = entry.outputShape;
+            info.outputShape.layout = "NCHW";
+            info.inputMean = entry.inputMean.empty()
+                ? std::vector<float>{0.0f, 0.0f, 0.0f}
+                : entry.inputMean;
+            info.inputStd = entry.inputStd.empty()
+                ? std::vector<float>{1.0f, 1.0f, 1.0f}
+                : entry.inputStd;
+            if (aiEngine_->loadModel(info))
+                ++loaded;
+            else
+                qWarning("AiInferenceEngine: failed to load '%s' from %s",
+                         entry.id.c_str(),
+                         path.string().c_str());
+        }
+        // Publish the engine process-wide so Pipeline's static entry points
+        // can reach it. Pipeline::globalAiEngine() returns null until this
+        // call, which is why headless tests (no MainWindow) stay bit-identical
+        // to the pre-AI baseline.
+        lrc::Pipeline::setGlobalAiEngine(aiEngine_.get());
+        qInfo("AiInferenceEngine: %d/%zu model(s) registered for inference.",
+              loaded, models.size());
+    } catch (const std::exception& e) {
+        qWarning("AI engine initialization failed: %s", e.what());
+        aiEngine_.reset();
+        modelManager_.reset();
+    }
+#endif
 }
 
 // --- M1: global bare-key shortcuts -------------------------------------------

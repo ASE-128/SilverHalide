@@ -21,7 +21,7 @@ Unicode true
 ; Branding / version
 ; ---------------------------------------------------------------------------
 !define APP_NAME      "Silver Halide"
-!define APP_VERSION   "2.11.0"
+!define APP_VERSION   "1.0.0"
 !define APP_EXE       "SilverHalide.exe"
 !define APP_PUBLISHER "ASE-128"
 !define APP_COPYRIGHT "©ASE-128 2026"
@@ -36,9 +36,15 @@ OutFile "..\dist\Silver Halide Setup ${APP_VERSION}.exe"
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 InstallDirRegKey HKLM "Software\${APP_NAME}" "InstallDir"
 RequestExecutionLevel admin
-SetCompressor /SOLID lzma
+; zlib (non-solid): NSIS does NOT support per-file compression control, so we
+; can't selectively "store" .onnx/.data. But zlib's deflate has a fast
+; incompressibility detector — for high-entropy binaries (ONNX weights,
+; already-compressed DLLs) it quickly falls back to store mode, while still
+; compressing text/JSON/manifest efficiently. This is ~10x faster than LZMA
+; on a 660 MB payload that is mostly already-compressed binary.
+SetCompressor zlib
 
-VIProductVersion "2.11.0.0"
+VIProductVersion "1.0.0.0"
 VIAddVersionKey "ProductName"      "${APP_NAME}"
 VIAddVersionKey "CompanyName"      "${APP_PUBLISHER}"
 VIAddVersionKey "LegalCopyright"   "${APP_COPYRIGHT}"
@@ -101,18 +107,22 @@ Section "Install" SEC_APP
   SetOutPath "$INSTDIR\tls"
   File "${STAGE_DIR}\tls\*.dll"
 
-  ; AI model manifest + bundled small models (test_add_2x2.onnx is generated
-  ; at build time by the engine test target; the large nafnet-denoise /
-  ; rmbg2-subject / u2net-sky ONNX files are download-on-demand via
-  ; ModelManager at runtime — see resources/models/manifest.json).
-  ; onnxruntime.dll is staged to $INSTDIR root by the existing
-  ; `File "${STAGE_DIR}\*.dll"` line above (windeployqt does NOT grab it
-  ; automatically; the build script must copy it to install_stage).
+  ; AI models — bundled into $INSTDIR\models (read-only). ModelManager probes
+  ; <applicationDirPath>/models via readPathFor() before the per-user cache,
+  ; so installed models are "ready" (isModelReady true) without a re-download.
+  ; onnxruntime.dll + onnxruntime_providers_shared.dll are staged to $INSTDIR
+  ; root by the `File "${STAGE_DIR}\*.dll"` line above (windeployqt does NOT
+  ; grab them automatically; the build/stage script copies them to install_stage).
+  ; nafnet_denoise.data is the external-weights sibling of nafnet-denoise.onnx
+  ; (ONNX external-data pattern; the .onnx graph references it by leaf name).
   SetOutPath "$INSTDIR\models"
   File "..\resources\models\manifest.json"
-  ${If} ${FileExists} "${STAGE_DIR}\models\test_add_2x2.onnx"
-    File "${STAGE_DIR}\models\test_add_2x2.onnx"
-  ${EndIf}
+  File "${STAGE_DIR}\models\nafnet-denoise.onnx"
+  File "${STAGE_DIR}\models\nafnet_denoise.data"
+  File "${STAGE_DIR}\models\rmbg2-subject.onnx"
+  ; test_add_2x2.onnx is an internal-only test stub that may not be staged;
+  ; /nonfatal lets the build proceed without it.
+  File /nonfatal "${STAGE_DIR}\models\test_add_2x2.onnx"
 
   ; Install dir + Add/Remove Programs registry entries
   WriteRegStr HKLM "Software\${APP_NAME}" "InstallDir" "$INSTDIR"
@@ -160,10 +170,13 @@ Section "Uninstall"
   RMDir  "$INSTDIR\networkinformation"
   RMDir  "$INSTDIR\styles"
   RMDir  "$INSTDIR\tls"
-  ; AI models manifest + bundled small ONNX (user-cached large ONNX files in
-  ; %LOCALAPPDATA%/Silver Halide/models/ are NOT removed — those are per-user
-  ; and may still be wanted if the user reinstalls).
+  ; AI models — bundled ONNX files shipped with the installer. (Per-user
+  ; downloaded copies in %LOCALAPPDATA%/Silver Halide/models/ are NOT removed
+  ; — those may still be wanted if the user reinstalls.)
   Delete "$INSTDIR\models\manifest.json"
+  Delete "$INSTDIR\models\nafnet-denoise.onnx"
+  Delete "$INSTDIR\models\nafnet_denoise.data"
+  Delete "$INSTDIR\models\rmbg2-subject.onnx"
   Delete "$INSTDIR\models\test_add_2x2.onnx"
   RMDir  "$INSTDIR\models"
   RMDir  "$INSTDIR"

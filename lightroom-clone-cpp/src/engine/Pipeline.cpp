@@ -12,6 +12,17 @@
 #include "utils/Parallel.h"
 #include "app/Constants.h"
 
+// PHASE_12/13: AI inference wiring. These headers are intentionally guarded by
+// LRC_ENABLE_AI in CMake — when AI is disabled, the fallback bilateral NR /
+// heuristic mask paths run instead (see AiDenoiseProcessor / AiMaskGenerator
+// for the contract). When AI is enabled but Pipeline::globalAiEngine() is null
+// (headless tests, pre-MainWindow init), the same fallbacks run.
+#ifdef LRC_ENABLE_AI
+#  include "engine/AiDenoiseProcessor.h"
+#  include "engine/AiInference.h"
+#  include "engine/AiMaskGenerator.h"
+#endif
+
 // M4-3 optional SIMD batches. Defined by CMake only when the SIMD path is
 // wanted; the default build keeps the original scalar loops untouched.
 #ifdef LRC_ENABLE_SIMD
@@ -1456,6 +1467,49 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
     const Pipeline::SpatialKernels kernels =
         Pipeline::spatialKernels(a, w, h, sigmaScale);
 
+    // --- AI Denoise (PHASE_12 wiring) ---------------------------------------
+    // Runs BEFORE the manual NR path: the user's manual luma/color NR
+    // sliders continue to operate on the AI-denoised buffer, so they can
+    // fine-tune residual noise / texture. aiDenoise.strength (0..100) is
+    // the mix factor between the original buffer and NAFNet's output
+    // (1.0 == full AI replacement). When LRC_ENABLE_AI is off or the
+    // engine/model is unavailable, this branch is a no-op and the manual
+    // NR sliders below remain the user's primary denoise — preserving
+    // bit-identical behaviour with pre-AI builds.
+    //
+    // Threading: applySpatialAdjustmentsScaled runs on the PreviewWorker
+    // thread; globalAiEngine() returns a pointer whose underlying ONNX
+    // sessions are per-thread, so concurrent preview + export renders are
+    // safe.
+    if (a.aiDenoise.hasEffect()) {
+#ifdef LRC_ENABLE_AI
+        auto* engine = Pipeline::globalAiEngine();
+        if (engine && engine->hasModel("nafnet-denoise")) {
+            // Wrap p into a fresh F32 buffer (single memcpy; the inference
+            // cost dominates). AiDenoiseProcessor reads this buffer and
+            // writes a new tiled output, never aliasing the input. The
+            // result is memcpy'd back in place.
+            auto buf = ImageBuffer::create(w, h, PixelFormat::F32);
+            std::memcpy(buf->data().data(), p, n * 3 * sizeof(float));
+            AiDenoiseProcessor proc(engine);
+            AiDenoiseOptions opts;
+            opts.strength = a.aiDenoise.strength / 100.0f;
+            opts.luminanceOnly =
+                (a.aiDenoise.mode == AiDenoiseMode::LuminanceOnly);
+            opts.tileSize = 256;    // NAFNet's native input resolution
+            opts.overlap = 64;      // feather-blend band between tiles
+            opts.inputSpace = "prophoto";  // working space, no sRGB round-trip
+            auto denoised = proc.denoise(*buf, "nafnet-denoise", opts);
+            if (denoised) {
+                std::memcpy(p, denoised->data().data(),
+                            n * 3 * sizeof(float));
+            }
+        }
+#endif
+        // No-branch when AI is disabled or the model is not loaded: the
+        // manual luma/color NR kernels below remain authoritative.
+    }
+
     // --- Texture + clarity: local (high-pass) contrast on luminance. --------
     // A single luma pass is shared by both stages (the base image is unchanged
     // inside this block). The blur temporaries come from the scratch pool.
@@ -1913,6 +1967,14 @@ float Pipeline::maskWeight(const Mask& m, int w, int h, float nx, float ny) {
                 wgt = 1.0f - wgt;
             return std::clamp(wgt, 0.0f, 1.0f);
         }
+        case MaskType::AiMask:
+            // AiMask is content-driven (semantic segmentation) and can only
+            // be evaluated with pixel access in applyLocalAdjustments. The
+            // pure-geometry maskWeight path has no buffer to run the model
+            // on, so return a neutral 0.5 weight — visible in the Alt-overlay
+            // but non-authoritative. The real weight is generated inline in
+            // applyLocalAdjustments via AiMaskGenerator::generate.
+            return 0.5f;
         case MaskType::None:
         default:
             return m.invert ? 1.0f : 0.0f;
@@ -2157,17 +2219,51 @@ void Pipeline::applyLocalAdjustments(const Adjustments& a, float* p, int w,
             continue;
         const float opacity = static_cast<float>(std::clamp(m.opacity, 0.0, 1.0));
 
-        // Weight source for this mask. Geometry masks use the globally cached
-        // rasterized field; colour-range masks evaluate HSL distance to the
-        // sampled reference against the pre-local base snapshot. The weight is
-        // multiplied by opacity on the fly inside the blend loop below, so no
-        // per-mask weight buffer is allocated (bit-identical to the old one).
-        const std::shared_ptr<const std::vector<float>> field =
-            (m.type == MaskType::ColorRange)
-                ? nullptr
-                : Pipeline::brushWeightField(m, w, h);
-        if (m.type != MaskType::ColorRange && !field)
-            continue;  // defensive only: never null for valid w/h
+        // Weight source for this mask.
+        //   • Geometry masks (linear/radial/brush): globally cached rasterized
+        //     field via brushWeightField (bit-identical to maskWeight per pixel).
+        //   • Colour-range masks: HSL distance evaluated per pixel in the blend
+        //     loop below (no field needed).
+        //   • AiMask (PHASE_13 wiring): semantic segmentation requires pixel
+        //     content, so the field is generated here from the current buffer.
+        //     NOT cached globally — the result depends on image pixels and
+        //     caching would thrash on every preview frame, evicting geometry
+        //     masks. When LRC_ENABLE_AI is off or the engine/model is
+        //     unavailable, the mask is skipped (manual geometry masks remain
+        //     the user's primary tool).
+        std::shared_ptr<const std::vector<float>> field;
+        if (m.type == MaskType::ColorRange) {
+            // Handled in the blend loop below (per-pixel HSL distance).
+        } else if (m.type == MaskType::AiMask) {
+#ifdef LRC_ENABLE_AI
+            auto* engine = Pipeline::globalAiEngine();
+            const std::string modelId = m.ai.modelIdOverride.empty()
+                ? std::string(defaultModelIdFor(m.ai.target))
+                : m.ai.modelIdOverride;
+            if (engine && engine->hasModel(modelId)) {
+                // Wrap p into a fresh F32 buffer (single memcpy; the
+                // segmentation inference cost dominates). AiMaskGenerator
+                // returns an RGB buffer where R=G=B=weight; collapse to a
+                // single-channel weight field for the blend loop.
+                auto buf = ImageBuffer::create(w, h, PixelFormat::F32);
+                std::memcpy(buf->data().data(), p, n * 3 * sizeof(float));
+                AiMaskGenerator gen(engine);
+                auto maskBuf = gen.generate(*buf, m.ai);
+                if (maskBuf) {
+                    auto f = std::make_shared<std::vector<float>>(n);
+                    const float* mp = reinterpret_cast<const float*>(
+                        maskBuf->data().data());
+                    for (size_t i = 0; i < n; ++i)
+                        (*f)[i] = mp[i * 3];
+                    field = f;
+                }
+            }
+#endif
+            if (!field) continue;  // AI off / model missing / generation failed
+        } else {
+            field = Pipeline::brushWeightField(m, w, h);
+            if (!field) continue;  // defensive only: never null for valid w/h
+        }
 
         // PHASE_4: a geometry mask with colour/luminance sub-mask modifiers
         // builds a combined sub-mask weight field against the base snapshot
@@ -3291,6 +3387,18 @@ ImageBufferPtr Pipeline::renderFullDisplay(uint64_t imageId,
     (void)imageId;
     ImageBufferPtr f32 = renderInternalLinear(linear, adjustments, 0);
     return cm_->toDisplaySRGB(*f32);
+}
+
+// --- PHASE_12/13: AI inference injection -------------------------------------
+// Static engine pointer (definition). Initialized to null at static-storage
+// init time; set once at app startup by MainWindow after the bundled models
+// have been loaded. See Pipeline.h for the threading / lifetime contract.
+AiInferenceEngine* Pipeline::aiEngine_ = nullptr;
+
+AiInferenceEngine* Pipeline::globalAiEngine() { return aiEngine_; }
+
+void Pipeline::setGlobalAiEngine(AiInferenceEngine* engine) {
+    aiEngine_ = engine;
 }
 
 } // namespace lrc

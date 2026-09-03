@@ -1,31 +1,53 @@
-# 项目状态 — v2.12.0 (M5–M10 图库/渲染功能线) · Silver Halide
+# 项目状态 — v1.0.0 正式版 · Silver Halide
 
-> 构建输出：`build_gui/Release/SilverHalide.exe`（Visual Studio 2022 x64 生成器，**不是** Ninja）。
-> 构建后需运行 `windeployqt` 部署 Qt 运行时（见 [[build-run-qt-deployment]]）。
+> **版本号说明**：v1.0.0 是 Silver Halide 的首个正式发布版本。
+> 下文记录的 v2.x 版本号均为内部开发里程碑（dev milestones），仅用于团队跟踪开发进度，
+> 从未对外发布；不要把它们当作已发布的对外版本。所有内部 2.x 里程碑的工作已经收敛到 v1.0.0 正式版中。
 >
-> **打包（NSIS）**：exe 为 GUI 子系统（`WIN32`，无控制台）。发布载荷暂存于
+> **当前发布**：`dist/Silver Halide Setup 1.0.0.exe`（Inno Setup 打包）。
+> 构建输出：`build_gui/SilverHalide.exe`（Ninja + MSVC 2022 x64 生成器）。
+> 构建后需运行 `windeployqt` 部署 Qt 运行时。
+>
+> **打包（Inno Setup）**：exe 为 GUI 子系统（`WIN32`，无控制台）。发布载荷暂存于
 > `build_gui/install_stage/`（exe + Qt DLL + plugins + VC++ 运行时，不含 .lib），
-> 由 `packaging/installer.nsi` 用 `makensis.exe` 编译出 `dist/Silver Halide Setup 2.11.0.exe`。
-> 见 `packaging/installer.nsi` 头部注释。
+> 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
+> 见 `packaging/installer.iss` 头部注释。
+
+***
+
+# 内部开发历史（2.x dev milestones，仅作历史记录）
+
+以下章节为开发期里程碑记录，版本号不代表对外发布版本。保留这些记录以便后续维护时
+追溯功能落地时序与决策上下文。
 
 ## v2.12.0 (2026-08-18) M5–M10：污点去除 / 虚拟副本 / Before-After / 关键字元数据 / 智能收藏夹 / 全景合成
 
 **范围**：`docs/PHASE_5` – `docs/PHASE_10` 六个功能里程碑全部落地。实施方式：**多子代理并行三波**（Wave1 引擎/目录/XMP 深层实现 5 路并行 + Wave2 UI 层 7 路并行 + Wave3 MainWindow 集成），主代理统一编译验收。文件域互不相交（一文件一写者）。
 
-- **M5 污点去除**（PHASE_5）：`Adjustments::SpotRemoval`（Clone/Heal，归一化坐标）+ Pipeline 空间阶段后渲染（双线性采样、Heal 边缘亮度匹配 + 羽化）+ ProfileIO JSON 往返 + XMP `crs:SpotCorrections` 往返；DevelopPanel 污点面板（模式/半径/可视化）+ ImageViewport 交互（十字准星、Alt 设源、Delete/右键删除、1:1 坐标映射）+ 工具栏激活。
-- **M6 虚拟副本**（PHASE_6）：CatalogDatabase `edits`/`edit_history` 复合主键 `(image_id, variant_id)` 迁移（旧库重建为 variant 0 母版）+ `variants` 表与方法；Filmstrip 折角序号角标（母版像素级不变）+ Navigator 变体分组 + ExportDialog 副本选择 + 「创建虚拟副本」菜单。
-- **M7 Before/After 与参考视图**（PHASE_7）：PreviewWorker 成对双渲染 `requestBeforeAfter`（默认参数 before + 当前 after，同代不互斥、相同堆叠只渲染一次）+ `requestReference`；ImageViewport 五种比较模式（Off/左右/上下/单图/参考，可拖拽分割线、参考锁定同步缩放）+ 工具栏互斥组 + `\` 快捷键。
-- **M8 关键字与元数据**（PHASE_8）：CatalogDatabase `keywords`（自引用层级）/`photo_keywords` + `images` 元数据列（title/caption/copyright/creator/date_taken/camera/lens）；XMP `dc:subject`/`lr:hierarchicalSubject`/`dc:title/description/rights/creator` 往返；DevelopPanel 元数据面板（标题/说明/版权/创作者 + 关键字 chip）+ 工具栏搜索框 + Navigator 关键字分组聚合计数。
-- **M9 智能收藏夹**（PHASE_9）：`smart_collections` + `smart_collection_photos` + 独立谓词求值器 `evaluatePredicate`（rating/label/flag/keyword/date/file_type/has_adjustments 等字段 × ==/!=/</=/>/>=/contains/starts_with/in/between）+ `refreshSmartCollection` 事务重算；Navigator 智能收藏夹子分组 + `SmartCollectionsDialog` 规则构建器（字段/运算符/值编辑器 + ALL/ANY）。
-- **M10 全景合成**（PHASE_10）：纯 C++ `PanoramaStitcher`（无 OpenCV：降采样空间域 NCC 平移对齐 + 细网格 + 小偏移平局裁决、柱面投影查表、行带羽化融合、autoCrop）+ `PanoramaDialog`/`PanoramaWorker`（QThread + 原子取消 + 进度）+ 「全景合成…」菜单（内联多选源图 → 写 DNG → `addImage` 入目录 → `recordPanoramaSources`）。
+- **M5 污点去除**（PHASE\_5）：`Adjustments::SpotRemoval`（Clone/Heal，归一化坐标）+ Pipeline 空间阶段后渲染（双线性采样、Heal 边缘亮度匹配 + 羽化）+ ProfileIO JSON 往返 + XMP `crs:SpotCorrections` 往返；DevelopPanel 污点面板（模式/半径/可视化）+ ImageViewport 交互（十字准星、Alt 设源、Delete/右键删除、1:1 坐标映射）+ 工具栏激活。
+
+- **M6 虚拟副本**（PHASE\_6）：CatalogDatabase `edits`/`edit_history` 复合主键 `(image_id, variant_id)` 迁移（旧库重建为 variant 0 母版）+ `variants` 表与方法；Filmstrip 折角序号角标（母版像素级不变）+ Navigator 变体分组 + ExportDialog 副本选择 + 「创建虚拟副本」菜单。
+
+- **M7 Before/After 与参考视图**（PHASE\_7）：PreviewWorker 成对双渲染 `requestBeforeAfter`（默认参数 before + 当前 after，同代不互斥、相同堆叠只渲染一次）+ `requestReference`；ImageViewport 五种比较模式（Off/左右/上下/单图/参考，可拖拽分割线、参考锁定同步缩放）+ 工具栏互斥组 + `\` 快捷键。
+
+- **M8 关键字与元数据**（PHASE\_8）：CatalogDatabase `keywords`（自引用层级）/`photo_keywords` + `images` 元数据列（title/caption/copyright/creator/date\_taken/camera/lens）；XMP `dc:subject`/`lr:hierarchicalSubject`/`dc:title/description/rights/creator` 往返；DevelopPanel 元数据面板（标题/说明/版权/创作者 + 关键字 chip）+ 工具栏搜索框 + Navigator 关键字分组聚合计数。
+
+- **M9 智能收藏夹**（PHASE\_9）：`smart_collections` + `smart_collection_photos` + 独立谓词求值器 `evaluatePredicate`（rating/label/flag/keyword/date/file\_type/has\_adjustments 等字段 × ==/!=/\</=/>/>=/contains/starts\_with/in/between）+ `refreshSmartCollection` 事务重算；Navigator 智能收藏夹子分组 + `SmartCollectionsDialog` 规则构建器（字段/运算符/值编辑器 + ALL/ANY）。
+
+- **M10 全景合成**（PHASE\_10）：纯 C++ `PanoramaStitcher`（无 OpenCV：降采样空间域 NCC 平移对齐 + 细网格 + 小偏移平局裁决、柱面投影查表、行带羽化融合、autoCrop）+ `PanoramaDialog`/`PanoramaWorker`（QThread + 原子取消 + 进度）+ 「全景合成…」菜单（内联多选源图 → 写 DNG → `addImage` 入目录 → `recordPanoramaSources`）。
 
 **验证**：headless **353 用例 / 745,722 断言**、GUI **354 用例 / 745,882 断言** 全绿，GUI 冒烟 `SMOKE_EXIT=0`。
 
 **关键决策/坑**：
+
 - **sqlite 语句复用**：本工程 sqlite amalgamation 在 `SQLITE_DONE` 后直接 re-bind 返回 `SQLITE_MISUSE`（无自动 reset）——`Stmt::step()` 改为「返回 DONE/ERROR 后立即 `sqlite3_reset`」，多行 INSERT 循环才能每行落库。
+
 - **GBK 编码**：headless 无 `/utf-8`，引擎/目录文件的中文串字面量奇数字节会吃闭合引号——CatalogDatabase 标签名改 UTF-8 hex 转义（`"\xE7\xBA\xA2"` 等）；UI 文件因 Qt AUTOMOC 带 `-utf-8` 无碍。
-- **Qt 6.8 元类型**：`Q_DECLARE_METATYPE` 在 Q_OBJECT 头内与 `qmetatype.h` 冲突——全景信号改为不传 `PanoramaOptions`（getter 暴露），彻底规避。
+
+- **Qt 6.8 元类型**：`Q_DECLARE_METATYPE` 在 Q\_OBJECT 头内与 `qmetatype.h` 冲突——全景信号改为不传 `PanoramaOptions`（getter 暴露），彻底规避。
+
 - **全景对齐**：粗网格步长漏精确偏移 + 平滑图 y 向 NCC 歧义 → 细网格 `s1=max(1,maxDim/64)` + 近平局小偏移优先。
+
 - **已知局限**：全景合成无标准预览时在 UI 线程解码（旧目录会短暂卡顿）；EditHistoryDialog 仅显示母版历史；智能收藏夹刷新为阻塞式全表（超大库建议后台化）。
 
 **手动验收清单**：污点工具画/拖/删 + Ctrl+Z 单步撤销；创建虚拟副本独立编辑并导出；`\` 前后对比分屏；参考视图；搜索框/关键字/智能收藏夹过滤互斥；元数据编辑后 Navigator 计数刷新；多选 2+ 张全景合成出 DNG 并选中。
@@ -47,7 +69,7 @@ Filmstrip/MainWindow 从 BLOB 解码缩略图；外部磁盘缓存降级为旧�
 
 **2026-08-14 验证确认**：全量 **245 用例 / 274234 断言** 全绿（GUI 与 headless 双构建一致）。
 
-**2026-08-14 AUDIT 修复验收（8 严重 + 20 中等全部落地）**：7 路审计报告 `docs/archive/AUDIT-2026-08-14.md` 的 8S+20M 经并行子代理修复完毕，Phase 2 集成 MainWindow（S1 关窗延迟关闭/循环等待/阻塞兜底、M10 备份/优化移 std::thread、M11 画笔 500ms debounce、M12 删除后选相邻图、PreviewWorker coarse 接线）+ `tests/TestImageIO.cpp` 登记 + `addImageImpl` UPDATE 升级路径漏绑 `?1` 回归修复。**验收**：headless 与 GUI 双端 **272 用例 / 274373 断言全绿、EXIT=0**；GUI 退出冒烟（启动后 WM_CLOSE）EXIT=0 不崩溃，S1 退出修复验证通过。GUI 构建期间修复 1 处树独有编译错误（`FilmstripWidget.cpp:242` Qt 6.8 无单参 `QIcon` 构造，改 `QIcon(),QString()`）。
+**2026-08-14 AUDIT 修复验收（8 严重 + 20 中等全部落地）**：7 路审计报告 `docs/archive/AUDIT-2026-08-14.md` 的 8S+20M 经并行子代理修复完毕，Phase 2 集成 MainWindow（S1 关窗延迟关闭/循环等待/阻塞兜底、M10 备份/优化移 std::thread、M11 画笔 500ms debounce、M12 删除后选相邻图、PreviewWorker coarse 接线）+ `tests/TestImageIO.cpp` 登记 + `addImageImpl` UPDATE 升级路径漏绑 `?1` 回归修复。**验收**：headless 与 GUI 双端 **272 用例 / 274373 断言全绿、EXIT=0**；GUI 退出冒烟（启动后 WM\_CLOSE）EXIT=0 不崩溃，S1 退出修复验证通过。GUI 构建期间修复 1 处树独有编译错误（`FilmstripWidget.cpp:242` Qt 6.8 无单参 `QIcon` 构造，改 `QIcon(),QString()`）。
 此前 headless `Release/lrc_tests.exe` 为 08-12 旧二进制（当时 `TestCatalogDatabase` 查询计划
 用例尚未修复），其 2 处失败（backup / query-plan）经 `cmake --build build_headless --config
 Release --target lrc_tests` 重建为最新源码后消失。目标「默认目录机制 + 目录内嵌预览」验证闭环。
@@ -61,7 +83,7 @@ installer.nsi / README / CLAUDE）；headless + Ninja GUI + VS Release 构建通
 `kAppOrganization` → "ASE-128"（AppData 路径变为 `%APPDATA%/ASE-128/Silver Halide`）；
 `defaultCatalogPath()` 增加旧身份（`%APPDATA%/LRC/LRC Clone Flash`）的
 Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更名 `SilverHalide.exe`
-（CMake 目标 `lrc_lightroom` 保留，OUTPUT_NAME 覆盖）；About/窗口标题/文件对话框同步；
+（CMake 目标 `lrc_lightroom` 保留，OUTPUT\_NAME 覆盖）；About/窗口标题/文件对话框同步；
 安装包 → `dist/Silver Halide Setup 2.11.0.exe`；README/CLAUDE/AGENTS/ARCHITECTURE 同步；
 旧 v2.3.1 及更早历史章节保留原名。测试按用户要求未运行。
 
@@ -77,8 +99,10 @@ Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更�
   缓存到磁盘（`ThumbnailCache::ensureFullRes`/`findFullRes`/`writeFullRes`，默认调整参数下以
   1:1 显示 sRGB JPEG 写入 `<cacheDir>/thumbnails/fullres/`），路径经
   `CatalogDatabase::setFullResPath` 记入目录（`fullres_path` 列）.
+
 - **1:1 免重复解码直读磁盘（性能）**：`PreviewWorker` 进入 1:1 视图且当前为默认调整时，直接从
   磁盘缓存加载 1:1 JPEG，无需重复全分辨率解码，大幅提速；非默认调整时惰性解码，保证正确性.
+
 - **测试登记**：新增 `tests/TestThumbnailCache.cpp`，覆盖 1:1 缓存 ensureFullRes 构建/幂等、
   findFullRes 命中、writeFullRes 写回与 loadImage 尺寸往返.
 
@@ -90,31 +114,42 @@ Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更�
 - **键盘微调滑块即时提交（数据安全）**：QSlider 键盘操作（方向键 / PageUp / Home / End）此前
   只刷新预览、不触发 `adjustmentsCommitted` → 目录不保存、撤销栈不压栈，切图即丢。现键盘
   微调同样走提交（目录保存 + 撤销栈压栈），不再丢数据。
+
 - **refreshFilmstrip 阻断 selectionChanged 重放（数据安全）**：列表 `clear()` 后重选当前图
   必重放 `selectionChanged → onImageSelected`，后者无条件 `undoStack_.clear()` + 强制重解码。
   现以 **QSignalBlocker** 挂住重放——撤销栈不再被清空、不再强制重解码。
+
 - **恢复编辑历史只写 1 条快照（数据安全）**：`onRestore()` 内 `saveAdjustments()` 与对话框
   Accepted 分支 `commitAdjustments()` 各追加一条 → 每次恢复膨胀 2 条。现移除对话框内
   `saveAdjustments`，恢复只写 1 条。
+
 - **胶片栏缩略图从磁盘加载（核心功能）**：`setImages` 改从 `Entry::thumbnailPath` 磁盘加载
   （替代空 `QIcon()` 占位块），`refreshIcon` 以原始图基底重画角标——占位块永不重载与角标
   残留一并修复。
+
 - **「已拒绝」旗标筛选（核心功能）**：SQL 置 `includeRejected`，`flag=-1` 不再恒空；被拒
   照片在胶片栏可见/可清除。
-- **滚轮放大方向判定（核心功能）**：snap-back 只作用于缩小方向；Fit 比例 ≥ ~1.0（小图/截图）
+
+- **滚轮放大方向判定（核心功能）**：snap-back 只作用于缩小方向；Fit 比例 ≥ \~1.0（小图/截图）
   时滚轮放大不再被立即弹回，且正常请求全尺寸。
+
 - **1:1 换图立即请求全尺寸（核心功能）**：换图时复位全尺寸请求状态，新图不再停在下采样
   预览的模糊态。
+
 - **退出竞态修复（稳定性）**：ImportWorker / PreviewWorker 加 `std::atomic` abort 标志，
   `stopWorkers` 先 `requestAbort` 再 `quit()` + `wait`，批量导入/长解码关窗不再访问已析构的
   `catalog_/pipeline_`（杜绝 use-after-free）。
+
 - **蒙版提交与选择**：蒙版「反转」勾选与不透明度补齐提交路径（切图不再丢）；蒙版下拉
   「取消选择」不再被 QComboBox 重填自动回选第 0 项破坏；`syncRow` 越界 UI/引擎统一 clamp。
+
 - **色轮与曲线拖拽**：色轮 600ms 提交定时器换图时停止，不再压多余撤销条目；曲线拖拽走
   coarse 节流（CurveEditor 新增 `dragStarted`/`dragEnded` 信号），1:1 下不再持续全分辨率重渲染。
+
 - **事件与路径**：文件夹筛选用边界匹配（`C:/Photos` 不再误含 `C:/Photoshop/…`）；eventFilter
   焦点白名单补 **QSlider** 并检查 `activePopupWidget()`；导出默认目录改当前照片目录；导出/导入
   对话框空路径不再静默 accept；HDR 导出校验 `.dng` 后缀。
+
 - **样式与其他**：dark.qss 补 **QPushButton:disabled** / **QLineEdit** / **QRadioButton** 深色规则；
   导航树重建后恢复选中态；ImportWorker 批处理补 SQLite 事务；PreviewWorker 旧图
   `loadFailed`/`imageMeta` 补代次守卫。
@@ -127,16 +162,19 @@ Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更�
   三个 `checkable` 的 QToolButton 组成**视图模式互斥组**（适合窗口 / 适合宽度 / 1:1，tooltip 注明
   快捷键 **Ctrl+0 / Ctrl+Alt+0 / Ctrl+1**）；其后为非 checkable 的**放大 / 缩小**按钮
   （直接 `toolBar->addAction(text, viewport_, &ImageViewport::zoomIn/zoomOut)`）；分隔符后是
-  **蒙版工具互斥组**（线性 / 径向 / 画笔）。视图互斥组与蒙版互斥组为**两个独立 `QButtonGroup`**
+  **蒙版工具互斥组**（线性 / 径向 / 画笔）。视图互斥组与蒙版互斥组为**两个独立** **`QButtonGroup`**
   （各自 `setExclusive(true)`），互不干扰。
+
 - **双向同步**：`ImageViewport::zoomModeChanged` → `MainWindow::onZoomModeChanged`
   （`QSignalBlocker` 挂住视图按钮组，把对应按钮 `setChecked(true)`，初始按 `zoomMode()` 同步一次）；
   `DevelopPanel::maskToolActivated` → `MainWindow::onMaskToolActivated`
   （None 时先 `setExclusive(false)` 逐按钮清空再恢复 `setExclusive(true)`，全程 blocker）。
   面板为源、工具栏为镜像（单向，此槽内不再反向调用 `selectMaskTool`/`setZoomMode`）；工具栏点击走
   `setZoomMode`/`selectMaskTool`，其回发信号幂等同步勾选，无环。
+
 - **dark.qss 补齐**：QToolBar / QToolButton(:checked) / QPushButton:checked / QComboBox /
   QCheckBox 深色样式，纯 CSS 无图片（Phase 1 已交付）。
+
 - 版本号 **v2.7.0**（`src/app/Constants.h` `kAppVersion`）。
 
 ## v2.8.0 (2026-08-12) M5 Phase2 集成收口：预览更新速率 coarse-then-refine
@@ -148,11 +186,14 @@ Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更�
   `previewReadyCoarse`），`onPreviewReadyCoarse` 用 `viewport_->setImageKeepView`
   即时换图（保锚点、不重置缩放）。松手/停顿后仍走原有 **50ms refine 停顿路径**
   （`adjustmentsChanged` → 1920 预览），先低清后高清，拖动反馈更快。
+
 - **1:1 下的行为**：coarse 取代的是 1920 预览层（非全尺寸），因此 `fullResActive_`（1:1）时
   coarse 仍更新预览层、不被像 refine 那样抑制；coarse 路径**不触发**
   `requestAdjustFullRes()`——全尺寸刷新仍由 refine 路径在松手/停顿后统一触发。
+
 - **测试登记**：TestPipeline 新增 **2 用例**——`render(…,480)` 尺寸断言 +
   `kCoarseMaxDim=480` 与 0（全尺寸）**缓存键独立**（Pipeline 缓存键含 maxDim）。
+
 - 版本号 **v2.8.0**（`src/app/Constants.h` `kAppVersion`）。
 
 ## v2.6.0 (2026-08-12) M3 Phase2 集成收口：蒙版引擎级性能
@@ -160,34 +201,45 @@ Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更�
 - **几何哈希去重**：`Mask::geometryHash()` 只哈希 type + 几何（dab 序列 / 线性端点与 feather /
   径向半径与 radial invert）+ `invert`；拖动局部调整滑块（曝光/对比度/饱和度等）不改几何哈希 →
   权重场命中缓存，不再整场重建。
-- **`Pipeline::brushWeightField` 权重场缓存**：COW `shared_ptr<const vector<float>>`，缓存键 =
-  `geometryHash + w + h`，~128MB LRU；按 **O(∑dab 面积)** 光栅化（取代原 O(P×D) 逐像素），
+
+- **`Pipeline::brushWeightField`** **权重场缓存**：COW `shared_ptr<const vector<float>>`，缓存键 =
+  `geometryHash + w + h`，\~128MB LRU；按 **O(∑dab 面积)** 光栅化（取代原 O(P×D) 逐像素），
   UI 线程与 worker 线程共用（COW 保证线程安全）。`applyLocalAdjustments` 已改从 field 读权重；
   `maskWeight` 保留（供测试参考）。
+
 - **ImageViewport 叠加层**：`rebuildMaskOverlay` 用 `geometryHash` 去重（几何未变不重绘）+
   长边 ≤480px 降分辨率，拖动局部滑块时蒙版叠加不再全分辨率重建。
+
 - **dab 合并**：仅当指针在 widget 空间移动 ≥4px（manhattan）**且**图像空间归一化间距 ≥0.6×radius
   才追加新 dab，大画笔自动并笔，减少冗余 dab。
+
 - **DevelopPanel 软度滑块**：蒙版节新增「软度」滑块（0..10000 默认 5000）→
   `onMaskSoftnessChanged(int)` 即时 emit `maskSoftnessChanged(value/10000.0)`；
   `activateMaskTool`/`onMaskSelected` 在 Brush 分支与 `maskBrushSizeChanged` 同路径同步发射；
   MainWindow 接线 `maskSoftnessChanged → ImageViewport::setMaskBrushSoftness`
   （钳制 0..1，只影响后续新 dab）。
+
 - **测试登记**：新增 `TestMaskRaster`（**6 用例**：brushWeightField 采样一致性/非 Brush 类型光栅化/
   缓存命中与失效/geometryHash 仅几何+invert/500-dab 冒烟（<2000ms）/applyLocalAdjustments 逐位一致）；
   全量预期 **211 用例**（基线 205 用例 + 6 用例，断言数以实际构建为准）。
+
 - 版本号 **v2.6.0**（`src/app/Constants.h` `kAppVersion`）。
 
 ## v2.5.0 (2026-08-12) M2 集成收口：缩放/平移体验
 
 - **光标锚定滚轮缩放**：滚轮以光标所在图像点为锚缩放（放大/缩小锚点不漂移），由新纯函数
   `ViewportMath::anchorPan`（`utils/ViewportMath.h`，逆解 target-rect 映射）计算缩放后的平移偏移。
+
 - **平移**：空格 + 左键拖拽、中键拖拽、方向键平移（放大后移动视野）。
+
 - **适合宽度视图（FitWidth）**：`ZoomMode` 新增 `FitWidth` 并与 Fit 归入 `isFitLike()` 统一走自动
   适配路径；视图菜单新增「适合宽度」（快捷键 **Ctrl+Alt+0**，与「适合窗口」Ctrl+0 区分）。
+
 - **拖动进 1:1 请求全尺寸**：点击-拖拽进入 1:1 视图时请求全尺寸缓冲，退出 1:1 时释放。
+
 - **Z 键记忆最后适合模式**：`toggleOneToOne()` 进入 1:1 前记住 `lastFitMode_`（Fit/FitWidth），
   从 1:1 返回上次适合模式（裸键 Z，替换原 OneToOne↔Fit 硬编码切换）。
+
 - **测试登记**：新增 `TestViewportMath`（**9 用例 / 50 断言**，纯几何 anchorPan 覆盖中心锚定/
   恒等缩放/放大/缩小/边角/视图小于图像/非整数坐标/极小图像）；全量 **205 用例 / 243402 断言**
   （基线 196 用例 / 243352 断言 + 9 用例 / 50 断言）。
@@ -196,20 +248,26 @@ Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更�
 
 - **全局快捷键体系（M1）**：MainWindow 安装应用级 `eventFilter` 处理裸键，修饰键组合走
   `QShortcut`；spin box / line edit / combo 等文本输入控件在焦点白名单内不被劫持。
+
 - **裸键**（无 Ctrl/Alt 修饰，可带 Shift）：`Z` 1:1/适合窗口切换、`Tab` 收起/展开左右侧栏、
   `F` 全屏、`G/D/E` 聚焦图库/修改/预览、`L` 灯光循环（正常 ↔ 仅预览）、`Home/End` 首张/末张、
   `[`/`]` 减小/增大蒙版画笔、`K` 画笔 / `M` 径向 / `Shift+M` 线性渐变蒙版工具、
   `O` 蒙版红色叠加开关、`W` 白平衡吸管开关、`+`/`=`/`-` 曝光 ±0.33 EV。
+
 - **修饰键组合**（`QShortcut`）：`Ctrl+Z` 撤销、`Ctrl+Shift+Z` 重做、`Ctrl+←`/`Ctrl+→` 上一张/下一张、
   `Ctrl+Shift+R` 复位（走 `resetAll` → 一次提交）。
+
 - **撤销/重做（UndoStack）**：`lrc::UndoStack<Adjustments>`（50 步上限）。所有用户编辑提交路径统一走
   `commitAdjustments`（滑块释放 / spin 编辑完成 / 自动调整 / 复位 / 编辑历史恢复 / 预设导入 /
   sidecar 读取 / 颜色取样提交），每次压入一步；`applyAdjustmentState` 用于撤销/重做回放（不压栈）。
   换图清栈并以加载的初始状态为栈底。
+
 - **蒙版一笔一步**：笔画首次几何变更压入笔画前快照，`maskEditFinished` 压入笔画后状态，中间几何更新
   不单独入栈 —— 一次撤销恰好回到笔画前。
+
 - **白平衡吸管（W）**：取样像素 sRGB→线性 ProPhoto，`Pipeline::estimateWhiteBalance` 估计色温/色调偏移
   并叠加到当前调整（钳制 ±100），取色后吸管保持激活可连续取；与点选吸管互斥。
+
 - **测试登记**：新增 `TestUndoStack`（10 用例/65 断言）+ TestPipeline `estimateWhiteBalance` 4 用例；
   全量 **196 用例 / 243352 断言** 全绿（本机已实测构建验证）。
 
@@ -218,43 +276,59 @@ Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更�
 - **应用更名**：`kAppName` 由 "Lightroom Clone" → **"LRC Clone Flash"**；`app.rc` 新增
   VERSIONINFO（rc 编译加 `/utf-8`），exe 与安装包元数据写入产品名 **LRC Clone Flash**、
   公司 **ASE-128**、版权 **© ASE-128 2026**；About 对话框补版权行。
+
 - **无控制台（GUI 子系统）**：`add_executable(lrc_lightroom WIN32 ...)` + 链接
   `Qt6::EntryPointPrivate`（qtmain 转发 WinMain→main），exe PE 子系统由 CONSOLE(3)→WINDOWS(2)，
   启动不再弹出黑色控制台窗口。
+
 - **NSIS 安装包**：新增 `packaging/installer.nsi`（MUI2 中文界面，UTF-8 BOM）、
   `packaging/welcome.bmp`（由 `packaging/make_bmp.py` 生成，因 NSIS Contrib 缺默认图）。
   发布载荷暂存 `build_gui/install_stage/`（exe + Qt DLL + 插件 + VC++ 运行时，不含 .lib），
   编译产物 **`dist/LRC Clone Flash Setup 2.3.0.exe`**（约 17MB），安装到
   `Program Files\LRC Clone Flash`，带开始菜单/桌面快捷方式、卸载器与 Add/Remove Programs 注册。
+
 - **清理**：移除项目根目录散落 .obj 与损坏的旧 zip（非合法 zip）、父目录临时日志/脚本。
+
 - **文档**：README/STATUS/CLAUDE.md/ARCHITECTURE 更新为新应用名、无控制台与打包流程；
   `run_app.bat` 修正为指向 `build_gui/Release/lrc_lightroom.exe`。
 
 ## v2.3 (2026-08-11) 性能优化（子代理并行实施）
 
-- **快速高斯模糊**：`gaussianBlur` 大 sigma（>4.0，如清晰度 ≈min(w,h)/50、蒙版局部清晰度、DetailMask 可视化）改走 **3 趟滑动窗口 box blur 逼近**（O(1)/像素），小 sigma（纹理 2.5 / 锐化 ≤4）保留原精确分离卷积逐位不变。实测 1920×1080、sigma=38：**1260ms → 14.4ms（~87x）**，box 与精确逐像素平均绝对差 ~0.0015（视觉不可见）。全尺寸 6000×4000 清晰度由约数秒降到数十毫秒。
+- **快速高斯模糊**：`gaussianBlur` 大 sigma（>4.0，如清晰度 ≈min(w,h)/50、蒙版局部清晰度、DetailMask 可视化）改走 **3 趟滑动窗口 box blur 逼近**（O(1)/像素），小 sigma（纹理 2.5 / 锐化 ≤4）保留原精确分离卷积逐位不变。实测 1920×1080、sigma=38：**1260ms → 14.4ms（\~87x）**，box 与精确逐像素平均绝对差 \~0.0015（视觉不可见）。全尺寸 6000×4000 清晰度由约数秒降到数十毫秒。
+
 - **HSL / 点颜色去重**：`applyHSLReconstruct` 改为接收预计算 HSL，消除 `applyHSLPerChannel`/`applyColorTarget` 内双重 rgbToHSL；ColorTarget 参考色（refHue/refSat/refLuma）提升出逐像素循环，每 target 每像素省 1-2 次 HSL 转换。
-- **中性参数快速路径**：`applyAdjustments` 全部参数中性时直接返回（恒等），跳过每像素 ~40% 死操作，初始预览打开更快。
-- **`renderInternalLinear` 消除 U16 中间拷贝**：无需 resize 且非 F32 输入直接 `linear.toF32()`，省一次全尺寸 U16 memcpy。
-- **`toDisplaySRGB` 消除冗余 F32 深拷贝**：输入已是 F32 时直接引用调用方缓冲（`cmsDoTransform` 只读），省 24.9MB/帧拷贝。
-- **`applyMatrixU16` 就地 + 并行**：相机矩阵应用不再分配第二份全尺寸 U16（24MP 省 ~144MB）且走 `parallelFor`，解码提速 ~30-40%。
-- **`ImageBuffer::toF32()` 并行化**：逐行转换改按行分块并行。
-- **`toQImage` 零拷贝**：QImage 经 cleanup 函数持有 `ImageBufferPtr` 直接引用 U8 缓冲，主线程省 6.2MB memcpy/帧（已核实 setImage/直方图路径全部只读）。
+
+- **中性参数快速路径**：`applyAdjustments` 全部参数中性时直接返回（恒等），跳过每像素 \~40% 死操作，初始预览打开更快。
+
+- **`renderInternalLinear`** **消除 U16 中间拷贝**：无需 resize 且非 F32 输入直接 `linear.toF32()`，省一次全尺寸 U16 memcpy。
+
+- **`toDisplaySRGB`** **消除冗余 F32 深拷贝**：输入已是 F32 时直接引用调用方缓冲（`cmsDoTransform` 只读），省 24.9MB/帧拷贝。
+
+- **`applyMatrixU16`** **就地 + 并行**：相机矩阵应用不再分配第二份全尺寸 U16（24MP 省 \~144MB）且走 `parallelFor`，解码提速 \~30-40%。
+
+- **`ImageBuffer::toF32()`** **并行化**：逐行转换改按行分块并行。
+
+- **`toQImage`** **零拷贝**：QImage 经 cleanup 函数持有 `ImageBufferPtr` 直接引用 U8 缓冲，主线程省 6.2MB memcpy/帧（已核实 setImage/直方图路径全部只读）。
 
 ## v2.2 (2026-08-11)
 
 - **XMP 兼容 / Lightroom 预设互导（M3）**：新增 pugixml 驱动的 XMP 解析器（`engine/Xmp`）、
   crs↔Adjustments 字段映射（`utils/XmpProfile`）与 sidecar 读写（`engine/XmpSidecar`），
   UI 侧「文件 → 导入/导出预设…」「照片 → 读取/写入 sidecar」四个动作已接线。
-- **`.xmp` sidecar 读写**：sidecar 与图像同名（`img.arw` → `img.xmp`），写侧直接生成
+
+- **`.xmp`** **sidecar 读写**：sidecar 与图像同名（`img.arw` → `img.xmp`），写侧直接生成
   Lightroom 兼容的 XMP 文档，读侧解析并回填参数堆栈。
+
 - **预设导入/导出**：`.xmp` 为 Lightroom 预设（XMP 描述 + crs 属性），`.lrp` 为本应用预设
   （ProfileIO JSON，字段无损完整往返）。
+
 - **字段映射覆盖**：基本（曝光/对比/高光/阴影/白/黑/色温/色调/饱和）、细节（锐化量/半径/细节/蒙版）、
   效果（纹理/清晰度/去朦胧/鲜艳度）、颗粒（量/大小/粗糙度）、色调曲线（ToneCurvePV2012 点数组 →
   分区曲线）、HSL 24 项（8 通道 × 色相/饱和/明亮）、色调分离（高光/阴影/平衡）。
+
 - **互导细节**：未知 crs 属性静默忽略（容错）；`Temperature` 以 mired 锚点 6500K 换算，
   `Tint` 按 ×1.5 换算；导出时数值取最短十进制形式。
+
 - **v1 取舍**：蒙版 / 点颜色 / 畸变不互导 XMP（`.lrp` 完整往返）；RAW 内嵌 XMP 读取 deferred（返回 false）。
 
 ## v2.0 (2026-08-11)
@@ -263,6 +337,7 @@ Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更�
   Filmstrip 缩略图右下角色标角标 + 右键「色标」子菜单（点击已选色即清除）+ 快捷键
   （`6-9` → 色 1-4，`Ctrl+6-8` → 色 5-7，`Ctrl+Shift+0` → 清除）；Navigator 第 3 个筛选下拉
   按色标过滤（复用 `ImageFilter.labelColor`）。
+
 - **收藏夹集合**：新增 `collections`/`collection_images` 两表（`ON DELETE CASCADE` 级联），
   创建/重命名/删除集合、成员增删（重复添加幂等）；Navigator「收藏夹」顶层分组点击过滤胶片栏；
   「照片 → 管理收藏夹…」打开 `CollectionsDialog`（CRUD + 添加/移除成员）；收藏归属在
@@ -274,20 +349,26 @@ Default.lrcat / catalog.lrcat 回退迁移，旧照片不孤立；exe 输出更�
   DNG」。复制/移动落地到按日期组织的受管库 `<library_root>/<yyyy>/<yyyy-mm-dd>/`，
   文件名冲突自动追加 `-2`、`-3` 后缀；移动为「复制后删除源文件」。无目标目录时复制/移动
   自动降级为添加，绝不丢文件（`LibraryManager`、`ImportWorker::importPaths`）。
+
 - **「目录」菜单**：新建目录 / 打开目录 / 备份目录 / 优化目录。目录路径经 `QSettings`
   （键 `catalogPath`）持久化，新建/打开后自动重启应用切换目录；备份走 SQLite `backup`
   API（先 WAL checkpoint），优化走 `VACUUM`。
+
 - **编辑历史快照**：每次 `saveAdjustments` 自动写入 `edit_history` 表；照片菜单「编辑历史…」
   打开 `EditHistoryDialog`，可查看每张照片的全部快照并恢复（恢复会写回 edits 并重新渲染预览）。
+
 - **导航「目录图片库」分组**：`refreshFilmstrip` 扫描受管图片（`is_managed`），按库根前缀收集
   相对子文件夹（如 `2026/2026-08-11`）去重排序后展示；点击库子项按 `/` 拼接绝对路径过滤胶片栏。
-- **`is_managed` 标记**：`images` 表新增该列，复制/移动导入为 1，添加导入为 0；重新导入同一文件
+
+- **`is_managed`** **标记**：`images` 表新增该列，复制/移动导入为 1，添加导入为 0；重新导入同一文件
   不会翻转既有标记（导入幂等）。
 
 ## 构建状态
 
 - **生成器**: Visual Studio 17 2022 (x64)，`cmake --build build_gui --config Release`
+
 - **输出**: `build_gui/Release/SilverHalide.exe`, `build_gui/tests/Release/lrc_tests.exe`
+
 - **Qt 部署**: 构建后 `..\qt\6.8.3\msvc2022_64\bin\windeployqt.exe --release --no-translations .\build_gui\Release\SilverHalide.exe`（Qt 安装在项目上一级的 `qt/` 下；插件以扁平布局部署到 exe 目录，如 `platforms/qwindows.dll`）
 
 ## 测试结果（v2.10.0，2026-08-12）
@@ -304,28 +385,28 @@ v2.10.0 新增 TestThumbnailCache（1:1 缓存构建/幂等/写回）与 TestCat
 
 ### 测试覆盖
 
-| 测试文件 | 覆盖内容 |
-|---------|---------|
-| TestAdjustments | 默认值、复位、相等性、哈希、HSL、色调分离、蒙版 |
-| TestPipeline | 曝光/对比度/高光/阴影/白黑/色温/HSL/色调分离/清晰度/颗粒/蒙版局部/可视化叠加 |
-| TestImageBuffer | U16/U8/F32 读写、裁剪、缩放、格式转换 |
-| TestColorManager | D65→ProPhoto 矩阵、相机矩阵、中性灰渲染、sRGB 往返 |
-| TestRawDecoder | 最小 DNG 验证与元数据读取 |
-| TestCatalogDatabase | 打开、添加、编辑、事务、评分、文件夹、备份、设置、编辑历史快照 |
-| TestLibraryManager | 受管库目标路径、日期子目录、重名后缀、Copy/Move 落地、自库内文件不再复制 |
-| TestExportEngine | JPEG/PNG/TIFF-8/16/DNG 导出、PPM、PNG 读取往返 |
-| TestJson | 标量、对象、美化输出、转义、拒绝畸形输入、指数 |
-| TestMathUtils | clamp、stopsToGain、smoothstep、hashCombine、UTF-8 路径 |
-| TestMasks | 线性/径向/画笔蒙版权重、局部调整、**JSON 往返（含布尔 invert/enabled）** |
-| TestMaskRaster | **蒙版引擎级性能**：brushWeightField 光栅化采样一致性、非 Brush 类型、缓存命中/失效、geometryHash 仅几何+invert、500-dab 冒烟（<2000ms）、applyLocalAdjustments 逐位一致 |
-| TestThumbnailCache | 1:1 全分辨率缓存：ensureFullRes 构建/幂等、findFullRes 命中、writeFullRes 写回、loadImage 尺寸往返 |
-| TestHdrMerge | 曝光包围合成、EV 估计 |
-| TestXmpDocument | XMP 解析：命名空间、rdf:Description、crs 属性提取、畸形 XML 容错 |
-| TestXmpProfile | crs↔Adjustments 映射：往返覆盖全组、未知键容错、越界钳制、金色值 |
-| TestXmpSidecar | sidecar 路径（替换扩展名）、写后读往返、缺失/损坏/空 XML、deferred 内嵌读取 |
-| TestProfileIO | 预设 JSON 完整往返、version/未知键容错、savePreset/loadPreset、ColorTarget/Mask 哈希 |
-| TestUndoStack | UndoStack 压栈/撤销/重做、redo 分支清空、limit 截断、clear、setLimit 动态生效 |
-| TestViewportMath | 光标锚定缩放平移的 anchorPan 纯函数：中心锚定、恒等/放大/缩小、边角、视图小于图像、非整数坐标、极小图像 |
+| 测试文件                | 覆盖内容                                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| TestAdjustments     | 默认值、复位、相等性、哈希、HSL、色调分离、蒙版                                                                                                       |
+| TestPipeline        | 曝光/对比度/高光/阴影/白黑/色温/HSL/色调分离/清晰度/颗粒/蒙版局部/可视化叠加                                                                                   |
+| TestImageBuffer     | U16/U8/F32 读写、裁剪、缩放、格式转换                                                                                                        |
+| TestColorManager    | D65→ProPhoto 矩阵、相机矩阵、中性灰渲染、sRGB 往返                                                                                              |
+| TestRawDecoder      | 最小 DNG 验证与元数据读取                                                                                                                 |
+| TestCatalogDatabase | 打开、添加、编辑、事务、评分、文件夹、备份、设置、编辑历史快照                                                                                                 |
+| TestLibraryManager  | 受管库目标路径、日期子目录、重名后缀、Copy/Move 落地、自库内文件不再复制                                                                                       |
+| TestExportEngine    | JPEG/PNG/TIFF-8/16/DNG 导出、PPM、PNG 读取往返                                                                                          |
+| TestJson            | 标量、对象、美化输出、转义、拒绝畸形输入、指数                                                                                                         |
+| TestMathUtils       | clamp、stopsToGain、smoothstep、hashCombine、UTF-8 路径                                                                               |
+| TestMasks           | 线性/径向/画笔蒙版权重、局部调整、**JSON 往返（含布尔 invert/enabled）**                                                                               |
+| TestMaskRaster      | **蒙版引擎级性能**：brushWeightField 光栅化采样一致性、非 Brush 类型、缓存命中/失效、geometryHash 仅几何+invert、500-dab 冒烟（<2000ms）、applyLocalAdjustments 逐位一致 |
+| TestThumbnailCache  | 1:1 全分辨率缓存：ensureFullRes 构建/幂等、findFullRes 命中、writeFullRes 写回、loadImage 尺寸往返                                                    |
+| TestHdrMerge        | 曝光包围合成、EV 估计                                                                                                                    |
+| TestXmpDocument     | XMP 解析：命名空间、rdf:Description、crs 属性提取、畸形 XML 容错                                                                                  |
+| TestXmpProfile      | crs↔Adjustments 映射：往返覆盖全组、未知键容错、越界钳制、金色值                                                                                        |
+| TestXmpSidecar      | sidecar 路径（替换扩展名）、写后读往返、缺失/损坏/空 XML、deferred 内嵌读取                                                                               |
+| TestProfileIO       | 预设 JSON 完整往返、version/未知键容错、savePreset/loadPreset、ColorTarget/Mask 哈希                                                            |
+| TestUndoStack       | UndoStack 压栈/撤销/重做、redo 分支清空、limit 截断、clear、setLimit 动态生效                                                                       |
+| TestViewportMath    | 光标锚定缩放平移的 anchorPan 纯函数：中心锚定、恒等/放大/缩小、边角、视图小于图像、非整数坐标、极小图像                                                                      |
 
 ## 管线调整顺序
 
@@ -346,55 +427,56 @@ cmake --build build_gui --config Release
 
 ### ✅ 已完成
 
-| 功能 | 状态 |
-|------|------|
-| 自动调整（曝光/对比度/鲜艳度建议） | ✅ 引擎 + UI「自动」按钮 |
-| 基本面板（色温/色调/曝光/对比/高光/阴影/白/黑） | ✅ |
-| 色调曲线（Catmull-Rom 拖拽） | ✅ |
-| 细节（锐化量/半径/细节/蒙版）+ Alt+边缘蒙版叠加 | ✅ |
-| 颜色（HSL 8 通道 × 色相/饱和/明亮）+ 点选吸管 | ✅ |
-| 色调分离（高光/阴影 + 平衡 + 可视化色轮） | ✅ |
-| 效果（纹理/清晰度/去朦胧/鲜艳度/颗粒） | ✅ |
-| 镜头校正（几何畸变 + 晕影，非配置文件依赖） | ✅ |
-| Alt+调整可视化（裁剪/细节/边缘蒙版叠加） | ✅ 已接线 |
-| **多格式导出（JPEG/PNG/TIFF-8/16/DNG 对话框）** | ✅ v1.4 新增 |
-| **照片管理 UI（评分 1-5 / 旗标 P X U / 删除 / 筛选）** | ✅ v1.4 新增 |
-| **HDR 合成菜单（选 2+ 张→合并→存 DNG→入目录）** | ✅ v1.4 新增 |
-| PNG/TIFF 读取 + 多 RAW 格式（libraw） | ✅ |
-| DNG 读取/写出 | ✅ |
-| 目录管理（SQLite .lrcat、评分/旗标/标签/备份/VACUUM） | ✅ |
-| 蒙版引擎（线性/径向/画笔 + 局部调整） | ✅ 引擎层 |
-| **UI 蒙版编辑（线性/径向/画笔绘制 + 红色权重叠加 + 羽化/不透明度/反转 + 局部调整滑块）** | ✅ v1.5 新增 |
-| 点颜色引擎（ColorTarget 色相/饱和/明亮/范围/平滑/强度） | ✅ 引擎层，已序列化 |
-| **点颜色 UI（取参考色吸管 + 多目标添加/删除 + 启用 + 色相/饱和/明亮/范围/平滑/强度滑块）** | ✅ v1.6 新增 |
-| **Sony 全系 RAW 导入（.arw/.sr2/.srf/.sr3）+ 导入对话框「导入时转换为 DNG」** | ✅ v1.7 新增 |
-| **导入所有导出格式（JPEG/PNG/TIFF + RAW/DNG）**：对话框/文件夹监视/预览/导出全链路，非 RAW 走 stb_image + 内建 TIFF 读取器 → 线性 ProPhoto | ✅ v1.8 新增 |
-| **LRC 式导入（添加/复制/移动 + 按日期受管库）** | ✅ v1.9 新增 |
-| **「目录」菜单（新建/打开/备份/优化，QSettings 持久化 + 重启切库）** | ✅ v1.9 新增 |
-| **编辑历史快照（edit_history 表 + EditHistoryDialog 恢复）** | ✅ v1.9 新增 |
-| **导航「目录图片库」分组（受管子文件夹浏览 + 过滤）** | ✅ v1.9 新增 |
-| **标签颜色（7 色可设/清除 + Filmstrip 角标 + 右键菜单/快捷键 + Navigator 色标筛选）** | ✅ v2.0 新增 |
-| **收藏夹集合（collections/collection_images 表 + Navigator 分组过滤 + CollectionsDialog + 角标）** | ✅ v2.0 新增 |
-| **XMP sidecar 读写（.xmp 与图像同名 + Lightroom 兼容 XMP 文档生成/解析）** | ✅ v2.2 (M3) 新增 |
-| **预设导入/导出（文件菜单：.xmp Lightroom 预设 / .lrp 本应用预设）** | ✅ v2.2 (M3) 新增 |
-| **crs 字段映射（基本/细节/效果/颗粒/曲线 PV2012 点数组/HSL 24/色调分离，未知字段容错，Temperature mired 6500K、Tint ×1.5）** | ✅ v2.2 (M3) 新增 |
-| **预设序列化加固（TestProfileIO：完整往返/version 与未知键容错/save-load/哈希）** | ✅ v2.2 (M3) 新增 |
-| **M1 快捷键体系（全局裸键 + Ctrl 组合）+ 撤销/重做（UndoStack，滑块一步/蒙版一笔一步）+ 白平衡吸管（W）** | ✅ v2.4.0 新增 |
-| **M2 缩放/平移体验（光标锚定滚轮缩放 + 空格/中键/方向键平移 + 适合宽度视图 Ctrl+Alt+0 + 拖动进 1:1 请求全尺寸 + Z 键记忆最后适合模式）** | ✅ v2.5.0 新增 |
-| **M3 蒙版引擎级性能 Phase2（geometryHash 去重 + brushWeightField COW 权重场缓存 + 叠加层降分辨率 + dab 并笔 + 软度滑块接线 + TestMaskRaster）** | ✅ v2.6.0 新增 |
-| **M4 直观 UI（顶部 QToolBar：视图模式互斥组适合窗口/适合宽度/1:1 + 放大缩小 + 蒙版工具互斥组线性/径向/画笔；zoomModeChanged + maskToolActivated 双向同步、面板为源工具栏镜像；dark.qss 补齐 QToolBar/QToolButton:checked/QComboBox/QCheckBox 纯 CSS）** | ✅ v2.7.0 新增 |
-| **M5 预览更新速率（coarse-then-refine：DevelopPanel 拖动 30ms coarse 节流 + PreviewWorker adjustPreviewCoarse 480 渲染 + MainWindow 路由；refine 维持 50ms 停顿路径；1:1 下 coarse 仍更新预览层、不触发全尺寸刷新；TestPipeline 2 用例）** | ✅ v2.8.0 新增 |
+| 功能                                                                                                                                                                                             | 状态              |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| 自动调整（曝光/对比度/鲜艳度建议）                                                                                                                                                                             | ✅ 引擎 + UI「自动」按钮 |
+| 基本面板（色温/色调/曝光/对比/高光/阴影/白/黑）                                                                                                                                                                    | ✅               |
+| 色调曲线（Catmull-Rom 拖拽）                                                                                                                                                                           | ✅               |
+| 细节（锐化量/半径/细节/蒙版）+ Alt+边缘蒙版叠加                                                                                                                                                                   | ✅               |
+| 颜色（HSL 8 通道 × 色相/饱和/明亮）+ 点选吸管                                                                                                                                                                  | ✅               |
+| 色调分离（高光/阴影 + 平衡 + 可视化色轮）                                                                                                                                                                       | ✅               |
+| 效果（纹理/清晰度/去朦胧/鲜艳度/颗粒）                                                                                                                                                                          | ✅               |
+| 镜头校正（几何畸变 + 晕影，非配置文件依赖）                                                                                                                                                                        | ✅               |
+| Alt+调整可视化（裁剪/细节/边缘蒙版叠加）                                                                                                                                                                        | ✅ 已接线           |
+| **多格式导出（JPEG/PNG/TIFF-8/16/DNG 对话框）**                                                                                                                                                          | ✅ v1.4 新增       |
+| **照片管理 UI（评分 1-5 / 旗标 P X U / 删除 / 筛选）**                                                                                                                                                       | ✅ v1.4 新增       |
+| **HDR 合成菜单（选 2+ 张→合并→存 DNG→入目录）**                                                                                                                                                              | ✅ v1.4 新增       |
+| PNG/TIFF 读取 + 多 RAW 格式（libraw）                                                                                                                                                                 | ✅               |
+| DNG 读取/写出                                                                                                                                                                                      | ✅               |
+| 目录管理（SQLite .lrcat、评分/旗标/标签/备份/VACUUM）                                                                                                                                                         | ✅               |
+| 蒙版引擎（线性/径向/画笔 + 局部调整）                                                                                                                                                                          | ✅ 引擎层           |
+| **UI 蒙版编辑（线性/径向/画笔绘制 + 红色权重叠加 + 羽化/不透明度/反转 + 局部调整滑块）**                                                                                                                                         | ✅ v1.5 新增       |
+| 点颜色引擎（ColorTarget 色相/饱和/明亮/范围/平滑/强度）                                                                                                                                                           | ✅ 引擎层，已序列化      |
+| **点颜色 UI（取参考色吸管 + 多目标添加/删除 + 启用 + 色相/饱和/明亮/范围/平滑/强度滑块）**                                                                                                                                       | ✅ v1.6 新增       |
+| **Sony 全系 RAW 导入（.arw/.sr2/.srf/.sr3）+ 导入对话框「导入时转换为 DNG」**                                                                                                                                     | ✅ v1.7 新增       |
+| **导入所有导出格式（JPEG/PNG/TIFF + RAW/DNG）**：对话框/文件夹监视/预览/导出全链路，非 RAW 走 stb\_image + 内建 TIFF 读取器 → 线性 ProPhoto                                                                                        | ✅ v1.8 新增       |
+| **LRC 式导入（添加/复制/移动 + 按日期受管库）**                                                                                                                                                                 | ✅ v1.9 新增       |
+| **「目录」菜单（新建/打开/备份/优化，QSettings 持久化 + 重启切库）**                                                                                                                                                   | ✅ v1.9 新增       |
+| **编辑历史快照（edit\_history 表 + EditHistoryDialog 恢复）**                                                                                                                                             | ✅ v1.9 新增       |
+| **导航「目录图片库」分组（受管子文件夹浏览 + 过滤）**                                                                                                                                                                 | ✅ v1.9 新增       |
+| **标签颜色（7 色可设/清除 + Filmstrip 角标 + 右键菜单/快捷键 + Navigator 色标筛选）**                                                                                                                                  | ✅ v2.0 新增       |
+| **收藏夹集合（collections/collection\_images 表 + Navigator 分组过滤 + CollectionsDialog + 角标）**                                                                                                          | ✅ v2.0 新增       |
+| **XMP sidecar 读写（.xmp 与图像同名 + Lightroom 兼容 XMP 文档生成/解析）**                                                                                                                                      | ✅ v2.2 (M3) 新增  |
+| **预设导入/导出（文件菜单：.xmp Lightroom 预设 / .lrp 本应用预设）**                                                                                                                                               | ✅ v2.2 (M3) 新增  |
+| **crs 字段映射（基本/细节/效果/颗粒/曲线 PV2012 点数组/HSL 24/色调分离，未知字段容错，Temperature mired 6500K、Tint ×1.5）**                                                                                                   | ✅ v2.2 (M3) 新增  |
+| **预设序列化加固（TestProfileIO：完整往返/version 与未知键容错/save-load/哈希）**                                                                                                                                    | ✅ v2.2 (M3) 新增  |
+| **M1 快捷键体系（全局裸键 + Ctrl 组合）+ 撤销/重做（UndoStack，滑块一步/蒙版一笔一步）+ 白平衡吸管（W）**                                                                                                                           | ✅ v2.4.0 新增     |
+| **M2 缩放/平移体验（光标锚定滚轮缩放 + 空格/中键/方向键平移 + 适合宽度视图 Ctrl+Alt+0 + 拖动进 1:1 请求全尺寸 + Z 键记忆最后适合模式）**                                                                                                       | ✅ v2.5.0 新增     |
+| **M3 蒙版引擎级性能 Phase2（geometryHash 去重 + brushWeightField COW 权重场缓存 + 叠加层降分辨率 + dab 并笔 + 软度滑块接线 + TestMaskRaster）**                                                                               | ✅ v2.6.0 新增     |
+| **M4 直观 UI（顶部 QToolBar：视图模式互斥组适合窗口/适合宽度/1:1 + 放大缩小 + 蒙版工具互斥组线性/径向/画笔；zoomModeChanged + maskToolActivated 双向同步、面板为源工具栏镜像；dark.qss 补齐 QToolBar/QToolButton:checked/QComboBox/QCheckBox 纯 CSS）**  | ✅ v2.7.0 新增     |
+| **M5 预览更新速率（coarse-then-refine：DevelopPanel 拖动 30ms coarse 节流 + PreviewWorker adjustPreviewCoarse 480 渲染 + MainWindow 路由；refine 维持 50ms 停顿路径；1:1 下 coarse 仍更新预览层、不触发全尺寸刷新；TestPipeline 2 用例）** | ✅ v2.8.0 新增     |
 
 ### 🔄 进行中
 
 - 性能优化主线 M1–M3（引擎热路径分配消除 / UI 节流+目录查询提速 / 胶片栏懒加载+增量更新）已完成验收，
   M4/M5（引擎进阶容差 / 数据 IO 架构）待启动；已完成里程碑状态见
-  [docs/Speedup_M1_STATUS.md](docs/Speedup_M1_STATUS.md) / [M2](docs/Speedup_M2_STATUS.md) / [M3](docs/Speedup_M3_STATUS.md)，
+  [docs/Speedup\_M1\_STATUS.md](docs/Speedup_M1_STATUS.md) / [M2](docs/Speedup_M2_STATUS.md) / [M3](docs/Speedup_M3_STATUS.md)，
   计划文件 `~/.claude/plans/groovy-greeting-gem.md`
 
 ## 已修复的预存缺陷（v1.5）
 
 - `ImageViewport.cpp` 蒙版工具代码自上次构建后未编译：`BrushDab` 未限定 `lrc::`（2 处）+ 缺 `<algorithm>/<cmath>`，已修。
+
 - `DevelopPanel::MaskRow` 声明无 `decimals` 成员（构造时误写）—— 已移除。
 
 ## 已修复的预存缺陷（v1.6）
@@ -403,25 +485,38 @@ cmake --build build_gui --config Release
 
 ## 已修复的预存缺陷（v1.7）
 
-- **`DngConverter.cpp` 引用 `imgdata.color.filters`，本工程 LibRaw（vendored 0.22.0 / 0.21.3）中该字段在 `imgdata.idata.filters`** → 该文件此前在 `build_gui` 中从未编译成功（被 .vcxproj 掩盖），本次重编译即报 C2039。已改为 `idata.filters`（两个 LibRaw 树都正确）。
+- **`DngConverter.cpp`** **引用** **`imgdata.color.filters`，本工程 LibRaw（vendored 0.22.0 / 0.21.3）中该字段在** **`imgdata.idata.filters`** → 该文件此前在 `build_gui` 中从未编译成功（被 .vcxproj 掩盖），本次重编译即报 C2039。已改为 `idata.filters`（两个 LibRaw 树都正确）。
+
 - **TestDngConverter 的合成 DNG 缺少 CalibrationIlluminant2/ColorMatrix2**：本工程 LibRaw 只有在一对 illuminant+colormatrix 都齐备时才从 DNG 标签填 `cam_xyz`，因此该测试的 `cam_xyz` 恒为零、ColorMatrix1 断言结构性地必然失败。已补全成对标签。
-- **TestDngConverter 的 `readTiffField()` 只认 SHORT/LONG/BYTE 内联标签**：`ColorMatrix1`（SRATIONAL，count 9）永远返回 -1，`hasTag(50721)` 无法通过。已补 `type==10` 分支（返回偏移量表示存在）。
+
+- **TestDngConverter 的** **`readTiffField()`** **只认 SHORT/LONG/BYTE 内联标签**：`ColorMatrix1`（SRATIONAL，count 9）永远返回 -1，`hasTag(50721)` 无法通过。已补 `type==10` 分支（返回偏移量表示存在）。
+
 - **CFA 断言过严**：LibRaw 会把 CFA 绿色规范化为 G2（码 3），输出 `{0,1,3,2}` 而非输入 `{0,1,1,2}`，两者都是合法 RGGB。断言改为语义检查（R 在 (0,0)，G/G2 在绿色位，B 在 (1,1)）。
 
 ## 已修复的预存缺陷（v1.8）
 
-- **`ImageIO.cpp` TIFF 写入器 IFD 索引错位**：`writeTiffRaw()` 用 `ifd[4]`/`ifd[8]` 回填条带偏移，但 index 4 实际是 tag 262（Photometric），tag 273（StripOffsets）在 index 5。结果是所有导出的 TIFF/DNG 都写成了 Photometric=像素偏移、StripOffsets=0 的畸形文件，stb_image/libraw 都无法读取，即「导出格式无法再导入」。已改为 `ifd[5]`（273）回填，并新增 IFD 解析回归测试（Photometric==2、StripOffsets>0、ByteCounts==w*3*bps/8*h）。
-- **stb_image（vendored）不支持 TIFF**：`loadImage()` 的注释声称支持 TIFF，实际 stb 只能读 PNG/JPEG/BMP。已新增内建 TIFF 读取器（未压缩、chunky、8/16 位、RGB/RGBA、LE/BE、多条带、Predictor 2），并在 `loadImage()` 中按 TIFF 魔数分发。
+- **`ImageIO.cpp`** **TIFF 写入器 IFD 索引错位**：`writeTiffRaw()` 用 `ifd[4]`/`ifd[8]` 回填条带偏移，但 index 4 实际是 tag 262（Photometric），tag 273（StripOffsets）在 index 5。结果是所有导出的 TIFF/DNG 都写成了 Photometric=像素偏移、StripOffsets=0 的畸形文件，stb\_image/libraw 都无法读取，即「导出格式无法再导入」。已改为 `ifd[5]`（273）回填，并新增 IFD 解析回归测试（Photometric==2、StripOffsets>0、ByteCounts==w*3*bps/8\*h）。
+
+- **stb\_image（vendored）不支持 TIFF**：`loadImage()` 的注释声称支持 TIFF，实际 stb 只能读 PNG/JPEG/BMP。已新增内建 TIFF 读取器（未压缩、chunky、8/16 位、RGB/RGBA、LE/BE、多条带、Predictor 2），并在 `loadImage()` 中按 TIFF 魔数分发。
 
 ## 已知取舍
 
 - 非 RAW 导入（JPEG/PNG/TIFF）经 sRGB → 线性 ProPhoto 转换，16 位 TIFF 导入时量化为 8 位
+
 - TIFF 读取器仅支持未压缩 RGB（应用自身导出格式及常见工具产物）；压缩/CMYK/浮点 TIFF 视为不支持
 
 - 调整顺序固定，无图层系统；编辑历史为每次提交的参数快照（线性，无分支/时间线）
+
 - 1:1 视图使用预览缓存（最长边 1920），非全尺寸
+
 - 文件夹监视用 2s 轮询，非 OS 事件驱动
+
 - 直方图直接统计预览 8bit
+
 - 仅验证了 MSVC 2022 构建
+
 - 点颜色色相重建为简化实现，与 Lightroom 精确行为可能存在差异
+
 - HDR 合并按 frame0 为参考曝光，无手动 EV 校正
+
+<br />

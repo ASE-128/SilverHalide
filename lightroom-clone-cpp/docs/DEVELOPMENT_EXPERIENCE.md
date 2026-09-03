@@ -11,7 +11,7 @@
 | 项 | 值 |
 |---|---|
 | 应用名 | **Silver Halide**（`src/app/Constants.h` 的 `kAppName`），版权 © ASE-128 2026 |
-| 版本 | **v2.11.0**（`Constants.h` / `CMakeLists.txt` / `app.rc` / `installer.nsi` 四处同步） |
+| 版本 | **v1.0.0**（`Constants.h` / `CMakeLists.txt` / `app.rc` / `installer.iss` / `installer.nsi` 五处同步；先前的 2.x 版本号均为内部开发 dev 里程碑，未对外发布） |
 | 工作空间 | 线性 **ProPhoto RGB (D50)**；所有调整在线性光下运算，sRGB 伽马最后由 lcms 应用一次 |
 | 测试基线 | headless + GUI 双端 **272 用例 / 274373 断言**全绿（AUDIT-2026-08-14 验收）；PHASE_1 降噪后为 **277 用例 / 274420 断言** |
 | 架构 | 三层：`engine/`（纯 C++ 无 Qt）+ `catalog/`（纯 C++）+ `ui/`（Qt6 Widgets），`utils/` 共享 |

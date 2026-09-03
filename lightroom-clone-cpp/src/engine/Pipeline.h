@@ -25,6 +25,7 @@
 namespace lrc {
 
 class ColorManager;
+class AiInferenceEngine;  // ONNX Runtime inference wrapper (PHASE_12/13 wiring)
 
 // Engine-side render target size for preview-resolution rendering. Pure C++ so
 // the engine stays Qt-free; the UI layer converts from QSize.
@@ -115,6 +116,24 @@ public:
 
     void clearCache();
     void setCacheCapacity(size_t capacityBytes);
+
+    // --- AI inference injection (PHASE_12/13 wiring) ------------------------
+    // Engine-wide ONNX inference handle. Set once at app startup (by
+    // MainWindow) after ModelManager has verified/loaded bundled models from
+    // <applicationDirPath>/models. When null (headless tests, LRC_ENABLE_AI=
+    // OFF builds, or before MainWindow constructs the engine), the AI code
+    // paths silently fall back to the existing pure-C++ implementations:
+    //   • AiDenoiseProcessor::denoise  -> fallbackBilateral
+    //   • AiMaskGenerator::generate    -> heuristicFallback
+    // So the static applySpatialAdjustments / applyLocalAdjustments entry
+    // points remain bit-identical to the pre-AI behaviour when no engine is
+    // attached. The pointer is non-owning; the caller (MainWindow) owns the
+    // AiInferenceEngine instance and must outlive every Pipeline render call.
+    // Thread-safety: AiInferenceEngine::run / runImage are internally
+    // thread-safe (per-thread ONNX sessions), so a single shared engine
+    // serves both the PreviewWorker thread and the export thread.
+    static AiInferenceEngine* globalAiEngine();
+    static void setGlobalAiEngine(AiInferenceEngine* engine);
 
     // LRU cache budget and current usage in bytes (thread-safe).
     size_t cacheCapacityBytes() const;
@@ -309,6 +328,11 @@ private:
     int lastRecomputeStage_ = -1;
     int lastReuseStartStage_ = -1;
     mutable std::mutex renderStateMutex_;
+
+    // PHASE_12/13: non-owning pointer to the shared ONNX inference engine.
+    // Defaults to null; set via setGlobalAiEngine at app startup. When null,
+    // AI denoise/mask code paths degrade to their pure-C++ fallbacks.
+    static AiInferenceEngine* aiEngine_;
 };
 
 } // namespace lrc

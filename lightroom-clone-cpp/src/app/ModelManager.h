@@ -80,6 +80,22 @@ public:
     /** Absolute path where the given model should live on disk. */
     std::filesystem::path cachePathFor(const ModelManifestEntry& entry) const;
 
+    /**
+     * Bundled (install-dir) models root: <applicationDirPath>/models. The
+     * installer ships models read-only at $INSTDIR\models; readPathFor probes
+     * here first so installed copies don't re-download. Returns empty when the
+     * Qt application object isn't available (headless tests / pre-QApp init).
+     */
+    static std::filesystem::path bundledRoot();
+
+    /**
+     * Path used to READ a model: prefers the bundled (install-dir) copy if
+     * present, otherwise the per-user cache path. Downloads always write to
+     * cachePathFor (the writable per-user location), so a bundled model is
+     * never re-downloaded once isModelReady() resolves it here.
+     */
+    std::filesystem::path readPathFor(const ModelManifestEntry& entry) const;
+
     // ---------- validation -------------------------------------------------
     /** True iff the file exists and its SHA256 matches entry.sha256. */
     bool isModelReady(const ModelManifestEntry& entry) const;

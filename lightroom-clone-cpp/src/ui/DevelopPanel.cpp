@@ -217,6 +217,68 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     makeDetailRow("颜色",   0.0, 100.0, 0, &lrc::Adjustments::colorNoiseReduction);
     makeDetailRow("平滑",   0.0, 100.0, 0, &lrc::Adjustments::colorNoiseReductionSmoothness);
 
+    // PHASE_12: AI Denoise (NAFNet) row. enabled+strength map to
+    // Adjustments::aiDenoise; Pipeline::applySpatialAdjustments runs the
+    // bundled NAFNet model when Pipeline::globalAiEngine() reports it ready.
+    // When the model is missing, enabled has no effect (manual NR sliders
+    // above remain authoritative) — so the control is always visible.
+    auto* aiNrLabel = new QLabel(tr("AI 降噪"), this);
+    aiNrLabel->setStyleSheet("color: #c8c8c8; font-weight: 500;");
+    detail->addWidget(aiNrLabel);
+    auto* aiNrRow = new QHBoxLayout;
+    aiNrRow->setSpacing(6);
+    aiDenoiseEnabledCheck_ = new QCheckBox(tr("启用"), this);
+    aiDenoiseStrengthSlider_ = new QSlider(Qt::Horizontal, this);
+    aiDenoiseStrengthSlider_->setRange(0, 100);
+    aiDenoiseStrengthSlider_->setValue(0);
+    aiDenoiseStrengthSpin_ = new QDoubleSpinBox(this);
+    aiDenoiseStrengthSpin_->setRange(0.0, 100.0);
+    aiDenoiseStrengthSpin_->setDecimals(0);
+    aiDenoiseStrengthSpin_->setSingleStep(1.0);
+    aiDenoiseStrengthSpin_->setSuffix("%");
+    aiNrRow->addWidget(aiDenoiseEnabledCheck_);
+    aiNrRow->addWidget(aiDenoiseStrengthSlider_, 1);
+    aiNrRow->addWidget(aiDenoiseStrengthSpin_);
+    detail->addLayout(aiNrRow);
+    // Two-way binding: slider↔spin, enabled+strength→Adjustments::aiDenoise.
+    connect(aiDenoiseStrengthSlider_, &QSlider::valueChanged, this,
+            [this](int v) {
+                if (suppressSignals_) return;
+                QSignalBlocker b(aiDenoiseStrengthSpin_);
+                aiDenoiseStrengthSpin_->setValue(static_cast<double>(v));
+                current_.aiDenoise.strength = static_cast<float>(v);
+                if (v > 0 && !current_.aiDenoise.enabled) {
+                    current_.aiDenoise.enabled = true;
+                    QSignalBlocker b2(aiDenoiseEnabledCheck_);
+                    aiDenoiseEnabledCheck_->setChecked(true);
+                }
+                scheduleDebounce();
+            });
+    connect(aiDenoiseStrengthSpin_,
+            qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+            [this](double v) {
+                if (suppressSignals_) return;
+                QSignalBlocker b(aiDenoiseStrengthSlider_);
+                aiDenoiseStrengthSlider_->setValue(static_cast<int>(v));
+                current_.aiDenoise.strength = static_cast<float>(v);
+                scheduleDebounce();
+            });
+    connect(aiDenoiseEnabledCheck_, &QCheckBox::toggled, this,
+            [this](bool checked) {
+                if (suppressSignals_) return;
+                current_.aiDenoise.enabled = checked;
+                // strength=0 + enabled reads as "no effect"; bump to a
+                // sensible default on first enable so the user sees motion.
+                if (checked && current_.aiDenoise.strength <= 0.0f) {
+                    current_.aiDenoise.strength = 50.0f;
+                    QSignalBlocker b1(aiDenoiseStrengthSlider_);
+                    QSignalBlocker b2(aiDenoiseStrengthSpin_);
+                    aiDenoiseStrengthSlider_->setValue(50);
+                    aiDenoiseStrengthSpin_->setValue(50.0);
+                }
+                scheduleDebounce();
+            });
+
     // ---- 颜色 (HSL 各通道) ---------------------------------------------------
     PanelSection* color = addSection(tr("颜色"));
 
@@ -504,6 +566,29 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             [this](bool c) { onMaskToolToggled(lrc::MaskType::Brush, c); });
     connect(maskColorBtn_, &QPushButton::toggled, this,
             [this](bool c) { onMaskToolToggled(lrc::MaskType::ColorRange, c); });
+
+    // PHASE_13: AI segmentation mask buttons (subject / sky / background).
+    // Unlike the geometry tools above, these are one-shot click buttons:
+    // clicking creates a new Mask with type=AiMask and the chosen target,
+    // immediately rasterized by Pipeline::applyLocalAdjustments via the
+    // bundled BiRefNet/u²Net model. No interactive drawing step is needed.
+    auto* aiMaskRow = new QHBoxLayout;
+    aiMaskRow->setSpacing(6);
+    maskAiSubjectBtn_ = new QPushButton(tr("AI 主体"), this);
+    maskAiSkyBtn_ = new QPushButton(tr("AI 天空"), this);
+    maskAiBackgroundBtn_ = new QPushButton(tr("AI 背景"), this);
+    for (QPushButton* b : {maskAiSubjectBtn_, maskAiSkyBtn_,
+                           maskAiBackgroundBtn_}) {
+        b->setProperty("secondary", true);
+        aiMaskRow->addWidget(b);
+    }
+    maskSec->addLayout(aiMaskRow);
+    connect(maskAiSubjectBtn_, &QPushButton::clicked, this,
+            [this]() { addAiMask(lrc::AiMaskTarget::Subject); });
+    connect(maskAiSkyBtn_, &QPushButton::clicked, this,
+            [this]() { addAiMask(lrc::AiMaskTarget::Sky); });
+    connect(maskAiBackgroundBtn_, &QPushButton::clicked, this,
+            [this]() { addAiMask(lrc::AiMaskTarget::Background); });
 
     // Mask list + delete.
     auto* maskComboRow = new QHBoxLayout;
@@ -1281,6 +1366,37 @@ void DevelopPanel::activateMaskTool(lrc::MaskType tool) {
     // selectMaskTool slot), so this is the single point that mirrors the
     // active tool to MainWindow's toolbar.
     emit maskToolActivated(tool);
+}
+
+void DevelopPanel::addAiMask(lrc::AiMaskTarget target) {
+    // One-shot AI mask creation (no interactive drawing step). The mask's
+    // weight is rasterized inside Pipeline::applyLocalAdjustments via
+    // AiMaskGenerator::generate (heuristicFallback when the model is
+    // unavailable). cachedWeightVersion starts at 0; bumping it later
+    // forces Pipeline to regenerate the segmentation.
+    lrc::Mask m;
+    m.type = lrc::MaskType::AiMask;
+    m.ai.target = target;
+    m.ai.threshold = 0.5f;
+    m.ai.feather = 0.05f;
+    m.ai.invert = false;
+    m.ai.modelInputSize = 1024;
+    m.ai.cachedWeightVersion = 1;  // >0: distinct from a default-constructed
+                                   // mask so geometryHash treats it as set
+    current_.masks.push_back(m);
+    activeMaskTool_ = lrc::MaskType::AiMask;
+    const int index = static_cast<int>(current_.masks.size()) - 1;
+    syncMaskSection();
+    {
+        const QSignalBlocker b(maskCombo_);
+        maskCombo_->setCurrentIndex(index);
+    }
+    updateMaskSectionVisibility();
+    syncMaskSliders();
+    // No maskEditRequested: AiMask has no on-canvas geometry to edit. The
+    // preview still re-renders because scheduleDebounce fires.
+    emit maskToolActivated(lrc::MaskType::AiMask);
+    scheduleDebounce();
 }
 
 void DevelopPanel::selectMaskTool(lrc::MaskType tool) {

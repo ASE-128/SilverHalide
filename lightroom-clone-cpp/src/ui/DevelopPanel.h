@@ -298,6 +298,10 @@ private:
     void onMaskFeatherChanged(int value);
     void onMaskBrushSizeChanged(int value);
     void onMaskSoftnessChanged(int value);
+    // PHASE_13: appends a new Mask with type=AiMask and the given target,
+    // selects it, and notifies the preview. No drawing step — segmentation
+    // runs inside Pipeline::applyLocalAdjustments when the mask is rendered.
+    void addAiMask(lrc::AiMaskTarget target);
     void scheduleDebounce();
     void applyDebounce();
     void applyCoarseDebounce();
@@ -404,6 +408,13 @@ private:
     QPushButton* maskLinearBtn_ = nullptr;
     QPushButton* maskRadialBtn_ = nullptr;
     QPushButton* maskBrushBtn_ = nullptr;
+    // PHASE_13: AI subject/sky/background segmentation mask buttons. Toggle
+    // on click; selecting one creates a new Mask with type=AiMask and the
+    // corresponding target. Pipeline::applyLocalAdjustments runs the bundled
+    // BiRefNet/u²Net model via globalAiEngine() and rasterizes the weight.
+    QPushButton* maskAiSubjectBtn_ = nullptr;
+    QPushButton* maskAiSkyBtn_ = nullptr;
+    QPushButton* maskAiBackgroundBtn_ = nullptr;
     QComboBox* maskCombo_ = nullptr;
     QPushButton* maskDeleteBtn_ = nullptr;
     QWidget* maskFeatherRow_ = nullptr;
@@ -416,6 +427,13 @@ private:
     QSlider* maskOpacitySlider_ = nullptr;
     QCheckBox* maskInvertCheck_ = nullptr;
     lrc::MaskType activeMaskTool_ = lrc::MaskType::None;
+
+    // PHASE_12: AI Denoise controls (Detail section). enabled+strength map
+    // directly to Adjustments::aiDenoise; Pipeline::applySpatialAdjustments
+    // runs the bundled NAFNet model when globalAiEngine() reports it ready.
+    QCheckBox* aiDenoiseEnabledCheck_ = nullptr;
+    QSlider* aiDenoiseStrengthSlider_ = nullptr;
+    QDoubleSpinBox* aiDenoiseStrengthSpin_ = nullptr;
 
     // --- colour-range mask (UI) ----------------------------------------------
     QPushButton* maskColorBtn_ = nullptr;

@@ -28,7 +28,10 @@
 #include "utils/UndoStack.h"
 
 namespace lrc {
+
 class ColorManager;
+class AiInferenceEngine;       // ONNX Runtime wrapper (PHASE_12/13 wiring)
+class ModelManager;            // manifest + download/cache lifecycle
 class FolderMonitor;
 class Pipeline;
 class ThumbnailCache;
@@ -275,10 +278,23 @@ private:
     // Collapses / expands the left (navigator) + right (develop) panes.
     void setSidePanelsVisible(bool visible);
 
+    // PHASE_12/13: constructs aiEngine_ + modelManager_, loads every ready
+    // model from <applicationDirPath>/models/manifest.json into the engine,
+    // and publishes the engine via Pipeline::setGlobalAiEngine. Safe to call
+    // when LRC_ENABLE_AI is off (the body is #ifdef-guarded to a no-op); safe
+    // to call when the bundled manifest is missing (logs + returns).
+    void initializeAiEngine();
+
     // --- engine / catalog ----------------------------------------------
     lrc::RawDecoder decoder_;
     std::shared_ptr<lrc::ColorManager> colorManager_;
     std::unique_ptr<lrc::Pipeline> pipeline_;
+    // PHASE_12/13: AI inference engine + model manager. The engine is shared
+    // process-wide via Pipeline::setGlobalAiEngine so the static
+    // applySpatialAdjustments / applyLocalAdjustments entry points can reach
+    // it. Owned here so the engine outlives every preview/export render.
+    std::unique_ptr<lrc::AiInferenceEngine> aiEngine_;
+    std::unique_ptr<lrc::ModelManager> modelManager_;
     std::unique_ptr<lrc::CatalogDatabase> catalog_;
     std::unique_ptr<lrc::ThumbnailCache> thumbnailCache_;
     std::unique_ptr<lrc::FolderMonitor> folderMonitor_;

@@ -3,11 +3,11 @@
 // where icons/app.ico lives, keeping the script free of absolute paths.
 IDI_APP_ICON ICON "icons/app.ico"
 
-#define APP_VERSION_STR "2.11.0"
+#define APP_VERSION_STR "1.0.0"
 
 1 VERSIONINFO
-FILEVERSION    2,11,0,0
-PRODUCTVERSION 2,11,0,0
+FILEVERSION    1,0,0,0
+PRODUCTVERSION 1,0,0,0
 FILEFLAGSMASK  0x3fL
 FILEFLAGS      0x0L
 FILEOS         0x40004L            // Windows NT

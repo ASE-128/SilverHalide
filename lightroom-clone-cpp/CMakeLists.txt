@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(lightroom_clone_cpp LANGUAGES C CXX VERSION 2.11.0)
+project(lightroom_clone_cpp LANGUAGES C CXX VERSION 1.0.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

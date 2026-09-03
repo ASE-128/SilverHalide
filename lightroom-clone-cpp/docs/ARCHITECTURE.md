@@ -65,7 +65,7 @@ ARW ──RawDecoder──▶ 线性 ProPhoto RGB (U16, 相机矩阵手动应用
   渲染只在导出 / 1:1 放大时执行。
 - **缓存**：`PipelineCacheKey = hash(imageId, adjustments.hash(), maxDim)`，
   256MB LRU（maxDim 参与键，粗/精/全尺寸三档天然分离）。滑块拖动命中缓存则零重算。
-- **1:1 全尺寸**（v2.1 起为真 1:1）：`PreviewWorker::loadFullRes/adjustFullRes` 走
+- **1:1 全尺寸**：`PreviewWorker::loadFullRes/adjustFullRes` 走
   `halfSize=false, maxDim=0` 解码，`renderLinearFull` + `toDisplaySRGB` 渲染（**不塞
   LRU**），同一时刻至多 1 份全尺寸缓冲，退出 1:1 / 换图即释放；默认调整下优先从目录
   内嵌预览 / 磁盘 1:1 缓存直读，免重复解码。
@@ -117,13 +117,13 @@ UI 通过 `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` 下发请求，
 
 - 调整顺序固定（曝光→对比度→高光→阴影→白/黑→曲线→白平衡→去朦胧→鲜艳度→HSL→色调分离→点颜色→空间阶段），
   参数堆叠是单层 JSON，无图层/快照；编辑历史为每次提交的线性快照，无分支/时间线。
-- 1:1 为真全尺寸（v2.1 起）：`PreviewWorker` 后台全尺寸解码，同一时刻 1 份缓冲、不塞 LRU。
+- 1:1 为真全尺寸：`PreviewWorker` 后台全尺寸解码，同一时刻 1 份缓冲、不塞 LRU。
 - 非 RAW 导入（JPEG/PNG/TIFF）经 sRGB → 线性 ProPhoto 转换；16 位 TIFF 导入时量化为 8 位；
   TIFF 读取器仅支持未压缩 RGB（应用自身导出格式及常见工具产物）。
 - 文件夹监视用 2s 轮询（`std::filesystem`），非 OS 事件驱动。
 - 直方图直接统计预览 8bit，每 4M 像素抽样一次。
 - 蒙版局部调整的画笔权重场（`Pipeline::brushWeightField`）以 COW `shared_ptr` 缓存，键 =
-  `geometryHash + w + h`，拖动局部调整滑块不重建权重场（v2.6）。
+  `geometryHash + w + h`，拖动局部调整滑块不重建权重场。
 
 ## 6. 目录结构
 
