@@ -24,6 +24,14 @@ bool Adjustments::operator==(const Adjustments& other) const {
            colorNoiseReduction == other.colorNoiseReduction &&
            colorNoiseReductionSmoothness == other.colorNoiseReductionSmoothness &&
            distortion == other.distortion && vignette == other.vignette &&
+           lensfunEnabled == other.lensfunEnabled &&
+           lensfunCameraMaker == other.lensfunCameraMaker &&
+           lensfunCameraModel == other.lensfunCameraModel &&
+           lensfunLensMaker == other.lensfunLensMaker &&
+           lensfunLensModel == other.lensfunLensModel &&
+           lensfunFocalLengthMm == other.lensfunFocalLengthMm &&
+           lensfunAperture == other.lensfunAperture &&
+           lensfunCropFactor == other.lensfunCropFactor &&
            vignetteMidpoint == other.vignetteMidpoint &&
            vignetteRoundness == other.vignetteRoundness &&
            vignetteFeather == other.vignetteFeather &&
@@ -258,6 +266,14 @@ size_t Adjustments::hash() const {
     mixDouble(h, colorNoiseReductionSmoothness);
     mixDouble(h, distortion);
     mixDouble(h, vignette);
+    h = hashCombine(h, static_cast<size_t>(lensfunEnabled));
+    h = hashCombine(h, std::hash<std::string>{}(lensfunCameraMaker));
+    h = hashCombine(h, std::hash<std::string>{}(lensfunCameraModel));
+    h = hashCombine(h, std::hash<std::string>{}(lensfunLensMaker));
+    h = hashCombine(h, std::hash<std::string>{}(lensfunLensModel));
+    mixFloat(h, lensfunFocalLengthMm);
+    mixFloat(h, lensfunAperture);
+    mixFloat(h, lensfunCropFactor);
     mixDouble(h, vignetteMidpoint);
     mixDouble(h, vignetteRoundness);
     mixDouble(h, vignetteFeather);

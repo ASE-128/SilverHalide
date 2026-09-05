@@ -8,6 +8,8 @@ Silver Halide 是一个基于 C++20 + Qt 6 的 RAW 摄影工作流桌面应用�
 
 - **RAW 解码与线性工作流**：libraw 后端、相机颜色矩阵、线性 ProPhoto RGB (D50) 工作空间，sRGB 伽马由 lcms 在管线末端一次性应用
 
+- **镜头/相机配置文件（集成中）**：RAW 元数据已暴露镜头厂商/型号，CMake 已声明可选 vcpkg Lensfun，DCP 文件识别入口已加入；Lensfun 校正应用、DCP 矩阵/曲线/LUT 与 UI 选择尚未验收
+
 - **非破坏性编辑管线**：参数堆栈 + 缓存 + 预览 / 导出一致；曝光、对比度、高光 / 阴影、白平衡、曲线、HSL、色调分离、去朦胧、纹理 / 清晰度 / 锐化、畸变、颗粒、晕影、点颜色
 
 - **局部调整**：污点去除（Clone / Heal，归一化坐标 + 羽化 + 边缘亮度匹配）、蒙版局部调整
@@ -16,11 +18,13 @@ Silver Halide 是一个基于 C++20 + Qt 6 的 RAW 摄影工作流桌面应用�
 
 - **视图与比较**：胶片栏、主预览、Before / After 分屏、参考视图、1:1 全尺寸
 
-- **导出**：JPEG / TIFF / PNG，按虚拟副本独立导出
+- **导出**：JPEG / TIFF / PNG，按虚拟副本独立导出；批量导出（母版+所有虚拟副本）时可用模板重命名输出文件（`{date}/{index[:W]}/{base}`，冲突自动加序号）
+
+- **导入**：添加 / 复制到目录 / 移动，按日期组织受管库；支持导入时按模板重命名（`{date}/{index[:W]}/{base}`），新文件名可预览
 
 - **全景合成**：纯 C++ 实现（无 OpenCV 依赖），降采样空间域 NCC 对齐 + 柱面投影 + 行带羽化融合
 
-- **AI 组件**：ONNX Runtime 后端，NAFNet 去噪、RMBG2 主体分割；模型按需下载、SHA-256 校验、UI 管理
+- **AI 组件**：ONNX Runtime 后端，NAFNet 去噪、BiRefNet 主体分割、U²Net 天空近似蒙版；模型按需下载、SHA-256 校验、UI 管理。U²Net 是通用显著性模型，并非天空专用模型，天空结果不可用时仍回退到内置启发式蒙版
 
 - **性能**：导入 / 预览 / 编辑 / 导出四段路径均有增量加速；coarse-then-refine 双路径预览；sqlite 语句复用
 
@@ -50,7 +54,7 @@ Silver Halide 是一个基于 C++20 + Qt 6 的 RAW 摄影工作流桌面应用�
 
 - 应用图标
 
-AI 模型文件（`nafnet-denoise.onnx`、`rmbg2-subject.onnx` 等）随安装包一起分发，位于 `<安装目录>\models\`。
+NAFNet 和 BiRefNet 模型文件随安装包一起分发，位于 `<安装目录>\models\`。U²Net 天空近似模型约 176 MB，不随安装包捆绑；可在「设置 → 模型管理」中按需下载，文件会保存到 `%LOCALAPPDATA%\Silver Halide\models\` 并进行 SHA-256 校验。
 
 ## 从源码构建
 
@@ -65,6 +69,8 @@ AI 模型文件（`nafnet-denoise.onnx`、`rmbg2-subject.onnx` 等）随安装�
 - Qt 6.8.x（MSVC 2022 x64 包），路径形如 `qt/6.8.3/msvc2022_64`
 
 - ONNX Runtime 1.23+（可选，启用 AI 推理）
+
+- vcpkg（可选 Lensfun）：`C:\Users\tmlde\vcpkg`，安装目标为 `lensfun:x64-windows`
 
 ### GUI 构建
 

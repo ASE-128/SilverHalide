@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "engine/ColorManager.h"
+#include "engine/LensfunProfile.h"
 #include "engine/RenderScratch.h"
 #include "engine/ZoneCurve.h"
 #include "utils/MathUtils.h"
@@ -1770,6 +1771,15 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
             }
         });
     }
+
+    // --- Lensfun geometric distortion correction -----------------------------
+    // Runs before the manual radial distortion slider so the two can stack:
+    // Lensfun undoes the lens's optical distortion from the lens profile, and
+    // the manual `distortion` slider lets the user fine-tune on top. When
+    // Lensfun is disabled or the profile/capture parameters are unavailable,
+    // applyGeometry returns false and leaves the buffer untouched.
+    if (a.lensfunEnabled)
+        LensfunProfile::applyGeometry(a, p, w, h);
 
     // --- Lens distortion: radial remap (barrel / pincushion). ---------------
     if (a.distortion != 0.0) {

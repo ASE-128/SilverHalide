@@ -332,6 +332,18 @@ struct Adjustments {
     double distortion = 0.0;  // -100..+100  radial barrel/pincushion
     double vignette = 0.0;    // -100..+100  post-crop vignette amount (corner shading)
 
+    // Optional Lensfun geometric correction. The strings identify the matched
+    // camera/lens profile; the numeric fields are the capture parameters used
+    // by lfModifier. Disabled profiles leave the pixel pipeline unchanged.
+    bool lensfunEnabled = false;
+    std::string lensfunCameraMaker;
+    std::string lensfunCameraModel;
+    std::string lensfunLensMaker;
+    std::string lensfunLensModel;
+    float lensfunFocalLengthMm = 0.0f;
+    float lensfunAperture = 0.0f;
+    float lensfunCropFactor = 1.0f;
+
     // --- effects: post-crop vignette shape (LR "effects" panel) ----------
     double vignetteMidpoint = 50.0;   // 0..100    distance where the falloff is centred
     double vignetteRoundness = 0.0;   // -100..+100  rectangle (-100) to circle (+100)

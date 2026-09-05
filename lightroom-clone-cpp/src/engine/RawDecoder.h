@@ -39,6 +39,11 @@ struct DecodeParams {
 struct RawMeta {
     std::string make;
     std::string model;
+    std::string lensMaker;
+    std::string lensModel;
+    float focalLengthMm = 0.0f;
+    float aperture = 0.0f;
+    float cropFactor = 1.0f;
     int width = 0;
     int height = 0;
     // Native pixel dimensions before any maxDim downscale. Useful for the 1:1

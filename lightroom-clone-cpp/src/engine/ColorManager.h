@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <memory>
 #include <shared_mutex>
+#include <vector>
 
 // Only include the lcms headers in the implementation TU.
 struct _cmsHPROFILE;
@@ -59,6 +60,19 @@ public:
     // Replaces the display profile with one loaded from disk (fallback to
     // sRGB if the file cannot be opened).
     void loadDisplayProfile(const std::filesystem::path& iccPath);
+
+    // P1-2: ICC profile presets that may be embedded in exported files. sRGB is
+    // the default export colour space (matches the display-render path).
+    enum class ExportColorProfile { SRGB, AdobeRGB, DisplayP3 };
+
+    /**
+     * @brief Serializes a colour profile preset to ICC profile bytes.
+     *
+     * The bytes are suitable for embedding into an exported JPEG (APP2), PNG
+     * (iCCP) or TIFF (tag 34675). Returns an empty vector on profile creation
+     * or serialization failure.
+     */
+    static std::vector<uint8_t> exportProfileBytes(ExportColorProfile profile);
 
     // Combined 3x3 matrix mapping camera-linear RGB (libraw cam_xyz output,
     // D65-relative) into linear ProPhoto RGB. Row-major.

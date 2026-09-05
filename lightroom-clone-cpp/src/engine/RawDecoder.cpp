@@ -79,6 +79,15 @@ std::optional<DecodedImage> RawDecoder::decode(
     RawMeta meta;
     meta.make = std::string(raw.imgdata.idata.make);
     meta.model = std::string(raw.imgdata.idata.model);
+    meta.lensMaker = std::string(raw.imgdata.lens.LensMake);
+    meta.lensModel = std::string(raw.imgdata.lens.Lens);
+    meta.focalLengthMm = raw.imgdata.other.focal_len;
+    meta.aperture = raw.imgdata.other.aperture;
+    meta.cropFactor = raw.imgdata.lens.FocalLengthIn35mmFormat > 0.0f &&
+                              meta.focalLengthMm > 0.0f
+                          ? raw.imgdata.lens.FocalLengthIn35mmFormat /
+                                meta.focalLengthMm
+                          : 1.0f;
     meta.width = img->width;
     meta.height = img->height;
     // 原生尺寸 = 全尺寸解码 (halfSize=false) 的输出，含 90° 翻转换算 (native).

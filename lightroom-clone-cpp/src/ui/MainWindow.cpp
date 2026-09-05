@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -56,6 +58,8 @@
 #include "catalog/FolderMonitor.h"
 #include "catalog/ThumbnailCache.h"
 #include "engine/ColorManager.h"
+#include "engine/DcpProfile.h"
+#include "engine/LensfunProfile.h"
 #include "engine/ImageIO.h"
 #include "engine/Pipeline.h"
 #include "engine/RawDecoder.h"
@@ -72,6 +76,7 @@
 #include "ui/DevelopPanel.h"
 #include "ui/EditHistoryDialog.h"
 #include "ui/ExportDialog.h"
+#include "ui/SnapshotDialog.h"
 #include "ui/FilmstripWidget.h"
 #include "ui/HdrMergeDialog.h"
 #include "ui/HistogramWidget.h"
@@ -85,6 +90,7 @@
 #include "ui/SmartCollectionsDialog.h"
 #include "utils/MathUtils.h"
 #include "utils/ProfileIO.h"
+#include "utils/RenameTemplate.h"
 #include "utils/XmpProfile.h"
 
 namespace {
@@ -107,6 +113,17 @@ std::filesystem::path toStdPath(const QString& path) {
 
 QString fromStdPath(const std::filesystem::path& path) {
     return QString::fromStdWString(path.wstring());
+}
+
+// Local "YYYY-MM-DD" for the export {date} token (an export happens today).
+std::string todayString() {
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm.tm_year + 1900,
+                  tm.tm_mon + 1, tm.tm_mday);
+    return buf;
 }
 
 QStringList toQStringList(const std::vector<std::string>& values) {
@@ -486,6 +503,8 @@ void MainWindow::buildMenus() {
                         &MainWindow::importPreset);
     fileMenu->addAction(tr("导出预设…"), QKeySequence(), this,
                         &MainWindow::exportPreset);
+    fileMenu->addAction(tr("快照…"), QKeySequence(), this,
+                        &MainWindow::onManageSnapshots);
     fileMenu->addSeparator();
     fileMenu->addAction(tr("退出"), this, &QWidget::close,
                         QKeySequence::Quit);
@@ -904,6 +923,10 @@ void MainWindow::startWorkers() {
             &MainWindow::onFullResReadyCoarse);
     connect(previewWorker_, &PreviewWorker::imageMeta, this,
             &MainWindow::onImageMeta);
+        connect(previewWorker_, &PreviewWorker::cameraMeta, this,
+            &MainWindow::onCameraMeta);
+        connect(developPanel_, &DevelopPanel::dcpProfileSelected, this,
+            &MainWindow::onDcpProfileSelected);
     connect(viewport_, &ImageViewport::fullResRequested, this,
             &MainWindow::onFullResRequested);
     // PHASE_2: preview-resolution rendering. The viewport reports its logical
@@ -922,6 +945,21 @@ void MainWindow::startWorkers() {
             });
     connect(previewWorker_, &PreviewWorker::exportFinished, this,
             &MainWindow::onExportFinished);
+    // P1-3: batch-export status (master + virtual copies, rename template).
+    connect(previewWorker_, &PreviewWorker::batchExportProgress, this,
+            [this](int done, int total) {
+                statusBar()->showMessage(
+                    tr("正在批量导出 %1/%2（全尺寸渲染）…").arg(done).arg(total));
+            });
+    connect(previewWorker_, &PreviewWorker::batchExportFinished, this,
+            [this](int success, int fail, const QString& message) {
+                statusBar()->showMessage(
+                    tr("批量导出完成：成功 %1，失败 %2。%3")
+                        .arg(success)
+                        .arg(fail)
+                        .arg(message),
+                    8000);
+            });
     connect(previewWorker_, &PreviewWorker::autoAdjustReady, this,
             &MainWindow::onAutoAdjustReady);
     connect(previewWorker_, &PreviewWorker::visualizationReady, this,
@@ -1119,11 +1157,13 @@ void MainWindow::importFiles() {
         return;
     const QString dest = dlg.destinationDir();
     startImport(paths, dlg.convertToDng(), dlg.importMode(),
-                dest.isEmpty() ? libraryRoot_ : dest);
+                dest.isEmpty() ? libraryRoot_ : dest,
+                dlg.renameEnabled() ? dlg.renameTemplate() : QString());
 }
 
 void MainWindow::startImport(const QStringList& paths, bool convertToDng,
-                             lrc::ImportMode mode, const QString& destRoot) {
+                             lrc::ImportMode mode, const QString& destRoot,
+                             const QString& renameTemplate) {
     if (paths.isEmpty())
         return;
     // Remember the folder for the navigation panel.
@@ -1140,7 +1180,8 @@ void MainWindow::startImport(const QStringList& paths, bool convertToDng,
                               Q_ARG(QStringList, paths),
                               Q_ARG(bool, convertToDng),
                               Q_ARG(lrc::ImportMode, mode),
-                              Q_ARG(QString, destRoot));
+                              Q_ARG(QString, destRoot),
+                              Q_ARG(QString, renameTemplate));
 }
 
 void MainWindow::exportImage() {
@@ -1180,12 +1221,96 @@ void MainWindow::exportImage() {
                                       static_cast<int>(exportVariant))
                 .value_or(currentAdjustments_);
     statusBar()->showMessage(tr("正在导出（全尺寸渲染）…"));
+    const ExportWatermark wm = dlg.watermark();
+
+    // P1-3: batch export of the master + every virtual copy whose outputs are
+    // named from the rename template (instead of the single-variant legacy
+    // export). The chosen folder is the output path's parent directory; each
+    // rendered filename gets a numeric suffix if the on-disk name is taken.
+    if (dlg.renameEnabled()) {
+        const std::filesystem::path dir =
+            toStdPath(QFileInfo(out).absolutePath());
+        const std::string base =
+            QFileInfo(currentFilePath_).completeBaseName().toStdString();
+        static const char* suffixes[] = {".jpg", ".png", ".tif", ".tif",
+                                         ".dng"};
+        const int fi = dlg.formatIndex();
+        const char* suffix = (fi >= 0 && fi < 5) ? suffixes[fi] : ".jpg";
+
+        auto variants = catalog_->listVariants(currentImageId_);
+        QList<ExportItem> items;
+        items.reserve(static_cast<int>(variants.size()));
+        const int total = static_cast<int>(variants.size());
+        for (int i = 0; i < total; ++i) {
+            const lrc::EditVariant& v = variants[i];
+            // Resolve the variant's adjustment stack (current view is
+            // authoritative when it matches; otherwise load from the catalog).
+            lrc::Adjustments adj;
+            if (v.variantId == currentVariantId_)
+                adj = currentAdjustments_;
+            else
+                adj = catalog_
+                          ->loadAdjustments(currentImageId_,
+                                            static_cast<int>(v.variantId))
+                          .value_or(currentAdjustments_);
+
+            lrc::RenameTemplateArgs ra;
+            ra.tmpl = dlg.renameTemplate().toStdString();
+            ra.base = base;
+            ra.index = i + 1;
+            ra.indexWidth = 2;
+            ra.date = todayString();
+            const std::filesystem::path outPath =
+                lrc::uniqueRenamePath(dir, ra, suffix);
+
+            ExportItem item;
+            item.imageId = currentImageId_;
+            item.filePath = currentFilePath_;
+            item.adjustments = adj;
+            item.outPath = fromStdPath(outPath);
+            item.format = static_cast<ExportFormat>(dlg.formatIndex());
+            item.quality = dlg.jpegQuality();
+            item.maxDim = dlg.maxDim();
+            item.icc = dlg.iccIndex();
+            item.watermark = wm;
+            items.push_back(std::move(item));
+        }
+        statusBar()->showMessage(tr("正在批量导出 %1 个文件（全尺寸渲染）…")
+                                     .arg(total));
+        QMetaObject::invokeMethod(previewWorker_, "batchExport",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(QList<ExportItem>, items));
+        return;
+    }
+
     QMetaObject::invokeMethod(
         previewWorker_, "exportImage", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(QString, currentFilePath_),
         Q_ARG(lrc::Adjustments, exportAdj), Q_ARG(QString, out),
         Q_ARG(int, dlg.formatIndex()), Q_ARG(int, dlg.jpegQuality()),
-        Q_ARG(int, dlg.maxDim()));
+        Q_ARG(int, dlg.maxDim()), Q_ARG(int, dlg.iccIndex()),
+        Q_ARG(ExportWatermark, wm));
+}
+
+void MainWindow::onManageSnapshots() {
+    if (currentImageId_ < 0) {
+        QMessageBox::information(this, tr("快照"),
+                                 tr("请先在胶片栏选择一张图片。"));
+        return;
+    }
+    SnapshotDialog dlg(*catalog_, currentImageId_, /*variant=*/0, this);
+    // Applying a snapshot is equivalent to restoring an undo step: reuse the
+    // same panel/preview/persist path (without re-pushing the history). The
+    // master variant is used for snapshots; virtual copies keep their own.
+    connect(&dlg, &SnapshotDialog::applied, this,
+            [this](const lrc::Adjustments& adjustments) {
+                if (currentVariantId_ == 0)
+                    applyAdjustmentState(adjustments);
+                else if (catalog_->saveAdjustments(currentImageId_, adjustments,
+                                                  currentVariantId_))
+                    statusBar()->showMessage(tr("编辑已保存"), 2500);
+            });
+    dlg.exec();
 }
 
 void MainWindow::convertToDng() {
@@ -1241,6 +1366,8 @@ void MainWindow::loadImageState(int imageId, int variantId) {
     currentImageId_ = imageId;
     currentVariantId_ = variantId;
     currentFilePath_ = filePath;
+    currentDcpProfilePath_.clear();
+    developPanel_->setDcpProfiles({}, {});
     currentAdjustments_ =
         catalog_->loadAdjustments(imageId, variantId)
             .value_or(lrc::Adjustments::defaults());
@@ -1280,6 +1407,116 @@ void MainWindow::loadImageState(int imageId, int variantId) {
     statusBar()->showMessage(
         tr("加载 %1 …").arg(QFileInfo(currentFilePath_).fileName()));
     requestPreview(currentFilePath_, currentAdjustments_);
+}
+
+void MainWindow::onCameraMeta(qint64 imageId, const QString& make,
+                              const QString& model, const QString& lensMaker,
+                              const QString& lensModel, float focalLengthMm,
+                              float aperture, float cropFactor) {
+    if (imageId != currentImageId_)
+        return;
+    refreshDcpProfiles(model);
+    refreshLensfunProfile(make, model, lensMaker, lensModel, focalLengthMm,
+                          aperture, cropFactor);
+}
+
+void MainWindow::refreshLensfunProfile(const QString& cameraMake,
+                                       const QString& cameraModel,
+                                       const QString& lensMaker,
+                                       const QString& lensModel,
+                                       float focalLengthMm, float aperture,
+                                       float cropFactor) {
+    if (!lrc::LensfunProfile::available()) {
+        developPanel_->setLensfunProfile(tr("当前构建未启用 Lensfun"), false,
+                                         false);
+        return;
+    }
+    const auto profiles = lrc::LensfunProfile::find(
+        cameraMake.toStdString(), cameraModel.toStdString(),
+        lensMaker.toStdString(), lensModel.toStdString());
+    if (profiles.empty()) {
+        // No matching profile: force the correction off so a stale enabled
+        // flag never keeps the stage running as a no-op. The identity fields
+        // are left as-is; applyGeometry short-circuits when the lookup fails.
+        if (currentAdjustments_.lensfunEnabled) {
+            currentAdjustments_.lensfunEnabled = false;
+            developPanel_->setAdjustments(currentAdjustments_);
+            onAdjustmentsCommitted(currentAdjustments_);
+        }
+        developPanel_->setLensfunProfile(
+            tr("未找到匹配：%1 / %2").arg(lensMaker, lensModel), false, false);
+        return;
+    }
+    const auto& profile = profiles.front();
+    const QString status = tr("已匹配：%1 @ %2mm f/%3（畸变 %4，暗角 %5，色差 %6）")
+        .arg(QString::fromStdString(profile.lensModel))
+        .arg(QString::number(focalLengthMm, 'f', 1))
+        .arg(QString::number(aperture, 'f', 1))
+        .arg(profile.hasDistortion ? tr("支持") : tr("无"))
+        .arg(profile.hasVignetting ? tr("支持") : tr("无"))
+        .arg(profile.hasChromaticAberration ? tr("支持") : tr("无"));
+    // Populate the factual Lensfun identity + capture fields on the current
+    // adjustment stack so the Pipeline stage has everything it needs. The
+    // enabled flag defaults to true the first time a profile is detected for
+    // this image (identity previously empty); afterwards the user's saved
+    // on/off choice is respected across reloads.
+    const bool firstDetection = currentAdjustments_.lensfunCameraMaker.empty();
+    currentAdjustments_.lensfunCameraMaker = cameraMake.toStdString();
+    currentAdjustments_.lensfunCameraModel = cameraModel.toStdString();
+    currentAdjustments_.lensfunLensMaker = lensMaker.toStdString();
+    currentAdjustments_.lensfunLensModel = lensModel.toStdString();
+    currentAdjustments_.lensfunFocalLengthMm = focalLengthMm;
+    currentAdjustments_.lensfunAperture = aperture;
+    currentAdjustments_.lensfunCropFactor =
+        cropFactor > 0.0f ? cropFactor : profile.cropFactor;
+    if (firstDetection)
+        currentAdjustments_.lensfunEnabled = true;
+    developPanel_->setAdjustments(currentAdjustments_);
+    developPanel_->setLensfunProfile(status, true,
+                                     currentAdjustments_.lensfunEnabled);
+    onAdjustmentsCommitted(currentAdjustments_);
+}
+
+void MainWindow::refreshDcpProfiles(const QString& cameraModel) {
+    QStringList names;
+    QStringList paths;
+    QStringList roots;
+    roots << QCoreApplication::applicationDirPath() + "/resources/Camera";
+    roots << QCoreApplication::applicationDirPath() + "/../resources/Camera";
+    for (const QString& root : roots) {
+        const QDir dir(root + "/" + cameraModel);
+        if (!dir.exists())
+            continue;
+        const QFileInfoList files = dir.entryInfoList(
+            QStringList() << QStringLiteral("*.dcp"), QDir::Files,
+            QDir::Name);
+        for (const QFileInfo& file : files) {
+            const auto profile = lrc::DcpProfileReader::read(
+                toStdPath(file.absoluteFilePath()));
+            if (!profile)
+                continue;
+            names.append(QString::fromStdString(profile->name));
+            paths.append(file.absoluteFilePath());
+        }
+        if (!names.isEmpty())
+            break;
+    }
+    developPanel_->setDcpProfiles(names, paths);
+}
+
+void MainWindow::onDcpProfileSelected(const QString& path) {
+    currentDcpProfilePath_ = path;
+    if (path.isEmpty()) {
+        developPanel_->setDcpProfileStatus(tr("未加载 DCP"));
+        return;
+    }
+    const auto profile = lrc::DcpProfileReader::read(toStdPath(path));
+    if (!profile) {
+        developPanel_->setDcpProfileStatus(tr("DCP 读取失败"));
+        return;
+    }
+    developPanel_->setDcpProfileStatus(
+        tr("已读取矩阵/曲线（尚未应用到管线）"));
 }
 
 void MainWindow::onImageVariantSelected(int64_t imageId, int variantId) {

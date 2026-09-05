@@ -15,20 +15,30 @@
 namespace lrc {
 
 class ImageIO {
+    // P1-2: an optional ICC profile (bytes of a serialized .icc) may be embedded
+    // in the corresponding output formats. An empty `icc` keeps the original
+    // byte-identical write path (no profile). Profiles are small (<64 kB), so a
+    // single stored deflate block suffices for PNG iCCP.
+    //   JPEG: embedded as ICC_PROFILE APP2 markers.
+    //   PNG : embedded as an iCCP chunk (zlib stored-block deflate).
+    //   TIFF: embedded as tag 34675 (InterColorProfile).
 public:
     // Writes a U8 RGB buffer as baseline JPEG. quality is 0..100.
     static bool writeJpeg(const std::filesystem::path& path,
-                          const ImageBuffer& rgbU8, int quality);
+                          const ImageBuffer& rgbU8, int quality,
+                          const std::vector<uint8_t>& icc = {});
     // Encodes a U8 RGB buffer to baseline JPEG bytes. Empty vector on failure.
     static std::vector<uint8_t> encodeJpeg(const ImageBuffer& rgbU8,
                                            int quality);
     // Writes a U8 RGB buffer as PNG (lossless).
     static bool writePng(const std::filesystem::path& path,
-                         const ImageBuffer& rgbU8);
+                         const ImageBuffer& rgbU8,
+                         const std::vector<uint8_t>& icc = {});
     // Writes an RGB buffer as uncompressed little-endian TIFF. The bit depth
     // follows the buffer: U8 -> 8-bit, U16 -> 16-bit.
     static bool writeTiff(const std::filesystem::path& path,
-                          const ImageBuffer& rgb);
+                          const ImageBuffer& rgb,
+                          const std::vector<uint8_t>& icc = {});
     // Writes a U8 RGB buffer as binary P6 PPM.
     static bool writePPM(const std::filesystem::path& path,
                          const ImageBuffer& rgbU8);

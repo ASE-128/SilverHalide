@@ -1,7 +1,13 @@
 #include "ui/ExportDialog.h"
 
-#include "catalog/CatalogDatabase.h"
+#include <algorithm>
+#include <ctime>
 
+#include "catalog/CatalogDatabase.h"
+#include "engine/ExportEngine.h"
+#include "utils/RenameTemplate.h"
+
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
@@ -29,6 +35,17 @@ const char* kFormatNames[] = {
 };
 const char* kFormatSuffixes[] = {".jpg", ".png", ".tif", ".tif", ".dng"};
 constexpr int kFormatCount = 5;
+
+// Local "YYYY-MM-DD" for the export {date} token (the export happens today).
+std::string todayString() {
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm.tm_year + 1900,
+                  tm.tm_mon + 1, tm.tm_mday);
+    return buf;
+}
 
 } // namespace
 
@@ -99,6 +116,75 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
     qualityLayout->addWidget(qualityValueLabel_);
     form->addRow(tr("JPEG 质量:"), qualityRow_);
 
+    // P1-2: ICC profile to embed in the exported file (0 = none / byte-identical
+    // legacy output). Order must match ExportEngine::ExportSpec::IccChoice.
+    iccCombo_ = new QComboBox(this);
+    iccCombo_->addItem(tr("无 (sRGB 默认)"), QVariant(0));
+    iccCombo_->addItem(tr("sRGB"), QVariant(1));
+    iccCombo_->addItem(tr("Adobe RGB"), QVariant(2));
+    iccCombo_->addItem(tr("Display P3"), QVariant(3));
+    iccCombo_->setCurrentIndex(0);
+    form->addRow(tr("ICC:"), iccCombo_);
+
+    // P1-4: watermark overlay (PNG with alpha). Hidden until an overlay is chosen.
+    auto* wmRow = new QWidget(this);
+    auto* wmLayout = new QFormLayout(wmRow);
+    wmLayout->setContentsMargins(0, 0, 0, 0);
+    wmLayout->setSpacing(6);
+    wmEnable_ = new QCheckBox(tr("启用水印"), wmRow);
+    wmLayout->addRow(wmEnable_);
+
+    auto* wmPathRow = new QHBoxLayout;
+    wmPathRow->setSpacing(6);
+    wmPathLabel_ = new QLabel(tr("未选择"), wmRow);
+    wmPathRow->addWidget(wmPathLabel_, 1);
+    auto* wmBrowse = new QPushButton(tr("选择 PNG…"), wmRow);
+    wmBrowse->setProperty("secondary", true);
+    wmPathRow->addWidget(wmBrowse);
+    wmLayout->addRow(tr("图片:"), wmPathRow);
+
+    wmPosition_ = new QComboBox(wmRow);
+    wmPosition_->addItem(tr("左上"), QVariant(0));
+    wmPosition_->addItem(tr("右上"), QVariant(1));
+    wmPosition_->addItem(tr("左下"), QVariant(2));
+    wmPosition_->addItem(tr("右下"), QVariant(3));
+    wmPosition_->addItem(tr("居中"), QVariant(4));
+    wmPosition_->setCurrentIndex(4);
+    wmLayout->addRow(tr("位置:"), wmPosition_);
+
+    wmOpacity_ = new QSlider(Qt::Horizontal, wmRow);
+    wmOpacity_->setRange(1, 100);
+    wmOpacity_->setValue(100);
+    wmLayout->addRow(tr("不透明度:"), wmOpacity_);
+
+    wmScale_ = new QSlider(Qt::Horizontal, wmRow);
+    wmScale_->setRange(1, 50);
+    wmScale_->setValue(20);  // ~0.20 of the output's long edge
+    wmLayout->addRow(tr("大小:"), wmScale_);
+
+    wmRow_ = wmRow;
+    wmRow_->setVisible(false);
+    form->addRow(tr("水印:"), wmRow_);
+
+    connect(wmBrowse, &QPushButton::clicked, this, &ExportDialog::browseWatermark);
+    connect(wmEnable_, &QCheckBox::toggled, this, &ExportDialog::onWatermarkToggle);
+
+    // P1-3: batch rename on export. When enabled, MainWindow exports the master
+    // + every virtual copy into the chosen folder, naming outputs from the
+    // template ({date}/{index}/{base}); the live preview mirrors what the batch
+    // will produce.
+    renameBox_ = new QCheckBox(tr("批量导出时重命名文件"), this);
+    form->addRow(renameBox_);
+    renameEdit_ = new QLineEdit(this);
+    renameEdit_->setPlaceholderText(tr("{date}_{base}_{index:2}"));
+    form->addRow(tr("模板:"), renameEdit_);
+    renamePreview_ = new QLabel(this);
+    renamePreview_->setProperty("caption", true);
+    renamePreview_->setWordWrap(true);
+    renamePreview_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    form->addRow(renamePreview_);
+    refreshRenamePreview();
+
     root->addLayout(form);
 
     auto* buttons = new QDialogButtonBox(
@@ -109,6 +195,10 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
 
     connect(formatCombo_, &QComboBox::currentIndexChanged, this,
             &ExportDialog::onFormatChanged);
+    connect(renameBox_, &QCheckBox::toggled, this,
+            &ExportDialog::refreshRenamePreview);
+    connect(renameEdit_, &QLineEdit::textChanged, this,
+            &ExportDialog::refreshRenamePreview);
     connect(variantCombo_,
             QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int) { emit variantChosen(selectedVariantId()); });
@@ -139,6 +229,10 @@ int ExportDialog::maxDim() const {
 }
 
 void ExportDialog::setVariants(const std::vector<lrc::EditVariant>& variants) {
+    // P1-3: cache the batch targets (master + copies) so the rename preview
+    // can render one row per output without a second catalog query.
+    variants_ = variants;
+
     // Block signals while repopulating so variantChosen() reflects only real
     // user picks, not the initial fill.
     const QSignalBlocker blocker(variantCombo_);
@@ -172,6 +266,8 @@ void ExportDialog::setVariants(const std::vector<lrc::EditVariant>& variants) {
         variantCombo_->setCurrentIndex(masterIndex);
     else if (variantCombo_->count() > 0)
         variantCombo_->setCurrentIndex(0);
+
+    refreshRenamePreview();
 }
 
 bool ExportDialog::hasVariants() const { return variantsAvailable_; }
@@ -231,4 +327,121 @@ void ExportDialog::validateAndAccept() {
         return;
     }
     accept();
+}
+
+int ExportDialog::iccIndex() const {
+    bool ok = false;
+    const int v = iccCombo_ ? iccCombo_->currentData().toInt(&ok) : 0;
+    // Clamp to the valid IccChoice range (0..3). Unknown/absent -> none.
+    if (ok && v >= 0 && v <= 3)
+        return v;
+    return 0;
+}
+
+ExportWatermark ExportDialog::watermark() const {
+    ExportWatermark wm;
+    wm.enabled = wmEnable_ && wmEnable_->isChecked() && !wmOverlay_.isNull();
+    if (!wm.enabled)
+        return wm;
+    wm.overlayW = wmOverlay_.width();
+    wm.overlayH = wmOverlay_.height();
+    wm.position = wmPosition_ ? wmPosition_->currentData().toInt() : 4;
+    wm.opacity = (wmOpacity_ ? wmOpacity_->value() : 100) / 100.0f;
+    wm.scale = (wmScale_ ? wmScale_->value() : 20) / 100.0f;
+    // Convert the QImage to straight-alpha ARGB32 and repack as RGBA bytes that
+    // mirror the engine's straight-alpha RGBA overlay format.
+    QImage rgba = wmOverlay_.convertToFormat(QImage::Format_ARGB32);
+    wm.rgba.reserve(wmOverlay_.size().width() * wmOverlay_.size().height());
+    for (int y = 0; y < wmOverlay_.height(); ++y) {
+        const QRgb* line =
+            reinterpret_cast<const QRgb*>(rgba.constScanLine(y));
+        for (int x = 0; x < wmOverlay_.width(); ++x) {
+            const QRgb px = line[x];
+            wm.rgba.push_back(static_cast<uint8_t>(qRed(px)));
+            wm.rgba.push_back(static_cast<uint8_t>(qGreen(px)));
+            wm.rgba.push_back(static_cast<uint8_t>(qBlue(px)));
+            wm.rgba.push_back(static_cast<uint8_t>(qAlpha(px)));
+        }
+    }
+    return wm;
+}
+
+void ExportDialog::browseWatermark() {
+    const QString chosen = QFileDialog::getOpenFileName(
+        this, tr("选择水印图片"), QString(),
+        tr("图片 (*.png *.jpg *.jpeg *.bmp)"));
+    if (chosen.isEmpty())
+        return;
+    QImage img(chosen);
+    if (img.isNull()) {
+        QMessageBox::warning(this, tr("无法读取图片"),
+                             tr("无法解码所选图片文件: %1").arg(chosen));
+        return;
+    }
+    wmOverlay_ = img;
+    wmPathLabel_->setText(QFileInfo(chosen).fileName());
+    wmRow_->setVisible(true);
+    wmEnable_->setChecked(true);  // picking a file implies the user wants it on
+}
+
+void ExportDialog::onWatermarkToggle(bool on) {
+    if (!on)
+        return;  // keep the overlay in memory so re-checking is instant
+    if (wmOverlay_.isNull())
+        wmRow_->setVisible(false);
+}
+
+bool ExportDialog::renameEnabled() const {
+    return renameBox_->isChecked() && !renameTemplate().isEmpty();
+}
+
+QString ExportDialog::renameTemplate() const {
+    return renameEdit_->text().trimmed();
+}
+
+void ExportDialog::refreshRenamePreview() {
+    const bool on = renameBox_->isChecked();
+    renameEdit_->setEnabled(on);
+    renamePreview_->setVisible(on);
+
+    if (!on || renameTemplate().isEmpty()) {
+        renamePreview_->setText(on ? tr("启用后此处预览批量导出文件名。") : QString());
+        return;
+    }
+
+    // Batch = the master plus every virtual copy, ordered by the catalog. index
+    // is 1-based, {base} is the photo's base name and {date} is today's date —
+    // the same inputs MainWindow uses when it builds the real batch.
+    const std::string tmpl = renameTemplate().toStdString();
+    const std::string base =
+        QFileInfo(basePath_).completeBaseName().toStdString();
+    const std::string date = todayString();
+    const std::string suffix = kFormatSuffixes[formatIndex()];
+
+    const int total = static_cast<int>(variants_.size());
+    const int shown = std::min(static_cast<int>(total), static_cast<int>(5));
+    QStringList preview;
+    for (int i = 0; i < shown; ++i) {
+        const lrc::EditVariant& v = variants_[i];
+        QString label;
+        if (v.isMaster)
+            label = tr("母版");
+        else if (!v.name.empty())
+            label = QString::fromUtf8(v.name.data(),
+                                      static_cast<int>(v.name.size()));
+        else
+            label = tr("副本 %1").arg(static_cast<qlonglong>(v.variantId));
+
+        lrc::RenameTemplateArgs a;
+        a.tmpl = tmpl;
+        a.base = base;
+        a.index = i + 1;
+        a.indexWidth = 2;
+        a.date = date;
+        preview << label + " → " +
+                       QString::fromStdString(renderRenameTemplate(a) + suffix);
+    }
+    if (total > shown)
+        preview << tr("… 共 %1 个").arg(total);
+    renamePreview_->setText(preview.join(QStringLiteral("\n")));
 }

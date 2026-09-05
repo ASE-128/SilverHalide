@@ -27,6 +27,7 @@
 
 #include <QImage>
 #include <QMetaType>
+#include <QMutex>
 #include <QObject>
 #include <QStringList>
 
@@ -61,9 +62,14 @@ public slots:
     // the managed library rooted at `destRoot` (<root>/<yyyy>/<yyyy-mm-dd>/).
     // When `destRoot` is empty a Copy/Move degrades to Add so a caller without
     // a destination can never lose files.
+    //
+    // `renameTemplate` (P1-3): when non-empty, each file is renamed on import
+    // to the rendered template ({date}/{index}/{base}) with a numeric suffix
+    // on collision, before it is cataloged. Empty disables renaming.
     void importPaths(const QStringList& paths, bool convertToDng,
                      lrc::ImportMode mode = lrc::ImportMode::Add,
-                     const QString& destRoot = QString());
+                     const QString& destRoot = QString(),
+                     const QString& renameTemplate = QString());
 
 signals:
     // M2-3: the thumbnail JPEG was decoded on the worker thread; the UI thread
@@ -83,6 +89,9 @@ private:
     lrc::Pipeline& pipeline_;
     std::shared_ptr<const lrc::ColorManager> cm_;
     std::atomic<bool> abort_{false};
+    // P1-3: serializes the on-disk uniqueness check + rename across the
+    // concurrent Stage-1 tasks so a batch can never claim the same name twice.
+    QMutex renameMutex_;
 
     // S3-4 pipeline stage records. `PerFileStage1` is the output of the
     // IO/DNG stage (Stage 1); `PerFileFinal` carries the render output that
@@ -92,6 +101,7 @@ private:
     struct PerFileStage1 {
         QString src;                       // original path (for diagnostics)
         std::filesystem::path catalogPath; // resolved on-disk path
+        int seqIndex = 1;                  // 1-based selection-order number
         bool ok = false;
         QString warn;
         bool convertedToDng = false;

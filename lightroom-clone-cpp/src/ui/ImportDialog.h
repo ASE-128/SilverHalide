@@ -29,12 +29,17 @@ public:
     lrc::ImportMode importMode() const;
     // Target directory for Copy/Move (may be empty).
     QString destinationDir() const;
+    // True when the user switched on "rename on import" and typed a template.
+    bool renameEnabled() const;
+    // The rename template text ({date}/{index}/{base}) or empty when disabled.
+    QString renameTemplate() const;
 
 private slots:
     void browse();
     void browseDest();
     void refreshMode();
     void validateAndAccept();
+    void refreshRenamePreview();
 
 private:
     void refreshSummary();
@@ -47,5 +52,8 @@ private:
     QRadioButton* moveRadio_ = nullptr;
     QLineEdit* destEdit_ = nullptr;
     QPushButton* browseDestButton_ = nullptr;
+    QCheckBox* renameBox_ = nullptr;
+    QLineEdit* renameEdit_ = nullptr;
+    QLabel* renamePreview_ = nullptr;
     QStringList paths_;
 };

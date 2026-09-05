@@ -634,6 +634,9 @@ bool CatalogDatabase::open() {
     // the migration also works on catalogs that predate M6.
     ensureColumnOn("edit_history", "variant_id",
                    "INTEGER NOT NULL DEFAULT 0");
+    // P1-5: snapshot labels. Added as its own migration so it works on
+    // catalogs that predate M6 (which still run this open()).
+    ensureColumnOn("edit_history", "name", "TEXT NOT NULL DEFAULT ''");
     if (!exec("CREATE INDEX IF NOT EXISTS idx_edit_history_variant "
               "ON edit_history(image_id, variant_id, id);"))
         return false;
@@ -996,6 +999,32 @@ std::optional<ImageRecord> CatalogDatabase::findImageById(int64_t id) const {
     return readImageRecord(s.stmt);
 }
 
+bool CatalogDatabase::updateImagePath(int64_t id,
+                                      const std::string& newFilePath) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_ || id <= 0)
+        return false;
+    // Reject a collision up front so we never hit the UNIQUE(file_path)
+    // constraint with a raw SQLite error (clearer failure semantics).
+    Stmt clash(db_, "SELECT id FROM images WHERE file_path = ?1 AND id <> ?2;",
+               &stmtCache_);
+    if (!clash.ok())
+        return false;
+    sqlite3_bind_text(clash.stmt, 1, newFilePath.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(clash.stmt, 2, id);
+    if (clash.step() == SQLITE_ROW) {
+        lastError_ = "file_path already belongs to another image";
+        return false;
+    }
+    Stmt upd(db_,
+             "UPDATE images SET file_path = ?1 WHERE id = ?2;", &stmtCache_);
+    if (!upd.ok())
+        return false;
+    sqlite3_bind_text(upd.stmt, 1, newFilePath.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(upd.stmt, 2, id);
+    return upd.step() == SQLITE_DONE;
+}
+
 bool CatalogDatabase::storePreviewImpl(sqlite3* db, int64_t imageId,
                                        PreviewKind kind,
                                        const std::vector<uint8_t>& data,
@@ -1279,14 +1308,15 @@ std::optional<std::string> CatalogDatabase::getSetting(
 }
 
 int64_t CatalogDatabase::saveEditSnapshot(
-    int64_t imageId, const Adjustments& adjustments, int variantId) {
+    int64_t imageId, const Adjustments& adjustments, int variantId,
+    const std::string& name) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!db_)
         return -1;
     const std::string jsonText = ProfileIO::toJson(adjustments).serialize();
     Stmt ins(db_,
              "INSERT INTO edit_history(image_id, variant_id, adjustment_json, "
-             "created_at) VALUES(?1, ?2, ?3, ?4);");
+             "created_at, name) VALUES(?1, ?2, ?3, ?4, ?5);");
     if (!ins.ok()) {
         lastError_ = sqlite3_errmsg(db_);
         return -1;
@@ -1296,11 +1326,32 @@ int64_t CatalogDatabase::saveEditSnapshot(
     sqlite3_bind_text(ins.stmt, 3, jsonText.c_str(), -1, SQLITE_TRANSIENT);
     const std::string date = nowIso8601Utc();
     sqlite3_bind_text(ins.stmt, 4, date.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(ins.stmt, 5, name.c_str(), -1, SQLITE_TRANSIENT);
     if (ins.step() != SQLITE_DONE) {
         lastError_ = sqlite3_errmsg(db_);
         return -1;
     }
     return sqlite3_last_insert_rowid(db_);
+}
+
+bool CatalogDatabase::renameSnapshot(int64_t imageId, int64_t snapshotId,
+                                     const std::string& name, int variantId) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return false;
+    Stmt s(db_,
+           "UPDATE edit_history SET name = ?1 "
+           "WHERE image_id = ?2 AND variant_id = ?3 AND id = ?4;",
+           &stmtCache_);
+    if (!s.ok()) {
+        lastError_ = sqlite3_errmsg(db_);
+        return false;
+    }
+    sqlite3_bind_text(s.stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s.stmt, 2, imageId);
+    sqlite3_bind_int(s.stmt, 3, variantId);
+    sqlite3_bind_int64(s.stmt, 4, snapshotId);
+    return s.step() == SQLITE_DONE;
 }
 
 std::vector<EditSnapshot> CatalogDatabase::listEditHistory(
@@ -1310,7 +1361,7 @@ std::vector<EditSnapshot> CatalogDatabase::listEditHistory(
     if (!db_)
         return out;
     Stmt s(db_,
-           "SELECT id, image_id, created_at FROM edit_history "
+           "SELECT id, image_id, created_at, name FROM edit_history "
            "WHERE image_id = ?1 AND variant_id = ?2 ORDER BY id;");
     if (!s.ok())
         return out;
@@ -1322,6 +1373,8 @@ std::vector<EditSnapshot> CatalogDatabase::listEditHistory(
         snap.imageId = sqlite3_column_int64(s.stmt, 1);
         if (const unsigned char* p = sqlite3_column_text(s.stmt, 2))
             snap.createdAt = reinterpret_cast<const char*>(p);
+        if (const unsigned char* p = sqlite3_column_text(s.stmt, 3))
+            snap.name = reinterpret_cast<const char*>(p);
         out.push_back(std::move(snap));
     }
     return out;

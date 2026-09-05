@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
+#include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <system_error>
 #include <utility>
@@ -26,6 +29,7 @@
 #include "engine/DngConverter.h"
 #include "engine/Pipeline.h"
 #include "engine/RawDecoder.h"
+#include "utils/RenameTemplate.h"
 
 namespace {
 
@@ -56,6 +60,29 @@ bool isDngFile(const std::filesystem::path& p) {
     return ext == ".dng";
 }
 
+// Local calendar date of `p`'s modification time as "YYYY-MM-DD", falling back
+// to *now* when the filesystem query fails. Mirrors LibraryManager::sourceDate
+// so the {date} token agrees with the by-date import folder layout.
+std::string sourceDateString(const std::filesystem::path& p) {
+    using namespace std::chrono;
+    std::error_code ec;
+    auto ft = std::filesystem::last_write_time(p, ec);
+    std::time_t t;
+    if (ec) {
+        t = system_clock::to_time_t(system_clock::now());
+    } else {
+        const auto sct = time_point_cast<system_clock::duration>(
+            ft - file_clock::now() + system_clock::now());
+        t = system_clock::to_time_t(sct);
+    }
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm.tm_year + 1900,
+                  tm.tm_mon + 1, tm.tm_mday);
+    return buf;
+}
+
 } // namespace
 
 ImportWorker::ImportWorker(lrc::CatalogDatabase& catalog,
@@ -71,7 +98,8 @@ ImportWorker::ImportWorker(lrc::CatalogDatabase& catalog,
       cm_(std::move(colorManager)) {}
 
 void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
-                               lrc::ImportMode mode, const QString& destRoot) {
+                               lrc::ImportMode mode, const QString& destRoot,
+                               const QString& renameTemplate) {
     // A Copy/Move without a destination folder is meaningless; degrade to Add
     // so the catalog never loses the file.
     if (mode != lrc::ImportMode::Add && destRoot.isEmpty())
@@ -128,9 +156,11 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
     // ===================================================================
     std::vector<PerFileStage1> stage1;
     stage1.reserve(static_cast<size_t>(total));
+    int seq = 1;
     for (const QString& path : paths) {
         PerFileStage1 f;
         f.src = path;
+        f.seqIndex = seq++;  // stable 1-based number in selection order
         f.catalogPath = toStdPath(path);
         stage1.push_back(std::move(f));
     }
@@ -212,6 +242,43 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
 
         f.catalogPath = std::move(catalogPath);
         f.convertedToDng = converted;
+
+        // P1-3: rename on import. Applies to the finalized cataloged path (the
+        // file in place, the copied/moved file, or the converted DNG). {date}
+        // uses the source file's modification date, {index} the per-file
+        // selection-order number, and collisions get a numeric suffix.
+        if (!renameTemplate.isEmpty()) {
+            const std::filesystem::path cur = f.catalogPath;
+            const lrc::RenameTemplateArgs ra{
+                renameTemplate.toStdString(),    // tmpl
+                cur.stem().string(),             // base
+                f.seqIndex,                      // index
+                2,                               // indexWidth
+                sourceDateString(toStdPath(f.src))};  // date
+            const std::filesystem::path newPath =
+                lrc::uniqueRenamePath(cur.parent_path(), ra,
+                                      cur.extension().string());
+            if (newPath != cur) {
+                // Serialize uniqueness check + rename so two files in this batch
+                // that render to the same name cannot both claim it: the first
+                // rename moves its file, making the name visible on disk for the
+                // next one's uniqueRenamePath check.
+                std::error_code erc;
+                {
+                    QMutexLocker lock(&renameMutex_);
+                    if (!std::filesystem::exists(newPath)) {
+                        std::filesystem::rename(cur, newPath, erc);
+                        if (!erc)
+                            f.catalogPath = newPath;
+                    }
+                }
+                if (erc)
+                    f.warn = tr("无法重命名 %1：%2")
+                                 .arg(fromStdPath(cur))
+                                 .arg(QString::fromStdString(erc.message()));
+            }
+        }
+
         f.ok = true;
     });
 

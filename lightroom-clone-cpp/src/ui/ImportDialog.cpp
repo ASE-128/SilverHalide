@@ -1,9 +1,12 @@
 #include "ui/ImportDialog.h"
 
+#include <algorithm>
+
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -13,6 +16,7 @@
 #include <QVBoxLayout>
 
 #include "catalog/FolderMonitor.h"
+#include "utils/RenameTemplate.h"
 
 ImportDialog::ImportDialog(QWidget* parent)
     : ImportDialog(QString(), parent) {}
@@ -71,6 +75,24 @@ ImportDialog::ImportDialog(const QString& defaultDestDir, QWidget* parent)
     hint->setEnabled(false); // dimmed hint under the checkbox
     root->addWidget(hint);
 
+    // P1-3: Lightroom-style rename on import. The user types a template using
+    // {date}, {index[:W]} and {base}; the library renames each file to the
+    // rendered name (collisions get a numeric suffix) before cataloging it.
+    renameBox_ = new QCheckBox(tr("导入时重命名文件"), this);
+    root->addWidget(renameBox_);
+    auto* renameRow = new QHBoxLayout;
+    renameRow->setSpacing(6);
+    renameEdit_ = new QLineEdit(this);
+    renameEdit_->setPlaceholderText(tr("{date}_{base}_{index:4}"));
+    renameRow->addWidget(renameEdit_, 1);
+    root->addLayout(renameRow);
+    renamePreview_ = new QLabel(this);
+    renamePreview_->setProperty("caption", true);
+    renamePreview_->setWordWrap(true);
+    renamePreview_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    root->addWidget(renamePreview_);
+    refreshRenamePreview();
+
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Ok)->setText(tr("导入"));
@@ -82,6 +104,10 @@ ImportDialog::ImportDialog(const QString& defaultDestDir, QWidget* parent)
             &ImportDialog::browseDest);
     connect(addRadio_, &QRadioButton::toggled, this,
             &ImportDialog::refreshMode);
+    connect(renameBox_, &QCheckBox::toggled, this,
+            &ImportDialog::refreshRenamePreview);
+    connect(renameEdit_, &QLineEdit::textChanged, this,
+            &ImportDialog::refreshRenamePreview);
     connect(buttons, &QDialogButtonBox::accepted, this,
             &ImportDialog::validateAndAccept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -155,4 +181,48 @@ void ImportDialog::validateAndAccept() {
         return;
     }
     accept();
+}
+
+bool ImportDialog::renameEnabled() const {
+    return renameBox_->isChecked() && !renameTemplate().isEmpty();
+}
+
+QString ImportDialog::renameTemplate() const {
+    return renameEdit_->text().trimmed();
+}
+
+void ImportDialog::refreshRenamePreview() {
+    const bool on = renameBox_->isChecked();
+    renameEdit_->setEnabled(on);
+    renamePreview_->setVisible(on);
+
+    if (!on || paths_.isEmpty() || renameTemplate().isEmpty()) {
+        renamePreview_->setText(on ? tr("启用后此处预览新文件名。") : QString());
+        return;
+    }
+    const std::string tmpl = renameTemplate().toStdString();
+    const int shown =
+        std::min(static_cast<int>(paths_.size()), static_cast<int>(5));
+    QStringList preview;
+    // The worker numbers files by selection order (1-based) and uses the source
+    // file's modification date for {date}; mirror that here so the preview name
+    // for an untouched file matches what the import will produce.
+    for (int i = 0; i < shown; ++i) {
+        lrc::RenameTemplateArgs a;
+        a.tmpl = tmpl;
+        a.base = QFileInfo(paths_[i]).completeBaseName().toStdString();
+        a.index = i + 1;
+        a.indexWidth = 2;
+        a.date = QFileInfo(paths_[i])
+                     .lastModified()
+                     .toString(QStringLiteral("yyyy-MM-dd"))
+                     .toStdString();
+        const std::string rendered = lrc::renderRenameTemplate(a);
+        preview << tr("%1 → %2")
+                       .arg(QFileInfo(paths_[i]).fileName())
+                       .arg(QString::fromStdString(rendered));
+    }
+    if (paths_.size() > shown)
+        preview << tr("… 共 %1 个").arg(paths_.size());
+    renamePreview_->setText(preview.join(QStringLiteral("\n")));
 }

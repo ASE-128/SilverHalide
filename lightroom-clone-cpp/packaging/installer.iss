@@ -5,16 +5,20 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ;
 ; Why Inno Setup over NSIS:
-;   • zip compression (default) is ~10x faster than LZMA solid on a 660 MB
-;     payload of mostly already-compressed ONNX weights / Qt DLLs.
-;   • Per-file compression with fast incompressibility detection — high-entropy
-;     binaries (.onnx / .data) fall back to store mode quickly.
+;   • Highest compression: lzma2/ultra64 + solid archive gives the smallest
+;     installer size on a payload dominated by DCP camera profiles (text-like
+;     ICC data compresses very well in solid mode), ONNX weights, and Qt DLLs.
+;   • LZMAUseSeparateProcess + LZMANumBlockThreads keep the ultra64 dict
+;     (64 MB) within reach and parallelize block compression.
 ;   • Built-in 64-bit install mode, desktop/start-menu icons, uninstaller.
 ;
 ; The payload (SilverHalide.exe + Qt runtime + plugins + ONNX Runtime + AI
 ; models + VC redist) is staged under build_gui/install_stage before
 ; compiling (exe rebuilt, windeployqt run, models copied, VC redist merged).
-; See installer.nsi (kept as historical reference) for the staging workflow.
+; DCP camera profiles and the Lensfun profile database are sourced directly
+; from build_gui/resources (not install_stage) so the installer always
+; packages the full current set. See installer.nsi (kept as historical
+; reference) for the staging workflow.
 ; ---------------------------------------------------------------------------
 
 #define APP_NAME      "Silver Halide"
@@ -26,6 +30,10 @@
 ; Payload is staged relative to this script file (packaging/../../build_gui =
 ; the active Ninja build tree in the repository's parent directory).
 #define STAGE_DIR     "..\..\build_gui\install_stage"
+; Camera DCP profiles and the Lensfun database live under build_gui/resources
+; (copied there by the build / staging step). Sourced directly rather than via
+; install_stage so the installer always packages the complete current set.
+#define RES_DIR       "..\..\build_gui\resources"
 
 [Setup]
 ; Branding
@@ -51,13 +59,19 @@ ArchitecturesInstallIn64BitMode=x64os
 ; Output: dist/Silver Halide Setup 1.0.0.exe
 OutputDir=..\dist
 OutputBaseFilename=Silver Halide Setup {#APP_VERSION}
-; Compression: zip (fast, with built-in store fallback for incompressible
-; binaries). SolidCompression=no means each file is compressed independently,
-; so installing an updated build over an existing install only re-compresses
-; the changed files. LZMA is intentionally NOT used — it offers slightly
-; higher ratio but takes minutes on this payload mix.
-Compression=zip
-SolidCompression=no
+; Compression: lzma2/ultra64 is the highest ratio preset Inno Setup offers.
+; SolidCompression=yes packs the whole payload into one LZMA stream, which
+; dramatically improves the ratio for the many small DCP profile files (their
+; similar ICC structure cross-compresses well). LZMAUseSeparateProcess moves
+; compression out-of-process so the 64 MB ultra64 dictionary does not exhaust
+; the installer's 32-bit address space, and LZMANumBlockThreads parallelizes
+; the multi-block LZMA2 pass across CPU cores. High-entropy files (ONNX
+; weights, already-compressed DLLs) are stored near-verbatim by LZMA's fast
+; incompressibility detector, so they add little size.
+Compression=lzma2/ultra64
+SolidCompression=yes
+LZMAUseSeparateProcess=yes
+LZMANumBlockThreads=4
 ; VersionInfo embedded into the .exe (shown by Windows File > Properties).
 VersionInfoVersion={#APP_VERSION}.0
 VersionInfoProductVersion={#APP_VERSION}.0
@@ -135,13 +149,28 @@ Source: "{#STAGE_DIR}\tls\*.dll"; DestDir: "{app}\tls"; Flags: ignoreversion
 ; installed copy finds its models via readPathFor() without a re-download.
 ; isModelReady() probes SHA256 (or sizeBytes when SHA is TBD) before the
 ; engine registers the model — so a corrupt install is detected at startup.
+; All available production models are bundled: NAFNet denoise (graph +
+; external weights) and BiRefNet subject segmentation.
 Source: "{#STAGE_DIR}\models\manifest.json"; DestDir: "{app}\models"; Flags: ignoreversion
 Source: "{#STAGE_DIR}\models\nafnet-denoise.onnx"; DestDir: "{app}\models"; Flags: ignoreversion
 Source: "{#STAGE_DIR}\models\nafnet_denoise.data"; DestDir: "{app}\models"; Flags: ignoreversion
 Source: "{#STAGE_DIR}\models\rmbg2-subject.onnx"; DestDir: "{app}\models"; Flags: ignoreversion
-; Internal test stub — may not be staged. /nonfatal in NSIS is analogous to
-; the Inno Setup `Flags: skipifsourcedoesntexist` here.
+; Internal test stub — may not be staged. skipifsourcedoesntexist mirrors the
+; NSIS /nonfatal flag so the build proceeds without it.
 Source: "{#STAGE_DIR}\models\test_add_2x2.onnx"; DestDir: "{app}\models"; Flags: skipifsourcedoesntexist
+
+; --- Adobe DCP camera profiles (grouped by camera model) -------------------
+; Sourced from build_gui/resources/Camera (the full 2500+ profile set). Installed
+; to <appdir>/resources/Camera so DcpProfileReader finds them at runtime.
+Source: "{#RES_DIR}\Camera\*"; DestDir: "{app}\resources\Camera"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; --- Lensfun profile database ---------------------------------------------
+; The 55-XML lensfun database (camera + lens distortion/vignetting/CA
+; calibrations) is installed to <appdir>/share/lensfun/version_1.
+; LensfunProfile::bundledDatabasePath() resolves this exact location from the
+; executable directory, so an installed copy uses the bundled profiles even
+; when no system-wide Lensfun database is present.
+Source: "{#RES_DIR}\lensfun\version_1\*"; DestDir: "{app}\share\lensfun\version_1"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; VC++ Redistributable installer (per-machine). Install silently if missing;
 ; Inno Setup runs it via [Run] below. The 25 MB merge module is shipped
@@ -186,7 +215,9 @@ begin
 end;
 
 [UninstallDelete]
-; Remove the bundled models directory on uninstall. The per-user cache
+; Remove bundled read-only assets on uninstall. The per-user cache
 ; (%LOCALAPPDATA%\Silver Halide\models\) is intentionally NOT deleted —
-// downloaded models survive an uninstall so a re-install doesn't re-download.
+; downloaded models survive an uninstall so a re-install doesn't re-download.
 Type: filesandordirs; Name: "{app}\models"
+; Bundled Lensfun profile database (camera/lens calibrations).
+Type: filesandordirs; Name: "{app}\share"

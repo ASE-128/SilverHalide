@@ -535,6 +535,45 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     };
     makeLensRow("几何畸变", -100.0, 100.0, 0, &lrc::Adjustments::distortion);
 
+    auto* dcpRow = new QHBoxLayout;
+    dcpRow->setSpacing(6);
+    dcpRow->addWidget(new QLabel(tr("相机配置"), this));
+    dcpProfileCombo_ = new QComboBox(this);
+    dcpProfileCombo_->addItem(tr("无（原始相机配置）"));
+    dcpProfileCombo_->setToolTip(tr("选择当前相机的 Adobe DCP 配置文件"));
+    dcpRow->addWidget(dcpProfileCombo_, 1);
+    lens->addLayout(dcpRow);
+    dcpProfileStatus_ = new QLabel(tr("未加载 DCP"), this);
+    dcpProfileStatus_->setStyleSheet("color: #8f8f8f;");
+    lens->addWidget(dcpProfileStatus_);
+    connect(dcpProfileCombo_, &QComboBox::currentIndexChanged, this,
+            [this](int index) {
+                if (suppressSignals_ || !dcpProfileCombo_)
+                    return;
+                emit dcpProfileSelected(
+                    dcpProfileCombo_->itemData(index).toString());
+            });
+
+    auto* lensfunRow = new QHBoxLayout;
+    lensfunRow->setSpacing(6);
+    lensfunEnabledCheck_ = new QCheckBox(tr("Lensfun profile"), this);
+    lensfunEnabledCheck_->setEnabled(false);
+    lensfunEnabledCheck_->setToolTip(
+        tr("使用 Lensfun 镜头配置文件校正几何畸变"));
+    lensfunStatus_ = new QLabel(tr("未检测镜头"), this);
+    lensfunStatus_->setStyleSheet("color: #8f8f8f;");
+    lensfunRow->addWidget(lensfunEnabledCheck_);
+    lensfunRow->addWidget(lensfunStatus_, 1);
+    lens->addLayout(lensfunRow);
+    connect(lensfunEnabledCheck_, &QCheckBox::toggled, this,
+            [this](bool checked) {
+                if (suppressSignals_)
+                    return;
+                current_.lensfunEnabled = checked;
+                scheduleDebounce();
+                emit adjustmentsCommitted(current_);
+            });
+
     // ---- 蒙版（局部调整） ---------------------------------------------------
     PanelSection* maskSec = addSection(tr("蒙版"));
 
@@ -2673,7 +2712,49 @@ void DevelopPanel::setAdjustments(const lrc::Adjustments& adjustments) {
                               adjustments.splitTone.highlightSaturation);
     shadowWheel_->setColor(adjustments.splitTone.shadowHue,
                            adjustments.splitTone.shadowSaturation);
+    // Sync the Lensfun enable toggle to the loaded state; the enabled/disabled
+    // (interactive) state is driven separately by setLensfunProfile once the
+    // camera/lens metadata has been matched.
+    if (lensfunEnabledCheck_) {
+        const QSignalBlocker b(lensfunEnabledCheck_);
+        lensfunEnabledCheck_->setChecked(adjustments.lensfunEnabled);
+    }
     suppressSignals_ = false;
+}
+
+void DevelopPanel::setDcpProfiles(const QStringList& names,
+                                   const QStringList& paths) {
+    if (!dcpProfileCombo_)
+        return;
+    const QSignalBlocker blocker(dcpProfileCombo_);
+    dcpProfileCombo_->clear();
+    dcpProfileCombo_->addItem(tr("无（原始相机配置）"));
+    for (int i = 0; i < names.size(); ++i)
+        dcpProfileCombo_->addItem(names.at(i),
+                                  i < paths.size() ? paths.at(i) : QString());
+    if (dcpProfileStatus_)
+        dcpProfileStatus_->setText(names.isEmpty() ? tr("未找到 DCP")
+                                                   : tr("可用配置: %1").arg(names.size()));
+}
+
+void DevelopPanel::setDcpProfileStatus(const QString& status) {
+    if (dcpProfileStatus_)
+        dcpProfileStatus_->setText(status);
+}
+
+void DevelopPanel::setLensfunProfile(const QString& status, bool available,
+                                     bool enabled) {
+    if (!lensfunEnabledCheck_ || !lensfunStatus_)
+        return;
+    const QSignalBlocker blocker(lensfunEnabledCheck_);
+    // The toggle is only interactive once a matching profile exists; when no
+    // profile is available the box is disabled and unchecked so the user
+    // cannot enable a correction that would no-op.
+    lensfunEnabledCheck_->setEnabled(available);
+    lensfunEnabledCheck_->setChecked(available && enabled);
+    lensfunStatus_->setText(status);
+    lensfunStatus_->setStyleSheet(available ? "color: #2f7d32;"
+                                            : "color: #8f8f8f;");
 }
 
 void DevelopPanel::setSamplerChecked(bool active) {

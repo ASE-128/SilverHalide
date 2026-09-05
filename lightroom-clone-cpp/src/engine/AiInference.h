@@ -137,6 +137,30 @@ public:
 #endif
     }
 
+    /**
+     * @brief Preferred ONNX execution provider.
+     *
+     * DirectML (GPU) is used only when it is actually available at runtime;
+     * otherwise the engine silently falls back to the CPU provider. Pure CPU
+     * workloads are unaffected and the builtin (unit-test) models never touch
+     * ONNX at all. Default is Cpu.
+     */
+    enum class ExecutionProvider { Cpu, DirectML };
+
+    /** Sets the preferred provider (applies to sessions created afterwards). */
+    void setPreferredProvider(ExecutionProvider provider);
+
+    /** Returns the currently preferred provider. */
+    ExecutionProvider preferredProvider() const;
+
+    /**
+     * @brief Whether the given provider is present in this ONNX Runtime build.
+     *
+     * DirectML returns false when LRC_ENABLE_AI=0 or the runtime lacks a
+     * DirectML component. The query never throws.
+     */
+    static bool isProviderAvailable(ExecutionProvider provider);
+
     /** Human-readable last-error message (empty if the last call succeeded). */
     std::string lastError() const;
 

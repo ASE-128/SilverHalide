@@ -19,6 +19,9 @@
 - **总体状态**：P1、P2、P3 和 T 批次尚未按规格正式实施，当前为待实施状态。
 - **首批范围**：P1-1 DirectML、P1-2 导出 ICC、P1-3 批量重命名；完成后必须补充对应测试和性能/行为证据。
 - **状态判定**：现有 AI 天空蒙版、编辑历史、SIMD 条件编译等属于基础能力，不等同于竞品规格任务已完成；以 Git 实时状态、源码/测试实测和规格中的验收记录为准。
+- **P1-3 批量重命名（工作区未提交，代码已落地但未验收）**：`src/utils/RenameTemplate.h` 实现模板渲染（`{date}/{index[:W]}/{base}`）与冲突唯一路径；导入端 `ImportDialog` 加重命名复选+模板+新文件名预览，`ImportWorker::importPaths` 按选择顺序+源文件修改日期在 Stage1 重命名（`renameMutex_` 串行化查重，失败回退）；导出端 `ExportDialog` 加批量重命名复选+模板+母版/副本预览，启用时 `MainWindow` 走 `PreviewWorker::batchExport` 为母版+所有虚拟副本按模板重命名输出。headless `[p1][rename]` 与全量（重跑）通过，GUI 构建通过。未验收：缺少导入端 DB `file_path` 批量同步集成用例与导出端真实导出断言。
+- **DCP 相机配置文件（工作区未提交，UI 接入已验收）**：DevelopPanel 已增加相机配置文件选择框；RAW 解码后的相机型号会驱动 `resources/Camera/<型号>` 扫描，选择后读取 profile 名称、ColorMatrix1/2 和 ProfileToneCurve。GUI 构建后已复制并验证 2595 个 `.dcp` 文件，Inno Setup/NSIS 也已加入资源打包；矩阵、曲线和 LUT 尚未应用到色彩管线。
+- **Lensfun（工作区未提交，依赖待验收）**：已声明 `lensfun:x64-windows`、接入 Qt-free 查询 adapter 和 RAW 镜头元数据；vcpkg 安装曾因 Ninja/MSYS2 下载与构建中断，尚未完成 Lensfun 库和真实数据库查询验证。
 - **历史性能资料**：M1-M5 实施规格和四阶段加速报告位于 `docs/archive/`，仅作回溯依据，不作为当前进行中任务清单。
 
 ***
@@ -473,12 +476,14 @@ cmake --build build_gui --config Release
 | **M3 蒙版引擎级性能 Phase2（geometryHash 去重 + brushWeightField COW 权重场缓存 + 叠加层降分辨率 + dab 并笔 + 软度滑块接线 + TestMaskRaster）**                                                                               | ✅ v2.6.0 新增     |
 | **M4 直观 UI（顶部 QToolBar：视图模式互斥组适合窗口/适合宽度/1:1 + 放大缩小 + 蒙版工具互斥组线性/径向/画笔；zoomModeChanged + maskToolActivated 双向同步、面板为源工具栏镜像；dark.qss 补齐 QToolBar/QToolButton:checked/QComboBox/QCheckBox 纯 CSS）**  | ✅ v2.7.0 新增     |
 | **M5 预览更新速率（coarse-then-refine：DevelopPanel 拖动 30ms coarse 节流 + PreviewWorker adjustPreviewCoarse 480 渲染 + MainWindow 路由；refine 维持 50ms 停顿路径；1:1 下 coarse 仍更新预览层、不触发全尺寸刷新；TestPipeline 2 用例）** | ✅ v2.8.0 新增     |
+| **P1-3 批量重命名（`RenameTemplate` 模板 `{date}/{index[:W]}/{base}` + 冲突唯一路径；导入端 ImportDialog 复选/模板/预览 + ImportWorker Stage1 按选择顺序重命名；导出端 ExportDialog 批量重命名 + MainWindow 走 batchExport 导出母版+所有虚拟副本）** | 🔧 代码已落地未验收 |
 
 ### 🔄 进行中
 
 - **竞品对齐优化**：当前任务文件为
   [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md)。
-  P1/P2/P3/T 尚未正式启动，首批执行范围为 P1-1、P1-2、P1-3。
+  P1-3 批量重命名（导入+导出 UI）已落地但未验收；P1-1 DirectML、P1-2 导出 ICC
+  代码已存在于工作区，需复核验收；P2/P3/T 尚未启动。
 
 - **性能 M1-M5**：相关实现和报告已归档，部分量化验收仍需单独复核；不要将归档文档中的历史测试数字直接当作当前基线。
 

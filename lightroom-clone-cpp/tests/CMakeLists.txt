@@ -15,6 +15,8 @@ add_executable(lrc_tests
   TestLibraryManager.cpp
   TestExportEngine.cpp
   TestRawDecoder.cpp
+  TestLensfunProfile.cpp
+  TestDcpProfile.cpp
   TestMasks.cpp
   TestMaskRaster.cpp
   TestHdrMerge.cpp
@@ -40,10 +42,15 @@ add_executable(lrc_tests
   TestAiDenoise.cpp
   TestAiMask.cpp
   TestDuplicateDetection.cpp
-  TestSoftProofing.cpp)
+  TestSoftProofing.cpp
+  # P1 — competitive-alignment implementation (DirectML / ICC / rename /
+  # watermark / snapshots).
+  TestCompetitiveP1.cpp)
 
 target_link_libraries(lrc_tests PRIVATE lrc_catalog Catch2::Catch2WithMain)
 target_include_directories(lrc_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(lrc_tests PRIVATE
+  "LRC_SOURCE_ROOT=\"${CMAKE_SOURCE_DIR}\"")
 
 if(MSVC)
   target_compile_options(lrc_tests PRIVATE /W3 /EHsc)

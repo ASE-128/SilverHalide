@@ -120,6 +120,9 @@ Section "Install" SEC_APP
   File "${STAGE_DIR}\models\nafnet-denoise.onnx"
   File "${STAGE_DIR}\models\nafnet_denoise.data"
   File "${STAGE_DIR}\models\rmbg2-subject.onnx"
+  ; Adobe DCP camera profiles, grouped by camera model.
+  SetOutPath "$INSTDIR\resources\Camera"
+  File /r "${STAGE_DIR}\resources\Camera\*"
   ; test_add_2x2.onnx is an internal-only test stub that may not be staged;
   ; /nonfatal lets the build proceed without it.
   File /nonfatal "${STAGE_DIR}\models\test_add_2x2.onnx"

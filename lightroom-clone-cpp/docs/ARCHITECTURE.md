@@ -15,7 +15,8 @@
 │  engine/   (纯 C++，无 Qt)   RawDecoder · ImageBuffer ·      │
 │             Pipeline · Adjustments · ColorManager · Export   │
 │             Engine · ImageIO · HdrMerge · DngConverter ·     │
-│             ZoneCurve · Xmp · XmpSidecar · ImageFormats      │
+│             ZoneCurve · Xmp · XmpSidecar · ImageFormats ·    │
+│             LensfunProfile · DcpProfile                     │
 ├─────────────────────────────────────────────────────────────┤
 │  utils/    Json · ProfileIO · XmpProfile · MathUtils ·      │
 │             Parallel · UndoStack · ViewportMath             │
@@ -75,7 +76,17 @@ ARW ──RawDecoder──▶ 线性 ProPhoto RGB (U16, 相机矩阵手动应用
   必然最后到达），generation 计数丢弃过时结果。`ColorManager` / `Pipeline` /
   `CatalogDatabase` / `ThumbnailCache` 均内部加锁，可跨线程共享。
 
-### 2.3 色彩管理
+### 2.3 镜头与相机配置文件集成状态
+
+- `RawMeta` 从 LibRaw 传递相机厂商/型号以及 `LensMake`/`Lens`，供 Qt-free
+  `LensfunProfile` 查询器使用。
+- CMake/vcpkg 已声明 Lensfun；未安装时查询器保持安全空结果，现有 RAW 管线不变。
+- `DcpProfileReader` 已识别 Adobe 的 `IIRC` DCP TIFF 变体，并读取 profile 名称、
+  相机型号、ColorMatrix1/2 与 ProfileToneCurve 长度；已用
+  `resources/Camera/Canon EOS 1000D/Canon EOS 1000D Camera Faithful.dcp` 回归。
+  矩阵/曲线实际应用、HSV/look LUT 和 UI 选择仍待完成。
+
+### 2.4 色彩管理
 
 - 工作空间：**线性 ProPhoto RGB (D50)**。
 - `RawDecoder`：`output_color=0` 取相机线性 RGB → 手动 `cam_xyz`(相机→XYZ D65)
@@ -98,6 +109,12 @@ ARW ──RawDecoder──▶ 线性 ProPhoto RGB (U16, 相机矩阵手动应用
   - `settings(key, value)` —— 如 `library_root`
 - 批量导入在 `BEGIN IMMEDIATE` 事务内逐条写入；`file_path` 唯一约束使重复导入幂等；
   begin/commit/rollback 返回值均检查，杜绝事务悬挂。
+- **导入/导出批量重命名（P1-3）**：`utils/RenameTemplate.h` 提供 Qt-free 的
+  `renderRenameTemplate`（`{date}`/`{index[:W]}`/`{base}`，大小写不敏感）与
+  `uniqueRenamePath`（冲突自动 `-N` 后缀）。导入端在 `ImportWorker` Stage1 落盘后
+  按选择顺序（1 起）+ 源文件修改日期渲染并重命名，`renameMutex_` 串行化查重+重命名
+  保证同批唯一；导出端启用重命名时 `MainWindow` 走 `PreviewWorker::batchExport`，
+  为母版+所有虚拟副本按模板在输出目录下生成唯一文件名。
 - 缩略图/1:1 缓存：优先目录内嵌 `previews` 表 BLOB，其次磁盘
   `<AppData>/ASE-128/Silver Halide/cache/thumbnails/`（`QStandardPaths::AppDataLocation`，
   即 `<APPDATA>/<organizationName>/<applicationName>`），文件名 = FNV-1a 稳定哈希；
@@ -109,7 +126,7 @@ ARW ──RawDecoder──▶ 线性 ProPhoto RGB (U16, 相机矩阵手动应用
 |------|------|-----------|
 | 主线程 | 布局、事件、直方图、DB 读 | — |
 | `PreviewWorker` (QThread) | 解码 + 管线渲染（1920 精 / 480 粗 / 全尺寸 1:1）+ 导出 | `previewReady`/`previewReadyCoarse`/`fullResReady`(imageId, ImageBufferPtr) 队列信号 |
-| `ImportWorker` (QThread) | 事务批导入 + 缩略图/1:1 预生成 + 后台解码回填 | `thumbReadyImage`/`progress`/`finishedImport` 队列信号 |
+| `ImportWorker` (QThread) | 事务批导入（含 Stage1 模板重命名）+ 缩略图/1:1 预生成 + 后台解码回填 | `thumbReadyImage`/`progress`/`finishedImport` 队列信号 |
 
 UI 通过 `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` 下发请求，跨线程
 自定义类型（`ImageBufferPtr`、`Adjustments`）已在 `main()` 中注册元类型；两 worker

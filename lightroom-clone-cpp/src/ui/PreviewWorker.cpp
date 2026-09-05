@@ -20,6 +20,32 @@ std::filesystem::path toStdPath(const QString& path) {
     return std::filesystem::path(path.toStdWString());
 }
 
+// P1-4: copies a queued ExportWatermark into the engine ExportSpec (Qt vector
+// -> std vector; the pixel bytes are copied verbatim).
+lrc::ExportEngine::ExportSpec::Watermark toEngineWatermark(
+    const ExportWatermark& wm) {
+    lrc::ExportEngine::ExportSpec::Watermark out;
+    out.enabled = wm.enabled;
+    out.overlayW = wm.overlayW;
+    out.overlayH = wm.overlayH;
+    out.position = wm.position;
+    out.opacity = wm.opacity;
+    out.scale = wm.scale;
+    if (!wm.rgba.isEmpty()) {
+        out.rgba.reserve(static_cast<size_t>(wm.rgba.size()));
+        for (qint32 v : wm.rgba)
+            out.rgba.push_back(static_cast<uint8_t>(v));
+    }
+    return out;
+}
+
+// Applies the P1-2 ICC + P1-4 watermark options to an ExportSpec.
+void applyExportOptions(lrc::ExportEngine::ExportSpec& spec, int icc,
+                        const ExportWatermark& wm) {
+    spec.icc = static_cast<lrc::ExportEngine::ExportSpec::IccChoice>(icc);
+    spec.watermark = toEngineWatermark(wm);
+}
+
 // Zero-copy ImageBufferPtr -> QImage: the QImage borrows the buffer's U8 pixel
 // data and a cleanup-info holder keeps the buffer alive for the QImage's whole
 // lifetime (same pattern as MainWindow::toQImage). The buffer is immutable once
@@ -130,6 +156,13 @@ void PreviewWorker::loadImage(qint64 imageId, const QString& filePath,
     if (generation == latestGeneration_)
         emit imageMeta(imageId, decoded->meta.nativeWidth,
                        decoded->meta.nativeHeight);
+    if (generation == latestGeneration_)
+        emit cameraMeta(imageId, QString::fromStdString(decoded->meta.make),
+                QString::fromStdString(decoded->meta.model),
+                QString::fromStdString(decoded->meta.lensMaker),
+                QString::fromStdString(decoded->meta.lensModel),
+                decoded->meta.focalLengthMm, decoded->meta.aperture,
+                decoded->meta.cropFactor);
 
     lrc::ImageBufferPtr out;
     if (!viewportSize_.isEmpty()) {
@@ -624,13 +657,15 @@ bool PreviewWorker::decodeFullRes(qint64 imageId, const QString& filePath) {
 void PreviewWorker::exportImage(qint64 imageId, const QString& filePath,
                                 const lrc::Adjustments& adjustments,
                                 const QString& outPath, int format,
-                                int quality, int maxDim) {
+                                int quality, int maxDim, int icc,
+                                const ExportWatermark& watermark) {
     // S17-18: route the single-shot export through the unified
     // ExportEngine::encodeAndWrite entry point so the size preset (maxDim)
     // from ExportDialog is applied in linear F32 space before the format-
     // specific encode. The dispatch is the same as the legacy switch but
     // collapses five branches into one call. maxDim=0 keeps native
-    // resolution (a no-op resize).
+    // resolution (a no-op resize). `icc` / `watermark` carry the P1-2 / P1-4
+    // export options.
     if (abort_.load())
         return;  // 已请求取消 (abort requested).
     lrc::DecodeParams params; // full resolution
@@ -654,6 +689,7 @@ void PreviewWorker::exportImage(qint64 imageId, const QString& filePath,
     }
     spec.quality = quality;
     spec.maxDim = maxDim;
+    applyExportOptions(spec, icc, watermark);
 
     const bool ok = exportEngine_->encodeAndWrite(
         toStdPath(outPath), static_cast<uint64_t>(imageId),
@@ -700,6 +736,7 @@ void PreviewWorker::batchExport(const QList<ExportItem>& items) {
         }
         spec.quality = item.quality;
         spec.maxDim = item.maxDim;
+        applyExportOptions(spec, item.icc, item.watermark);
 
         // Full-resolution decode (DecodeParams{} == halfSize=false, maxDim=0,
         // i.e. native resolution; the export path must never use the cached

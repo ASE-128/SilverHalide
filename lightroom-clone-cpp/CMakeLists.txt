@@ -71,6 +71,7 @@ option(LRC_BUILD_TESTS "Build the Catch2 test suite" ON)
 option(LRC_ENABLE_QT "Build the Qt6 GUI" ON)
 option(LRC_USE_OPENCV "Enable OpenCV auxiliary helpers (heavy dependency)" OFF)
 option(LRC_ENABLE_AI "Enable AI features (ONNX Runtime)" ON)
+option(LRC_ENABLE_LENSFUN "Enable Lensfun lens correction profiles" ON)
 
 # ---------------------------------------------------------------------------
 # External dependencies. Two acquisition strategies:
@@ -97,6 +98,36 @@ function(lrc_proxied_urls OUT_VAR)
 endfunction()
 
 find_package(Threads REQUIRED)
+
+# --- lensfun (optional profile database) ---------------------------------
+# vcpkg exports the library as a CMake config package. Keep this optional so
+# headless builds remain usable when the dependency is not installed yet.
+set(LRC_LENSFUN_FOUND FALSE)
+if(LRC_ENABLE_LENSFUN)
+  find_package(lensfun CONFIG QUIET)
+  if(TARGET lensfun::lensfun OR TARGET lensfun)
+    set(LRC_LENSFUN_FOUND TRUE)
+    message(STATUS "Lensfun: found (lens profiles enabled)")
+  else()
+    # The vcpkg lensfun port currently installs headers and a library but no
+    # lensfunConfig.cmake. Discover that layout explicitly and expose the
+    # same target name used by config-package installations.
+    find_path(LENSFUN_INCLUDE_DIR NAMES lensfun/lensfun.h)
+    find_library(LENSFUN_LIBRARY NAMES lensfun)
+    if(LENSFUN_INCLUDE_DIR AND LENSFUN_LIBRARY)
+      add_library(lensfun::lensfun UNKNOWN IMPORTED)
+      set_target_properties(lensfun::lensfun PROPERTIES
+        IMPORTED_LOCATION "${LENSFUN_LIBRARY}"
+        IMPORTED_IMPLIB "${LENSFUN_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${LENSFUN_INCLUDE_DIR}")
+      set(LRC_LENSFUN_FOUND TRUE)
+      message(STATUS "Lensfun: found via headers/library (lens profiles enabled)")
+    else()
+      message(STATUS "Lensfun: NOT found — lens profile correction disabled. "
+                     "Install the vcpkg lensfun:x64-windows port to enable it.")
+    endif()
+  endif()
+endif()
 
 # --- libraw ---------------------------------------------------------------
 if(TARGET raw)
@@ -269,6 +300,8 @@ set(LRC_ENGINE_SOURCES
   src/engine/ColorManager.cpp
   src/engine/ImageFormats.cpp
   src/engine/RawDecoder.cpp
+  src/engine/LensfunProfile.cpp
+  src/engine/DcpProfile.cpp
   src/engine/Pipeline.cpp
   src/engine/ExportEngine.cpp
   src/engine/ImageIO.cpp
@@ -309,6 +342,16 @@ target_include_directories(lrc_engine PUBLIC src)
 target_link_libraries(lrc_engine PUBLIC raw lcms2 sqlite3 stb_image_write pugixml Threads::Threads)
 # libraw pulls in <windows.h>, whose min/max macros clobber std::min/std::max.
 target_compile_definitions(lrc_engine PUBLIC LIBRAW_NODLL=1 NOMINMAX)
+if(LRC_LENSFUN_FOUND)
+  target_compile_definitions(lrc_engine PUBLIC LRC_ENABLE_LENSFUN=1)
+  if(TARGET lensfun::lensfun)
+    target_link_libraries(lrc_engine PUBLIC lensfun::lensfun)
+  else()
+    target_link_libraries(lrc_engine PUBLIC lensfun)
+  endif()
+else()
+  target_compile_definitions(lrc_engine PUBLIC LRC_ENABLE_LENSFUN=0)
+endif()
 # Path used by ModelManager.cpp to locate the shipped manifest when the
 # executable runs from a build directory (rather than the installed layout).
 target_compile_definitions(lrc_engine PRIVATE
@@ -369,6 +412,7 @@ if(LRC_ENABLE_QT)
     src/ui/ColorWheelWidget.cpp
     src/ui/ImportWorker.cpp
     src/ui/PreviewWorker.cpp
+    src/ui/SnapshotDialog.cpp
     src/ui/EditHistoryDialog.cpp
     src/ui/CollectionsDialog.cpp
     src/ui/SmartCollectionsDialog.cpp
@@ -400,6 +444,11 @@ if(LRC_ENABLE_QT)
     Qt6::Widgets Qt6::Network Qt6::Concurrent Qt6::EntryPointPrivate
     Qt6::CorePrivate)  # for QZipReader (private API) — used by ModelManager to extract .onnx from .zip download_url (Qualcomm NAFNet)
   target_include_directories(lrc_lightroom PRIVATE src)
+  add_custom_command(TARGET lrc_lightroom POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_LIST_DIR}/resources/Camera"
+            "$<TARGET_FILE_DIR:lrc_lightroom>/resources/Camera"
+    COMMENT "Copying camera DCP profiles")
   # Propagate LRC_ENABLE_AI to the GUI layer so UI buttons can be conditionally
   # compiled.  The engine target already sets the same define; we set it here
   # explicitly so the GUI layer does not accidentally diverge.

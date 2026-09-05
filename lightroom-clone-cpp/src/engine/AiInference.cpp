@@ -19,6 +19,10 @@
 #include <thread>
 #include <unordered_map>
 
+#if defined(_WIN32)
+#include <windows.h>  // GetProcAddress for dynamically loading the DML append fn
+#endif
+
 #if LRC_ENABLE_AI
 // Real ONNX Runtime C++ API.  Pulled in only when the engine target has
 // ONNX Runtime linked (otherwise this TU can't compile).
@@ -91,6 +95,60 @@ std::vector<float> runBuiltin(BuiltinKind kind,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Execution-provider helpers (DirectML, P1-1)
+// ---------------------------------------------------------------------------
+
+// True when this ONNX Runtime build exposes a DirectML execution provider.
+// Returns false for a stub build (LRC_ENABLE_AI=0) or a CPU-only runtime. The
+// availability query is wrapped so it can never throw.
+#if LRC_ENABLE_AI
+inline bool directMLAvailable() {
+    try {
+        const auto providers = Ort::GetAvailableProviders();
+        for (const auto& p : providers)
+            if (p == "DMLExecutionProvider")
+                return true;
+    } catch (const Ort::Exception&) {
+        return false;
+    }
+    return false;
+}
+
+// Appends the DirectML EP to `opts` when it is present. The append symbol is
+// resolved at runtime (GetProcAddress) rather than linked directly, so this TU
+// builds and runs against ONNX Runtime builds that ship without a DirectML
+// component (e.g. the vcpkg CPU-only port) as long as DirectML is absent —
+// when it is present we call through the resolved function.
+inline void appendDirectMLIfAvailable(Ort::SessionOptions& opts) {
+    if (!directMLAvailable())
+        return;
+    using AppendFn = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*);
+    auto module = ::GetModuleHandleW(L"onnxruntime.dll");
+    if (!module)
+        module = ::GetModuleHandleW(L"onnxruntime");
+    if (!module)
+        return;
+    auto fn = reinterpret_cast<AppendFn>(
+        reinterpret_cast<void*>(::GetProcAddress(module,
+                                                 "OrtSessionOptionsAppendExecutionProvider_DML")));
+    if (!fn)
+        return;
+    Ort::ThrowOnError(fn(opts));  // sets lastError in the caller's catch loop
+}
+
+// Assembles the shared session options. `useDirectML` requests the DirectML EP
+// but only when it is actually present — otherwise everything falls back to CPU.
+inline Ort::SessionOptions makeSessionOptions(bool useDirectML) {
+    Ort::SessionOptions opts;
+    opts.SetIntraOpNumThreads(1);
+    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
+    if (useDirectML)
+        appendDirectMLIfAvailable(opts);
+    return opts;
+}
+#endif
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -106,6 +164,10 @@ struct AiInferenceEngine::SessionHolder {
 struct AiInferenceEngine::Impl {
     // Model id -> registered ModelInfo (copy so the registry is self-contained)
     std::unordered_map<std::string, ModelInfo> models;
+
+    // Preferred execution provider (DirectML when requested and available).
+    AiInferenceEngine::ExecutionProvider preferred =
+        AiInferenceEngine::ExecutionProvider::Cpu;
 
     // Thread-id -> (modelId -> SessionHolder).  Each thread owns its own
     // Ort::Session because a single session isn't safe for concurrent Run.
@@ -179,9 +241,8 @@ bool AiInferenceEngine::loadModel(const ModelInfo& info) {
         return false;
     }
     try {
-        Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(1);
-        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
+        Ort::SessionOptions opts = makeSessionOptions(
+            impl_->preferred == ExecutionProvider::DirectML);
 
         const auto wide = info.onnxPath.wstring();
         auto session = std::make_unique<Ort::Session>(
@@ -214,6 +275,27 @@ bool AiInferenceEngine::loadModel(const std::filesystem::path& modelPath) {
     info.id         = modelPath.string();  // use the path itself as the id
     info.onnxPath   = modelPath;
     return loadModel(info);
+}
+
+void AiInferenceEngine::setPreferredProvider(ExecutionProvider provider) {
+    std::unique_lock lock(mutex_);
+    impl_->preferred = provider;
+}
+
+AiInferenceEngine::ExecutionProvider AiInferenceEngine::preferredProvider() const {
+    std::shared_lock lock(mutex_);
+    return impl_->preferred;
+}
+
+bool AiInferenceEngine::isProviderAvailable(ExecutionProvider provider) {
+    if (provider == ExecutionProvider::Cpu)
+        return true;
+#if LRC_ENABLE_AI
+    return directMLAvailable();
+#else
+    (void)provider;
+    return false;
+#endif
 }
 
 bool AiInferenceEngine::hasModel(const std::string& modelId) const {
@@ -274,9 +356,8 @@ std::vector<float> AiInferenceEngine::run(const std::string& modelId,
                     return {};
                 }
                 try {
-                    Ort::SessionOptions opts;
-                    opts.SetIntraOpNumThreads(1);
-                    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
+                    Ort::SessionOptions opts = makeSessionOptions(
+                        impl_->preferred == ExecutionProvider::DirectML);
                     const auto wide = info.onnxPath.wstring();
                     auto s = std::make_unique<Ort::Session>(*impl_->env, wide.c_str(), opts);
                     SessionHolder h;

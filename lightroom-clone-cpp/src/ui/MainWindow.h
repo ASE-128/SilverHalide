@@ -88,6 +88,8 @@ private slots:
     void onCollectionSelected(int collectionId);
     void onManageCollections();
     void onRemoveImage(int imageId);
+    // P1-5: opens the snapshot panel for the current image.
+    void onManageSnapshots();
     void onFiltersChanged(int minRating, int flagFilter, int labelColorFilter);
     void onImageSelected(int imageId);
     void onAdjustmentsChanged(const lrc::Adjustments& adjustments);
@@ -124,6 +126,11 @@ private slots:
                               const lrc::ImageBufferPtr& rgbU8);
     void onFullResRequested(bool needed);
     void onImageMeta(qint64 imageId, int w, int h);
+    void onCameraMeta(qint64 imageId, const QString& make,
+                      const QString& model, const QString& lensMaker,
+                      const QString& lensModel, float focalLengthMm,
+                      float aperture, float cropFactor);
+    void onDcpProfileSelected(const QString& path);
     void onFullResReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
     // M6: low-res (kCoarseMaxDim) 1:1 intermediate frame, delivered ahead of
     // fullResReady so a 1:1 slider drag gets immediate coarse feedback.
@@ -226,7 +233,8 @@ private:
     void refreshLibraryFolders();
     void startImport(const QStringList& paths, bool convertToDng = false,
                      lrc::ImportMode mode = lrc::ImportMode::Add,
-                     const QString& destRoot = QString());
+                     const QString& destRoot = QString(),
+                     const QString& renameTemplate = QString());
     void convertToDng();
     void requestPreview(const QString& filePath, const lrc::Adjustments& adjustments);
     void requestAdjust(const lrc::Adjustments& adjustments);
@@ -277,6 +285,13 @@ private:
     void showImageAtIndex(int index);
     // Collapses / expands the left (navigator) + right (develop) panes.
     void setSidePanelsVisible(bool visible);
+    void refreshDcpProfiles(const QString& cameraModel);
+    void refreshLensfunProfile(const QString& cameraMake,
+                               const QString& cameraModel,
+                               const QString& lensMaker,
+                               const QString& lensModel,
+                               float focalLengthMm, float aperture,
+                               float cropFactor);
 
     // PHASE_12/13: constructs aiEngine_ + modelManager_, loads every ready
     // model from <applicationDirPath>/models/manifest.json into the engine,
@@ -334,6 +349,7 @@ private:
     QLineEdit* searchEdit_ = nullptr;          // M8: top-toolbar search box
     QTimer* searchDebounceTimer_ = nullptr;    // M8: search debounce (300 ms)
     QTimer* spotCommitTimer_ = nullptr;        // M5: spot-gesture commit debounce
+    QString currentDcpProfilePath_;
 
     // --- state ----------------------------------------------------------
     QVector<FilmstripWidget::Entry> entries_;

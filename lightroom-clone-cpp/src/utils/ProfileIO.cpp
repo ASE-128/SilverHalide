@@ -91,6 +91,14 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
     root["colorNoiseReductionSmoothness"] = a.colorNoiseReductionSmoothness;
     root["distortion"] = a.distortion;
     root["vignette"] = a.vignette;
+    root["lensfunEnabled"] = a.lensfunEnabled;
+    root["lensfunCameraMaker"] = a.lensfunCameraMaker;
+    root["lensfunCameraModel"] = a.lensfunCameraModel;
+    root["lensfunLensMaker"] = a.lensfunLensMaker;
+    root["lensfunLensModel"] = a.lensfunLensModel;
+    root["lensfunFocalLengthMm"] = a.lensfunFocalLengthMm;
+    root["lensfunAperture"] = a.lensfunAperture;
+    root["lensfunCropFactor"] = a.lensfunCropFactor;
     root["vignetteMidpoint"] = a.vignetteMidpoint;
     root["vignetteRoundness"] = a.vignetteRoundness;
     root["vignetteFeather"] = a.vignetteFeather;
@@ -270,6 +278,23 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
         v["colorNoiseReductionSmoothness"].asNumber(a.colorNoiseReductionSmoothness);
     a.distortion = v["distortion"].asNumber(a.distortion);
     a.vignette = v["vignette"].asNumber(a.vignette);
+    a.lensfunEnabled = v["lensfunEnabled"].asBool(a.lensfunEnabled);
+    // json::Value::asString() takes no default argument, so missing keys
+    // must preserve the existing (default) value explicitly.
+    if (v.contains("lensfunCameraMaker"))
+        a.lensfunCameraMaker = v["lensfunCameraMaker"].asString();
+    if (v.contains("lensfunCameraModel"))
+        a.lensfunCameraModel = v["lensfunCameraModel"].asString();
+    if (v.contains("lensfunLensMaker"))
+        a.lensfunLensMaker = v["lensfunLensMaker"].asString();
+    if (v.contains("lensfunLensModel"))
+        a.lensfunLensModel = v["lensfunLensModel"].asString();
+    a.lensfunFocalLengthMm = static_cast<float>(
+        v["lensfunFocalLengthMm"].asNumber(a.lensfunFocalLengthMm));
+    a.lensfunAperture = static_cast<float>(
+        v["lensfunAperture"].asNumber(a.lensfunAperture));
+    a.lensfunCropFactor = static_cast<float>(
+        v["lensfunCropFactor"].asNumber(a.lensfunCropFactor));
     a.vignetteMidpoint = v["vignetteMidpoint"].asNumber(a.vignetteMidpoint);
     a.vignetteRoundness = v["vignetteRoundness"].asNumber(a.vignetteRoundness);
     a.vignetteFeather = v["vignetteFeather"].asNumber(a.vignetteFeather);

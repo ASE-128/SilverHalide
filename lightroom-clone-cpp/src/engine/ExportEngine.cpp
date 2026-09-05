@@ -1,6 +1,9 @@
 #include "engine/ExportEngine.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <fstream>
 #include <functional>
 #include <vector>
 
@@ -11,20 +14,164 @@
 
 namespace lrc {
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// P1-2 / P1-4: ICC profile resolution + watermark compositing helpers
+// ---------------------------------------------------------------------------
+
+// Resolves the ICC profile bytes to embed for a spec. Priority: a custom user
+// profile path, then a named preset. Empty when neither applies (None/absent).
+std::vector<uint8_t> resolveIccBytes(const ExportEngine::ExportSpec& spec) {
+    if (!spec.iccCustomPath.empty()) {
+        // Read the file raw — the profile is passed through verbatim.
+        std::ifstream in(spec.iccCustomPath, std::ios::binary);
+        if (!in)
+            return {};
+        in.seekg(0, std::ios::end);
+        const std::streamsize sz = in.tellg();
+        if (sz <= 0 || sz > 1 << 24)
+            return {};
+        in.seekg(0, std::ios::beg);
+        std::vector<uint8_t> bytes(static_cast<size_t>(sz));
+        in.read(reinterpret_cast<char*>(bytes.data()), sz);
+        if (!in.good() && !in.eof())
+            return {};
+        return bytes;
+    }
+    switch (spec.icc) {
+        case ExportEngine::ExportSpec::IccChoice::SRGB:
+            return ColorManager::exportProfileBytes(
+                ColorManager::ExportColorProfile::SRGB);
+        case ExportEngine::ExportSpec::IccChoice::AdobeRGB:
+            return ColorManager::exportProfileBytes(
+                ColorManager::ExportColorProfile::AdobeRGB);
+        case ExportEngine::ExportSpec::IccChoice::DisplayP3:
+            return ColorManager::exportProfileBytes(
+                ColorManager::ExportColorProfile::DisplayP3);
+        default:
+            return {};
+    }
+}
+
+// Scales the overlay (nearest-neighbour — deterministic, reference-clean) to a
+// width/height and writes straight-alpha RGBA into `rw x rh` output.
+std::vector<uint8_t> scaleOverlay(const std::vector<uint8_t>& rgba, int sw,
+                                  int sh, int dw, int dh) {
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+        return {};
+    std::vector<uint8_t> out(static_cast<size_t>(dw) * dh * 4);
+    for (int y = 0; y < dh; ++y) {
+        const int sy = std::min(sh - 1, (y * sh) / dh);
+        for (int x = 0; x < dw; ++x) {
+            const int sx = std::min(sw - 1, (x * sw) / dw);
+            const size_t si = (static_cast<size_t>(sy) * sw + sx) * 4;
+            const size_t di = (static_cast<size_t>(y) * dw + x) * 4;
+            out[di] = rgba[si];
+            out[di + 1] = rgba[si + 1];
+            out[di + 2] = rgba[si + 2];
+            out[di + 3] = rgba[si + 3];
+        }
+    }
+    return out;
+}
+
+// Composites the (already scaled) straight-alpha overlay at (ox,oy) over the
+// U8 output. dst = bg*(1-a) + wm*a, where a = opacity * overlayA/255.
+void compositeOverlay(uint8_t* dst, int outW, int outH,
+                      const std::vector<uint8_t>& wm, int ww, int wh,
+                      int ox, int oy, float opacity) {
+    for (int y = 0; y < wh; ++y) {
+        const int dy = oy + y;
+        if (dy < 0 || dy >= outH)
+            continue;
+        for (int x = 0; x < ww; ++x) {
+            const int dx = ox + x;
+            if (dx < 0 || dx >= outW)
+                continue;
+            const size_t si = (static_cast<size_t>(y) * ww + x) * 4;
+            const float a = opacity * (wm[si + 3] / 255.0f);
+            if (a <= 0.0f)
+                continue;
+            const size_t di = (static_cast<size_t>(dy) * outW + dx) * 3;
+            for (int c = 0; c < 3; ++c) {
+                const float bg = dst[di + c] / 255.0f;
+                const float fg = wm[si + c] / 255.0f;
+                const float v = bg * (1.0f - a) + fg * a;
+                dst[di + c] = static_cast<uint8_t>(
+                    std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+            }
+        }
+    }
+}
+
+// Applies a colour-space preset watermark or returns the buffer untouched.
+// (This is a compile guard to keep the engine free of Qt; see applyWatermark.)
+
+ImageBufferPtr applyWatermark(const ImageBufferPtr& rgb,
+                              const ExportEngine::ExportSpec& spec) {
+    const auto& wm = spec.watermark;
+    if (!wm.enabled || wm.rgba.empty() || wm.overlayW <= 0 || wm.overlayH <= 0 ||
+        wm.opacity <= 0.0f)
+        return rgb;
+    const int outW = rgb->width();
+    const int outH = rgb->height();
+    if (outW <= 0 || outH <= 0)
+        return rgb;
+
+    // Desired overlay size: `scale` is the ratio of overlay long edge to output
+    // long edge. Preserve the overlay's aspect ratio.
+    const int longest = std::max(outW, outH);
+    const int wl = wm.overlayW, hl = wm.overlayH;
+    double wScale = static_cast<double>(longest) * wm.scale / std::max(1, std::max(wl, hl));
+    if (wScale <= 0.0)
+        return rgb;
+    int ww = std::max(1, static_cast<int>(wl * wScale + 0.5));
+    int wh = std::max(1, static_cast<int>(hl * wScale + 0.5));
+    if (ww > outW) ww = outW;
+    if (ww < 1) ww = 1;
+    if (wh > outH) wh = outH;
+
+    const auto scaled = scaleOverlay(wm.rgba, wl, hl, ww, wh);
+    if (scaled.empty())
+        return rgb;
+
+    // Anchor.
+    const int margin = std::max(1, longest / 50);
+    int ox = 0, oy = 0;
+    switch (wm.position) {
+        case 0: ox = margin;            oy = margin;            break;  // TL
+        case 1: ox = outW - ww - margin; oy = margin;           break;  // TR
+        case 2: ox = margin;            oy = outH - wh - margin; break; // BL
+        case 3: ox = outW - ww - margin; oy = outH - wh - margin; break; // BR
+        default: ox = (outW - ww) / 2; oy = (outH - wh) / 2;    break;  // centre
+    }
+
+    // Composite onto a copy so the cached/reference buffer is never mutated.
+    auto out = std::make_shared<ImageBuffer>(*rgb);
+    uint8_t* dst = out->data().data();
+    compositeOverlay(dst, outW, outH, scaled, ww, wh, ox, oy, wm.opacity);
+    return out;
+}
+
+} // namespace
+
 ExportEngine::ExportEngine(std::shared_ptr<const ColorManager> colorManager,
                            Pipeline& pipeline)
     : cm_(std::move(colorManager)), pipeline_(pipeline) {}
 
 bool ExportEngine::exportJpeg(const std::filesystem::path& outPath,
                               uint64_t imageId, const ImageBuffer& linear,
-                              const Adjustments& adjustments, int quality) {
+                              const Adjustments& adjustments, int quality,
+                              const ExportSpec& spec) {
     lastError_.clear();
     ImageBufferPtr rgb = pipeline_.renderFullDisplay(imageId, linear, adjustments);
     if (!rgb || rgb->format() != PixelFormat::U8 || rgb->empty()) {
         lastError_ = "render failed";
         return false;
     }
-    if (!ImageIO::writeJpeg(outPath, *rgb, quality)) {
+    rgb = applyWatermark(rgb, spec);
+    if (!ImageIO::writeJpeg(outPath, *rgb, quality, resolveIccBytes(spec))) {
         lastError_ = "cannot write output file";
         return false;
     }
@@ -79,14 +226,16 @@ void ExportEngine::quantizeToU16Parallel(
 
 bool ExportEngine::exportPng(const std::filesystem::path& outPath,
                              uint64_t imageId, const ImageBuffer& linear,
-                             const Adjustments& adjustments) {
+                             const Adjustments& adjustments,
+                             const ExportSpec& spec) {
     lastError_.clear();
     ImageBufferPtr rgb = pipeline_.renderFullDisplay(imageId, linear, adjustments);
     if (!rgb || rgb->format() != PixelFormat::U8 || rgb->empty()) {
         lastError_ = "render failed";
         return false;
     }
-    if (!ImageIO::writePng(outPath, *rgb)) {
+    rgb = applyWatermark(rgb, spec);
+    if (!ImageIO::writePng(outPath, *rgb, resolveIccBytes(spec))) {
         lastError_ = "cannot write output file";
         return false;
     }
@@ -95,15 +244,19 @@ bool ExportEngine::exportPng(const std::filesystem::path& outPath,
 
 bool ExportEngine::exportTiff(const std::filesystem::path& outPath,
                               uint64_t imageId, const ImageBuffer& linear,
-                              const Adjustments& adjustments, int bitDepth) {
+                              const Adjustments& adjustments, int bitDepth,
+                              const ExportSpec& spec) {
     lastError_.clear();
+    // The ICC profile is embedded on both the 8- and 16-bit raster paths; the
+    // watermark only on the U8 (display) path.
     if (bitDepth == 8) {
         ImageBufferPtr rgb = pipeline_.renderFullDisplay(imageId, linear, adjustments);
         if (!rgb || rgb->format() != PixelFormat::U8 || rgb->empty()) {
             lastError_ = "render failed";
             return false;
         }
-        if (!ImageIO::writeTiff(outPath, *rgb)) {
+        rgb = applyWatermark(rgb, spec);
+        if (!ImageIO::writeTiff(outPath, *rgb, resolveIccBytes(spec))) {
             lastError_ = "cannot write output file";
             return false;
         }
@@ -123,7 +276,7 @@ bool ExportEngine::exportTiff(const std::filesystem::path& outPath,
             *lin, *u16, 64, [&](const float* s, float* d, size_t n) {
                 cm_->linearProPhotoToSRGB(s, d, n);
             });
-        if (!ImageIO::writeTiff(outPath, *u16)) {
+        if (!ImageIO::writeTiff(outPath, *u16, resolveIccBytes(spec))) {
             lastError_ = "cannot write output file";
             return false;
         }
@@ -189,13 +342,13 @@ bool ExportEngine::encodeAndWrite(const std::filesystem::path& outPath,
     switch (spec.format) {
         case ExportSpec::Format::Jpeg:
             return exportJpeg(outPath, imageId, linear, adjustments,
-                             spec.quality);
+                             spec.quality, spec);
         case ExportSpec::Format::Png:
-            return exportPng(outPath, imageId, linear, adjustments);
+            return exportPng(outPath, imageId, linear, adjustments, spec);
         case ExportSpec::Format::Tiff8:
-            return exportTiff(outPath, imageId, linear, adjustments, 8);
+            return exportTiff(outPath, imageId, linear, adjustments, 8, spec);
         case ExportSpec::Format::Tiff16:
-            return exportTiff(outPath, imageId, linear, adjustments, 16);
+            return exportTiff(outPath, imageId, linear, adjustments, 16, spec);
         case ExportSpec::Format::Dng:
             return exportDng(outPath, imageId, linear, adjustments);
     }

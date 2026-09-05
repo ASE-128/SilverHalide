@@ -46,6 +46,12 @@ public:
 
     lrc::Adjustments adjustments() const { return current_; }
     void setAdjustments(const lrc::Adjustments& adjustments);
+    // Replaces the camera-profile combo contents for the currently loaded
+    // camera. The first entry is always the neutral/no-profile choice.
+    void setDcpProfiles(const QStringList& names, const QStringList& paths);
+    void setDcpProfileStatus(const QString& status);
+    void setLensfunProfile(const QString& status, bool available,
+                           bool enabled);
     void resetAll();
 
     // The embedded histogram (kept in sync with the preview by MainWindow).
@@ -219,6 +225,10 @@ signals:
     void metadataEdited(const std::string& title, const std::string& caption,
                         const std::string& copyright, const std::string& creator,
                         const std::vector<std::string>& keywords);
+    // Emitted when the user selects a DCP entry; the payload is the absolute
+    // path stored in the combo-box item data.
+    void dcpProfileSelected(const QString& path);
+    void lensfunEnabledChanged(bool enabled);
 
 private:
     // Which LR Alt-view a row can show; 0 = none.
@@ -485,6 +495,10 @@ private:
     QSlider* spotRadiusSlider_ = nullptr;
     QDoubleSpinBox* spotRadiusSpin_ = nullptr;
     QLabel* spotCountLabel_ = nullptr;
+    QComboBox* dcpProfileCombo_ = nullptr;
+    QLabel* dcpProfileStatus_ = nullptr;
+    QCheckBox* lensfunEnabledCheck_ = nullptr;
+    QLabel* lensfunStatus_ = nullptr;
     QPushButton* spotVisualizeBtn_ = nullptr;
     lrc::SpotType spotMode_ = lrc::SpotType::Heal;
 

@@ -6,6 +6,7 @@
     "qtbase",
     "libraw",
     "lcms",
+    "lensfun",
     "sqlite3",
     "opencv4",
     "onnxruntime-gpu",

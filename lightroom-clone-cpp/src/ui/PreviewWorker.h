@@ -14,6 +14,7 @@
 #include <QSize>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 #include "app/Constants.h"
 #include "engine/Adjustments.h"
@@ -29,10 +30,26 @@ enum class ExportFormat : int {
     Dng,
 };
 
+// P1-4: watermark options that cross the queued connection to PreviewWorker.
+// Mirrors ExportEngine::ExportSpec::Watermark using Qt container types so it is
+// a registered metatype (the QVector is straight-alpha RGBA pixels).
+struct ExportWatermark {
+    bool enabled = false;
+    QVector<uint8_t> rgba;    // overlayW*overlayH*4 straight-alpha RGBA
+    int overlayW = 0;
+    int overlayH = 0;
+    int position = 4;         // 0..3 corners, 4 = centre
+    float opacity = 1.0f;     // 0..1
+    float scale = 0.2f;       // overlay long edge / output long edge
+};
+Q_DECLARE_METATYPE(ExportWatermark)
+
 // S17-18: one entry in a batch export. `maxDim` is the longest-edge cap in
 // pixels (0 = original / native resolution). `quality` is the JPEG quality
-// (0..100, ignored for lossless formats). Crosses the queued connection from
-// MainWindow to PreviewWorker::batchExport; registered in main().
+// (0..100, ignored for lossless formats). `icc` (P1-2) is an
+// ExportEngine::ExportSpec::IccChoice value; `watermark` (P1-4) is optional.
+// Crosses the queued connection from MainWindow to PreviewWorker::batchExport;
+// registered in main().
 struct ExportItem {
     qint64 imageId = 0;
     QString filePath;
@@ -41,6 +58,8 @@ struct ExportItem {
     ExportFormat format = ExportFormat::Jpeg;
     int quality = 92;
     int maxDim = 0;
+    int icc = 0;                  // P1-2 IccChoice
+    ExportWatermark watermark;    // P1-4
 };
 Q_DECLARE_METATYPE(ExportItem)
 Q_DECLARE_METATYPE(QList<ExportItem>)
@@ -93,7 +112,8 @@ public slots:
     void exportImage(qint64 imageId, const QString& filePath,
                      const lrc::Adjustments& adjustments,
                      const QString& outPath, int format, int quality,
-                     int maxDim = 0);
+                     int maxDim = 0, int icc = 0,
+                     const ExportWatermark& watermark = ExportWatermark{});
     // S17-18: serial batch export. Each item is decoded + rendered + written
     // in turn (the export bottleneck is encode, not decode; TIFF16 is already
     // strip-parallel from S16). Emits batchExportProgress per item and a
@@ -175,6 +195,9 @@ signals:
     // downscale). Emitted once per successful decode; lets the 1:1 viewport
     // map the downscaled preview at true full size while full-res loads.
     void imageMeta(qint64 imageId, int nativeWidth, int nativeHeight);
+    void cameraMeta(qint64 imageId, const QString& make, const QString& model,
+                    const QString& lensMaker, const QString& lensModel,
+                    float focalLengthMm, float aperture, float cropFactor);
     void loadFailed(const QString& filePath);
     void exportFinished(bool ok, const QString& message);
     // S17-18: batch export progress (1-based done count, total == items.size()).

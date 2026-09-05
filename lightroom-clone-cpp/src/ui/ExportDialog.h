@@ -6,10 +6,14 @@
 // to PreviewWorker::exportImage.
 
 #include <QDialog>
+#include <QImage>
 #include <QString>
 
 #include <vector>
 
+#include "ui/PreviewWorker.h"  // ExportWatermark (P1-4)
+
+class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -53,8 +57,24 @@ public:
     // exist, matching the legacy export path.
     qint64 selectedVariantId() const;
 
-    // Composes a suggested filename for the given format index (incl. dot).
+    // Composed a suggested filename for the given format index (incl. dot).
     static QString defaultFileName(const QString& baseName, int formatIndex);
+
+    // --- P1-2 ICC ----------------------------------------------------------
+    // Returns an ExportEngine::ExportSpec::IccChoice value (0 = none).
+    int iccIndex() const;
+    // --- P1-4 watermark -----------------------------------------------------
+    // Returns the configured watermark (RGBA overlay + position/opacity/scale).
+    ExportWatermark watermark() const;
+
+    // --- P1-3 batch rename --------------------------------------------------
+    // True when the user switched on "rename on batch export" and typed a
+    // template. When enabled, MainWindow exports the master + all virtual
+    // copies into the chosen folder, naming each output from the template
+    // instead of the single-variant legacy path.
+    bool renameEnabled() const;
+    // The rename template text ({date}/{index}/{base}) or empty when disabled.
+    QString renameTemplate() const;
 
 signals:
     // Emitted when the user picks a different variant in the selector. Not
@@ -65,6 +85,9 @@ private slots:
     void browse();
     void onFormatChanged(int index);
     void validateAndAccept();
+    void browseWatermark();
+    void onWatermarkToggle(bool on);
+    void refreshRenamePreview();
 
 private:
     void updatePathSuffix();
@@ -72,6 +95,22 @@ private:
     QComboBox* variantCombo_ = nullptr;
     QComboBox* formatCombo_ = nullptr;
     QComboBox* sizeCombo_ = nullptr;  // S17-18: longest-edge preset.
+    QComboBox* iccCombo_ = nullptr;   // P1-2: ICC preset (0 = none).
+    QCheckBox* renameBox_ = nullptr;  // P1-3: batch-rename on/off.
+    QLineEdit* renameEdit_ = nullptr; // P1-3: rename template.
+    QLabel* renamePreview_ = nullptr; // P1-3: rendered batch-name preview.
+    // P1-3: cached variant list (master + virtual copies) so the preview can
+    // show the batch outputs without re-querying the catalog.
+    std::vector<lrc::EditVariant> variants_;
+    QCheckBox* wmEnable_ = nullptr;   // P1-4: watermark on/off.
+    QLabel* wmPathLabel_ = nullptr;   // P1-4: chosen overlay file label.
+    QComboBox* wmPosition_ = nullptr; // P1-4: corner / centre.
+    QSlider* wmOpacity_ = nullptr;    // P1-4: opacity 0..100.
+    QSlider* wmScale_ = nullptr;      // P1-4: scale 0..50 (~0..0.5 edge ratio).
+    QWidget* wmRow_ = nullptr;        // P1-4: watermark options group.
+    // P1-4: straight-alpha RGBA overlay decoded from the chosen PNG.
+    QImage wmOverlay_;
+
     QLineEdit* pathEdit_ = nullptr;
     QWidget* qualityRow_ = nullptr;
     QSlider* qualitySlider_ = nullptr;

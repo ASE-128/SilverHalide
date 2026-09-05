@@ -118,6 +118,63 @@ void ColorManager::loadDisplayProfile(const std::filesystem::path& iccPath) {
     rebuildTransforms();
 }
 
+std::vector<uint8_t> ColorManager::exportProfileBytes(
+    ExportColorProfile profile) {
+    cmsHPROFILE h = nullptr;
+    switch (profile) {
+        case ExportColorProfile::SRGB:
+            h = cmsCreate_sRGBProfile();
+            break;
+        case ExportColorProfile::AdobeRGB: {
+            // Adobe RGB (1998): primaries + D65 white point + 2.2-ish TRC.
+            cmsCIExyY d65 = *cmsD50_xyY();
+            cmsWhitePointFromTemp(&d65, 6504);
+            const cmsCIExyYTRIPLE aPrimaries = {
+                {0.6400, 0.3300, 1.0},  // red
+                {0.2100, 0.7100, 1.0},  // green
+                {0.1500, 0.0600, 1.0},  // blue
+            };
+            cmsToneCurve* gamma = cmsBuildGamma(nullptr, 2.2);
+            cmsToneCurve* trc[3] = {gamma, gamma, gamma};
+            h = cmsCreateRGBProfile(&d65, &aPrimaries, trc);
+            cmsFreeToneCurve(gamma);
+            break;
+        }
+        case ExportColorProfile::DisplayP3: {
+            // Display P3 primaries + D65 white point + gamma 2.2 TRC (a common
+            // SDR approximation; the ICC bytes just need to round-trip as the
+            // selected profile).
+            cmsCIExyY d65 = *cmsD50_xyY();
+            cmsWhitePointFromTemp(&d65, 6504);
+            const cmsCIExyYTRIPLE p3Primaries = {
+                {0.6800, 0.3200, 1.0},  // red
+                {0.2650, 0.6900, 1.0},  // green
+                {0.1500, 0.0600, 1.0},  // blue
+            };
+            cmsToneCurve* gamma = cmsBuildGamma(nullptr, 2.2);
+            cmsToneCurve* trc[3] = {gamma, gamma, gamma};
+            h = cmsCreateRGBProfile(&d65, &p3Primaries, trc);
+            cmsFreeToneCurve(gamma);
+            break;
+        }
+    }
+    if (!h)
+        return {};
+
+    cmsUInt32Number size = 0;
+    if (!cmsSaveProfileToMem(h, nullptr, &size) || size == 0) {
+        cmsCloseProfile(h);
+        return {};
+    }
+    std::vector<uint8_t> bytes(static_cast<size_t>(size));
+    if (!cmsSaveProfileToMem(h, bytes.data(), &size)) {
+        cmsCloseProfile(h);
+        return {};
+    }
+    cmsCloseProfile(h);
+    return bytes;
+}
+
 void ColorManager::linearProPhotoToSRGB(const float* src, float* dst,
                                         size_t pixelCount) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);

@@ -66,6 +66,10 @@ struct EditSnapshot {
     int64_t id = 0;
     int64_t imageId = 0;
     std::string createdAt; // ISO-8601 UTC
+    // P1-5: user-facing snapshot label. Empty for ordinary (unlabelled) undo
+    // history entries produced automatically by saveAdjustments(); set for a
+    // named snapshot created via the snapshot panel.
+    std::string name;
 };
 
 // A virtual copy / edit variant of a photo. variantId 0 is the master copy
@@ -163,6 +167,10 @@ public:
     std::optional<ImageRecord> findImageByPath(const std::string& filePath) const;
     /** Look up a single image by primary key. Empty when id <= 0 or absent. */
     std::optional<ImageRecord> findImageById(int64_t id) const;
+    /** Updates the stored file path for an image after a rename/move on disk.
+     *  Returns false when `newFilePath` already belongs to another row (would
+     *  violate the UNIQUE(file_path) constraint) or the image is absent. */
+    bool updateImagePath(int64_t id, const std::string& newFilePath);
     // Stores an embedded preview (thumbnail or full-res JPEG) inside the
     // catalog file, replacing any previous value. (embedded preview blob)
     bool storePreview(int64_t imageId, PreviewKind kind,
@@ -222,8 +230,11 @@ public:
                                                int variantId = 0) const;
 
     // --- edit history (undo snapshots, newest last) -----------------------
+    // P1-5: `name` labels a snapshot. Empty names produce ordinary unlabelled
+    // undo-history entries (the automatic saveAdjustments() path); non-empty
+    // names mark user-created snapshots shown by the snapshot panel.
     int64_t saveEditSnapshot(int64_t imageId, const Adjustments& adjustments,
-                             int variantId = 0);
+                             int variantId = 0, const std::string& name = {});
     std::vector<EditSnapshot> listEditHistory(int64_t imageId,
                                               int variantId = 0) const;
     std::optional<Adjustments> loadEditSnapshot(int64_t imageId,
@@ -231,6 +242,10 @@ public:
                                                 int variantId = 0) const;
     bool deleteEditSnapshot(int64_t imageId, int64_t snapshotId,
                             int variantId = 0);
+    // Renames a history/snapshot record (used by the snapshot panel). Returns
+    // false when the record does not exist for this image/variant.
+    bool renameSnapshot(int64_t imageId, int64_t snapshotId,
+                        const std::string& name, int variantId = 0);
 
     // --- virtual copies (M6) ---------------------------------------------
     // Creates a virtual copy of `imageId`, copying the master (variant 0)
