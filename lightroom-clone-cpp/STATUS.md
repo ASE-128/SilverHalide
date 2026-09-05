@@ -13,6 +13,14 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## 当前任务状态（2026-09-05）
+
+- **当前进行中的任务**：[竞品对齐优化实施规格](docs/spec/competitive-optimization-implementation-spec.md)。
+- **总体状态**：P1、P2、P3 和 T 批次尚未按规格正式实施，当前为待实施状态。
+- **首批范围**：P1-1 DirectML、P1-2 导出 ICC、P1-3 批量重命名；完成后必须补充对应测试和性能/行为证据。
+- **状态判定**：现有 AI 天空蒙版、编辑历史、SIMD 条件编译等属于基础能力，不等同于竞品规格任务已完成；以 Git 实时状态、源码/测试实测和规格中的验收记录为准。
+- **历史性能资料**：M1-M5 实施规格和四阶段加速报告位于 `docs/archive/`，仅作回溯依据，不作为当前进行中任务清单。
+
 ***
 
 # 内部开发历史（2.x dev milestones，仅作历史记录）
@@ -468,10 +476,11 @@ cmake --build build_gui --config Release
 
 ### 🔄 进行中
 
-- 性能优化主线 M1–M3（引擎热路径分配消除 / UI 节流+目录查询提速 / 胶片栏懒加载+增量更新）已完成验收，
-  M4/M5（引擎进阶容差 / 数据 IO 架构）待启动；已完成里程碑状态见
-  [docs/Speedup\_M1\_STATUS.md](docs/Speedup_M1_STATUS.md) / [M2](docs/Speedup_M2_STATUS.md) / [M3](docs/Speedup_M3_STATUS.md)，
-  计划文件 `~/.claude/plans/groovy-greeting-gem.md`
+- **竞品对齐优化**：当前任务文件为
+  [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md)。
+  P1/P2/P3/T 尚未正式启动，首批执行范围为 P1-1、P1-2、P1-3。
+
+- **性能 M1-M5**：相关实现和报告已归档，部分量化验收仍需单独复核；不要将归档文档中的历史测试数字直接当作当前基线。
 
 ## 已修复的预存缺陷（v1.5）
 

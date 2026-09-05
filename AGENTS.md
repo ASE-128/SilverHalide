@@ -10,9 +10,23 @@
 - 旧的 VS 产物树 [lightroom-clone-cpp/build_gui](lightroom-clone-cpp/build_gui) 是历史残留，打包/调试/自动化不要再指向它
 - Qt 安装路径： [qt/6.8.3/msvc2022_64](qt/6.8.3/msvc2022_64)
 - ONNX Runtime 预置目录： [onnxruntime/onnxruntime-win-x64-1.23.2](onnxruntime/onnxruntime-win-x64-1.23.2)
-- 主要文档： [lightroom-clone-cpp/README.md](lightroom-clone-cpp/README.md), [lightroom-clone-cpp/docs/ARCHITECTURE.md](lightroom-clone-cpp/docs/ARCHITECTURE.md), [lightroom-clone-cpp/CLAUDE.md](lightroom-clone-cpp/CLAUDE.md)
+- 主要文档： [lightroom-clone-cpp/README.md](lightroom-clone-cpp/README.md), [lightroom-clone-cpp/docs/ARCHITECTURE.md](lightroom-clone-cpp/docs/ARCHITECTURE.md), [lightroom-clone-cpp/CLAUDE.md](lightroom-clone-cpp/CLAUDE.md), [lightroom-clone-cpp/STATUS.md](lightroom-clone-cpp/STATUS.md)
 
-## 2. 真实可用的构建与测试命令
+## 2. 确认进行中任务和状态
+
+每次开始工作前，先从实时状态判断任务是否仍在进行；不要仅凭历史里程碑文档推断当前状态：
+
+1. 执行 `git status --short --branch` 和 `git log -n 10 --date=iso --format="%h %ad %s"`，记录当前分支、未提交文件和最近提交。
+2. 检查 `lightroom-clone-cpp/docs/plans/` 中未归档的计划；其中标记为 completed 的计划不应当重新执行。
+3. 将 `lightroom-clone-cpp/docs/archive/` 视为历史证据，不把其中的 PHASE、M 里程碑或旧测试数字直接当作当前任务。
+4. 若 Git、构建/测试结果和文档冲突，以可复现的 Git 状态与实测结果为准，并在回复中明确冲突和日期。
+5. 在报告任务状态时区分 `已提交`、`工作区未提交`、`代码已落地但未验收`、`待实施`，不要把“有代码框架”写成“已完成”。
+
+当前核对快照（2026-09-05）：分支为 `main`，最近提交为 `cde52c6`（`v1.0.0`）；文档归档迁移在工作区存在未提交的删除/新增组合。当前没有可信的、未归档的进行中任务清单；性能 M1-M5 的实施规格显示部分代码已落地、部分验收仍待确认，四阶段加速报告显示代码层交付完成但部分基线性能数字尚未实测。开始新任务前必须重新执行上述检查，不能把本快照当作永久状态。
+
+状态参考： [lightroom-clone-cpp/STATUS.md](lightroom-clone-cpp/STATUS.md)、[lightroom-clone-cpp/docs/archive/perf-m1-m5-implementation-spec.md](lightroom-clone-cpp/docs/archive/perf-m1-m5-implementation-spec.md)、[lightroom-clone-cpp/docs/archive/Speedup_Four_Stages_Report.md](lightroom-clone-cpp/docs/archive/Speedup_Four_Stages_Report.md)、[lightroom-clone-cpp/docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md](lightroom-clone-cpp/docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md)。
+
+## 3. 真实可用的构建与测试命令
 
 在 PowerShell / cmd 下，先确保使用 x64 MSVC 环境：
 
@@ -34,7 +48,7 @@
   - `qt/6.8.3/msvc2022_64/bin/windeployqt.exe --release --no-translations --compiler-runtime build_gui/SilverHalide.exe`
   - `build_gui/SilverHalide.exe`
 
-## 3. 架构边界
+## 4. 架构边界
 
 - 引擎与目录层必须保持 Qt-free：
   - [lightroom-clone-cpp/src/engine](lightroom-clone-cpp/src/engine)
@@ -50,7 +64,7 @@
 - 新增功能若是展示层，优先放在 UI；若是处理 RAW/颜色/非破坏性编辑逻辑，应落到 engine/
 - 新增单测优先放到 [lightroom-clone-cpp/tests](lightroom-clone-cpp/tests) 并在 [lightroom-clone-cpp/tests/CMakeLists.txt](lightroom-clone-cpp/tests/CMakeLists.txt) 中注册
 
-## 4. 代码与构建约定
+## 5. 代码与构建约定
 
 - CMake 版本：3.25+
 - 标准：C++20，关闭扩展语言
@@ -63,21 +77,21 @@
   - `LRC_PROXY=https://ghfast.top/` 可用于国内镜像/代理场景
 - 本仓库对依赖的处理首选：已安装 package / vendored third_party / FetchContent；不要在不必要时改动依赖获取方式
 
-## 5. 重要坑位
+## 6. 重要坑位
 
 - 不要编辑生成目录中的源码或汇编产物；如 [build_gui](build_gui) 和 [build_headless](build_headless) 都是 CMake/Ninja 产物目录
 - 不要把打包路径指向 [lightroom-clone-cpp/build_gui](lightroom-clone-cpp/build_gui) 这类历史 VS 旧树
 - 若需要做发布打包，先遵循 [lightroom-clone-cpp/packaging/installer.nsi](lightroom-clone-cpp/packaging/installer.nsi) 的说明，并将发布文件暂存到 `build_gui/install_stage`
 - 代码改动应优先以 headless 构建和测试作为快速反馈，GUI 相关改动再补 GUI 构建或直接跑对应 exe
 
-## 6. 任务时的工作方式
+## 7. 任务时的工作方式
 
 - 先定位属于 engine / catalog / ui / tests 的对应目录，再动代码
 - 优先用最小、可验证的改动完成问题修复；不要为了“更通用”而扩散重构
 - 如果新增行为涉及图像处理或色彩管线，尽量补充 Catch2 测试，不要只修 UI 表现
 - 若修改构建或依赖，更新相关说明文档；本仓库的 README / CLAUDE / docs 已出现过时表述，写代码前先核对时效
 
-## 7. 注释规范（新增，强制遵守）
+## 8. 注释规范（新增，强制遵守）
 
 本仓库的注释需要同时满足“工程可读性”和“长期维护性”两个目标。所有新增或重写代码，必须遵循以下规则：
 

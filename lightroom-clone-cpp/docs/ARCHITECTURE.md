@@ -1,5 +1,7 @@
 # 架构文档
 
+> 当前任务状态入口：[竞品对齐优化实施规格](spec/competitive-optimization-implementation-spec.md)。该规格目前处于待实施状态；本文件描述稳定架构约束，不代表其中的 P1/P2/P3/T 功能已经完成。
+
 ## 1. 分层与依赖规则
 
 ```
@@ -147,6 +149,6 @@ lightroom-clone-cpp/
 ├── resources/styles/       # 暗色主题 QSS（dark.qss）
 ├── resources/icons/        # 应用/ exe 图标（make_icons.py 生成）
 ├── packaging/              # NSIS 安装脚本 installer.nsi + welcome.bmp/make_bmp.py
-├── docs/                   # 架构、XMP 映射、进行中里程碑状态；历史归档在 archive/
+├── docs/                   # 架构、XMP 映射、当前任务规格；历史归档在 archive/
 └── third_party/            # vendored 依赖（libraw/lcms2/sqlite3/Catch2/pugixml/stb）
 ```

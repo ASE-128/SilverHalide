@@ -4,7 +4,7 @@
 > Silver Halide（`lightroom-clone-cpp`）。它是 CLAUDE.md（构建/架构/编码约定）的**经验补充**——
 > 重点关注「踩过的坑」与「如何高效工作」，而非重复架构说明。
 >
-> 迁移配套文件：`docs/MIGRATION.md`（目标环境重建步骤）、`docs/plans/perf-m1-m5-plan.md`（进行中的性能优化计划）。
+> 迁移配套文件：`docs/archive/MIGRATION.md`（目标环境重建步骤）、`docs/spec/competitive-optimization-implementation-spec.md`（当前进行中的竞品优化任务）。
 
 ## 1. 项目快照（当前状态）
 
@@ -16,7 +16,7 @@
 | 测试基线 | headless + GUI 双端 **272 用例 / 274373 断言**全绿（AUDIT-2026-08-14 验收）；PHASE_1 降噪后为 **277 用例 / 274420 断言** |
 | 架构 | 三层：`engine/`（纯 C++ 无 Qt）+ `catalog/`（纯 C++）+ `ui/`（Qt6 Widgets），`utils/` 共享 |
 | 调整顺序 | 曝光 → 对比度 → 高光 → 阴影 → 白/黑 → 色调曲线 → 白平衡 → 去朦胧 → 鲜艳度 → HSL → 色调分离 → 点颜色 → 空间阶段（纹理/清晰度/锐化/畸变/颗粒/晕影/蒙版局部）→ sRGB |
-| 进行中工作 | **性能优化 M4/M5 未启动**（详见 §6），其余主线全部验收通过 |
+| 进行中工作 | **竞品对齐优化规格待实施**（详见 `docs/spec/competitive-optimization-implementation-spec.md`）；性能 M1-M5 为历史实施记录，部分量化验收仍需单独复核 |
 
 测试断言计数有两个口径：272 是 AUDIT 验收基线，277 是 PHASE_1 降噪（5 新用例）之后的数。写 STATUS.md 时以实际跑出的为准。
 
@@ -159,18 +159,14 @@ Ninja 构建用 `-j4`。`-j8` 内存不足会批量失败（GUI 目标含 Qt 链
 - 退出竞态：`stopWorkers` 先 `requestAbort` 再 `quit()+wait`，worker 加 `std::atomic` abort 标志，防 UAF。
 - 蒙版画笔权重场 COW 缓存（`Pipeline::brushWeightField`，键 geometryHash+w+h，~128MB LRU），拖局部滑块不重建。
 
-## 6. 进行中的工作：性能优化 M4 / M5（未启动）
+## 6. 当前任务：竞品对齐优化规格
 
-计划文件已随迁至 **`docs/plans/perf-m1-m5-plan.md`**（原 `~/.claude/plans/groovy-greeting-gem.md`）。
+当前任务文件为 **`docs/spec/competitive-optimization-implementation-spec.md`**。它定义 P1/P2/P3 三波优化和 T 技术债的实施路径、依赖关系及验收标准。
 
-- **已完成**：M1（引擎热路径分配消除，bit-exact）、M2（UI 节流 + 目录查询提速）、M3（胶片栏懒加载 + 增量更新）。
-  各自验收见 `docs/Speedup_M1/M2/M3_STATUS.md`。
-- **未启动**：M4（引擎进阶：清晰度降采样模糊、HSL bitset、SIMD 分批 Pass1，像素近似允许 Δ<0.008 / PSNR>40dB）、
-  M5（数据/IO：导出非缓存、缩略图 PPM→JPEG + 磁盘上限、导入 fullres 懒生成、ThumbnailCache 锁拆分、HDR 分块、
-  FolderMonitor 离主线程）。
-- **依赖链**：M4 在 M1 后（Pipeline.cpp 同文件）；M5-3/5-4 依赖 M5-2（ThumbnailCache 同文件）；M5-6 触碰
-  MainWindow.cpp 在 M3 后。
-- **并行纪律**：仓库非 git，并行按「一文件一写者」；批次内多写者并行、同文件串行，每批构建+测试验收后再进下一批。
+- **当前状态**：P1、P2、P3、T 尚未按该规格正式启动。现有 AI 天空蒙版、编辑历史、SIMD 条件编译等只能作为基础能力，不能替代规格中的完整实现和验收。
+- **首批范围**：P1-1 DirectML、P1-2 导出 ICC、P1-3 批量重命名；实施后必须补齐 headless/GUI 测试与性能或行为证据。
+- **后续批次**：P1-5 快照系统、P2 核心能力、P3 体验打磨和 T 技术债按规格中的依赖链推进。
+- **历史依据**：性能 M1-M5 实施规格和四阶段加速报告位于 `docs/archive/`，仅用于回溯，不作为当前进行中任务清单。
 
 ## 7. 工作方式偏好（原环境确认的协作纪律）
 
