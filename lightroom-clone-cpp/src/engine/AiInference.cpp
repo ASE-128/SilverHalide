@@ -36,8 +36,29 @@ namespace lrc {
 // ---------------------------------------------------------------------------
 namespace {
 
-inline void setError(std::string& slot, const std::string& msg) { slot = msg; }
-inline void clearError(std::string& slot) { slot.clear(); }
+// Thread-safe error state accessor for AiInferenceEngine.
+// All reads and writes to `lastError_` go through these helpers, which take the
+// DEDICATED error mutex `errMutex_` (never `mutex_`): run()/runImage() hold a
+// shared lock on `mutex_` for their whole body, so writing `lastError_` under
+// `mutex_` from inside them would self-deadlock. Using `errMutex_` both fixes
+// the original R-06 data race and avoids that deadlock.
+inline std::string getLastError(std::string& err,
+                                std::shared_mutex& mx) {
+    // `mx` must be non-const: std::shared_lock<std::shared_mutex> can only
+    // lock a mutable mutex (unlock_shared() is non-const). The mutex is held
+    // by member `errMutex_` here.
+    std::shared_lock lock(mx);
+    return err;
+}
+inline void setLastError(std::string& err, const std::string& msg,
+                         std::shared_mutex& mx) {
+    std::unique_lock lock(mx);
+    err = msg;
+}
+inline void clearLastError(std::string& err, std::shared_mutex& mx) {
+    std::unique_lock lock(mx);
+    err.clear();
+}
 
 // Bilinear-ish resize for float RGB buffers (simple area average for downscaling,
 // nearest otherwise).  Kept header-free; matches ImageBuffer::resize semantics
@@ -206,9 +227,9 @@ AiInferenceEngine::~AiInferenceEngine() = default;
 // loadModel
 // ---------------------------------------------------------------------------
 bool AiInferenceEngine::loadModel(const ModelInfo& info) {
-    clearError(lastError_);
+    clearLastError(lastError_, errMutex_);
     if (info.id.empty()) {
-        setError(lastError_, "loadModel: empty id");
+        setLastError(lastError_, "loadModel: empty id", errMutex_);
         return false;
     }
 
@@ -231,13 +252,13 @@ bool AiInferenceEngine::loadModel(const ModelInfo& info) {
     // --- Real-ONNX path: pre-warm a session for the calling thread ----------
 #if LRC_ENABLE_AI
     if (!impl_->env) {
-        setError(lastError_, "ONNX Runtime env not initialised");
+        setLastError(lastError_, "ONNX Runtime env not initialised", errMutex_);
         return false;
     }
     if (!std::filesystem::exists(info.onnxPath)) {
         std::ostringstream oss;
         oss << "ONNX file not found: " << info.onnxPath;
-        setError(lastError_, oss.str());
+        setLastError(lastError_, oss.str(), errMutex_);
         return false;
     }
     try {
@@ -259,13 +280,13 @@ bool AiInferenceEngine::loadModel(const ModelInfo& info) {
         impl_->sessions[std::this_thread::get_id()][info.id] = std::move(h);
         return true;
     } catch (const Ort::Exception& e) {
-        setError(lastError_, std::string("ONNX load error: ") + e.what());
+        setLastError(lastError_, std::string("ONNX load error: ") + e.what(), errMutex_);
         return false;
     }
 #else
-    setError(lastError_,
+    setLastError(lastError_,
              "LRC_ENABLE_AI=0: real ONNX models unavailable. "
-             "Rebuild with ONNX Runtime installed to use " + info.id);
+             "Rebuild with ONNX Runtime installed to use " + info.id, errMutex_);
     return false;
 #endif
 }
@@ -311,8 +332,7 @@ std::optional<ModelInfo> AiInferenceEngine::modelInfo(const std::string& modelId
 }
 
 std::string AiInferenceEngine::lastError() const {
-    std::shared_lock lock(mutex_);
-    return lastError_;
+    return getLastError(lastError_, errMutex_);
 }
 
 // ---------------------------------------------------------------------------
@@ -321,13 +341,13 @@ std::string AiInferenceEngine::lastError() const {
 std::vector<float> AiInferenceEngine::run(const std::string& modelId,
                                           const std::vector<float>& input,
                                           const std::vector<int64_t>& inputShape) {
-    clearError(lastError_);
+    clearLastError(lastError_, errMutex_);
 
     // 1. Look up model info ---------------------------------------------------
     std::shared_lock rlock(mutex_);
     auto infoIt = impl_->models.find(modelId);
     if (infoIt == impl_->models.end()) {
-        setError(lastError_, "run: model not loaded: " + modelId);
+        setLastError(lastError_, "run: model not loaded: " + modelId, errMutex_);
         return {};
     }
     const ModelInfo info = infoIt->second;
@@ -352,7 +372,7 @@ std::vector<float> AiInferenceEngine::run(const std::string& modelId,
             } else {
 #if LRC_ENABLE_AI
                 if (!impl_->env || !std::filesystem::exists(info.onnxPath)) {
-                    setError(lastError_, "run: lazy session init failed for " + modelId);
+                    setLastError(lastError_, "run: lazy session init failed for " + modelId, errMutex_);
                     return {};
                 }
                 try {
@@ -364,11 +384,11 @@ std::vector<float> AiInferenceEngine::run(const std::string& modelId,
                     h.session = std::move(s);
                     perModel[modelId] = std::move(h);
                 } catch (const Ort::Exception& e) {
-                    setError(lastError_, std::string("ONNX lazy-load: ") + e.what());
+                    setLastError(lastError_, std::string("ONNX lazy-load: ") + e.what(), errMutex_);
                     return {};
                 }
 #else
-                setError(lastError_, "run: LRC_ENABLE_AI=0, cannot run " + modelId);
+                setLastError(lastError_, "run: LRC_ENABLE_AI=0, cannot run " + modelId, errMutex_);
                 return {};
 #endif
             }
@@ -403,7 +423,7 @@ std::vector<float> AiInferenceEngine::run(const std::string& modelId,
             std::ostringstream oss;
             oss << "input size mismatch: expected " << expectedElems
                 << " got " << input.size();
-            setError(lastError_, oss.str());
+            setLastError(lastError_, oss.str(), errMutex_);
             return {};
         }
 
@@ -418,13 +438,13 @@ std::vector<float> AiInferenceEngine::run(const std::string& modelId,
             outputNames, 1);
 
         if (outputTensors.empty()) {
-            setError(lastError_, "ONNX run: no outputs");
+            setLastError(lastError_, "ONNX run: no outputs", errMutex_);
             return {};
         }
 
         Ort::Value& outVal = outputTensors.front();
         if (!outVal.IsTensor()) {
-            setError(lastError_, "ONNX run: output is not a tensor");
+            setLastError(lastError_, "ONNX run: output is not a tensor", errMutex_);
             return {};
         }
         auto outShapeInfo = outVal.GetTensorTypeAndShapeInfo();
@@ -432,11 +452,11 @@ std::vector<float> AiInferenceEngine::run(const std::string& modelId,
         const float* outRaw = outVal.GetTensorData<float>();
         return std::vector<float>(outRaw, outRaw + n);
     } catch (const Ort::Exception& e) {
-        setError(lastError_, std::string("ONNX run: ") + e.what());
+        setLastError(lastError_, std::string("ONNX run: ") + e.what(), errMutex_);
         return {};
     }
 #else
-    setError(lastError_, "run: LRC_ENABLE_AI=0 — stubs cannot run real models");
+    setLastError(lastError_, "run: LRC_ENABLE_AI=0 — stubs cannot run real models", errMutex_);
     return {};
 #endif
 }
@@ -451,7 +471,7 @@ ImageBufferPtr AiInferenceEngine::runImage(const std::string& modelId,
     std::shared_lock rlock(mutex_);
     auto infoIt = impl_->models.find(modelId);
     if (infoIt == impl_->models.end()) {
-        setError(lastError_, "runImage: model not loaded: " + modelId);
+        setLastError(lastError_, "runImage: model not loaded: " + modelId, errMutex_);
         return nullptr;
     }
     ModelInfo info = infoIt->second;

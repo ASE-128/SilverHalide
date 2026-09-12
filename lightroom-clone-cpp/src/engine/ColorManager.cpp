@@ -175,6 +175,43 @@ std::vector<uint8_t> ColorManager::exportProfileBytes(
     return bytes;
 }
 
+ImageBufferPtr ColorManager::sRGBEncodedToProfile(
+    const ImageBuffer& enc, const std::vector<uint8_t>& iccBytes) const {
+    // Fallback used when no transform can run: hand back a copy of the input so
+    // the caller never pairs wrong pixels against a missing/broken ICC label.
+    auto clone = [&enc]() {
+        auto c =
+            ImageBuffer::create(enc.width(), enc.height(), enc.format());
+        c->data() = enc.data();
+        return c;
+    };
+
+    // sRGB source profile always exists (built in the constructor).
+    if (iccBytes.empty() || !srgb_)
+        return clone();
+
+    cmsHPROFILE dst = cmsOpenProfileFromMem(
+        iccBytes.data(), static_cast<cmsUInt32Number>(iccBytes.size()));
+    if (!dst)
+        return clone();
+
+    const bool is16 = (enc.format() == PixelFormat::U16);
+    const cmsUInt32Number fmt = is16 ? TYPE_RGB_16 : TYPE_RGB_8;
+    cmsHTRANSFORM t = cmsCreateTransform(
+        srgb_, fmt, dst, fmt, INTENT_RELATIVE_COLORIMETRIC,
+        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE);
+    cmsCloseProfile(dst);
+    if (!t)
+        return clone();
+
+    auto out = ImageBuffer::create(enc.width(), enc.height(), enc.format());
+    const cmsUInt32Number pixels = static_cast<cmsUInt32Number>(
+        static_cast<size_t>(enc.width()) * static_cast<size_t>(enc.height()));
+    cmsDoTransform(t, enc.data().data(), out->data().data(), pixels);
+    cmsDeleteTransform(t);
+    return out;
+}
+
 void ColorManager::linearProPhotoToSRGB(const float* src, float* dst,
                                         size_t pixelCount) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
@@ -195,6 +232,51 @@ ImageBufferPtr ColorManager::srgbToLinearProPhoto(
     std::shared_lock<std::shared_mutex> lock(mutex_);
     cmsDoTransform(srgbToLinear_, srgbU8.data().data(), out->data().data(),
                    pixelCount);
+    return out;
+}
+
+ImageBufferPtr ColorManager::sourceToLinearProPhoto(
+    const ImageBuffer& src, const std::vector<uint8_t>& iccBytes) const {
+    if (src.empty() ||
+        (src.format() != PixelFormat::U8 && src.format() != PixelFormat::U16))
+        return ImageBuffer::create(0, 0, PixelFormat::F32);
+
+    // Source colour space: the embedded ICC when present, else a documented
+    // sRGB fallback so ICC-less files behave exactly as before (R-08).
+    cmsHPROFILE source = nullptr;
+    if (!iccBytes.empty())
+        source = cmsOpenProfileFromMem(iccBytes.data(),
+                                       static_cast<cmsUInt32Number>(
+                                           iccBytes.size()));
+    if (!source)
+        source = cmsCreate_sRGBProfile();
+
+    const cmsUInt32Number inType =
+        (src.format() == PixelFormat::U16) ? TYPE_RGB_16 : TYPE_RGB_8;
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    // prophoto_ is immutable after construction; a per-call transform is cheap
+    // for import-sized images (profiles are small, recreate per invocation and
+    // cache nothing).
+    cmsHTRANSFORM tr = cmsCreateTransform(
+        source, inType, prophoto_, TYPE_RGB_FLT, INTENT_PERCEPTUAL,
+        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE);
+
+    ImageBufferPtr out;
+    if (tr) {
+        out = ImageBuffer::create(src.width(), src.height(), PixelFormat::F32);
+        const size_t pixelCount =
+            static_cast<size_t>(src.width()) * src.height();
+        // 16-bit input is converted directly (TYPE_RGB_16), never truncated to
+        // 8 bits first, so the extra precision survives the colour transform
+        // (R-09).
+        cmsDoTransform(tr, src.data().data(), out->data().data(),
+                       static_cast<cmsUInt32Number>(pixelCount));
+        cmsDeleteTransform(tr);
+    }
+    cmsCloseProfile(source);  // sRGB fallback and mem-opened profiles both free here.
+
+    if (!out)
+        return ImageBuffer::create(0, 0, PixelFormat::F32);
     return out;
 }
 

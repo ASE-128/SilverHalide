@@ -44,8 +44,10 @@ public:
                          const ImageBuffer& rgbU8);
     // Writes a 16-bit RGB buffer as a *linear* DNG (demosaiced RGB, DNG tags,
     // photometric RGB + LinearRaw). Round-trips through RawDecoder.
+    // `icc` embeds an optional ICC profile (tag 34675 InterColorProfile).
     static bool writeDng(const std::filesystem::path& path,
-                         const ImageBuffer& rgbU16);
+                         const ImageBuffer& rgbU16,
+                         const std::vector<uint8_t>& icc = {});
 
     // --- decoding ----------------------------------------------------------
     // Loads PNG / JPEG / TIFF / BMP into a display-ready 8-bit sRGB buffer
@@ -59,6 +61,26 @@ public:
     // Loads PNG/JPEG/BMP from memory into a display-ready 8-bit sRGB buffer.
     // Returns an empty buffer on failure. (in-memory decode)
     static ImageBufferPtr loadImage(const uint8_t* data, size_t size);
+
+    // A decoded source (import) image: native-depth pixels plus the embedded
+    // source ICC, so the import path converts from the true source colour space
+    // and bit depth instead of assuming sRGB (R-08/R-09).
+    struct SourceImage {
+        ImageBufferPtr pixels;     // U8 or U16 (16-bit is not truncated)
+        std::vector<uint8_t> icc;  // embedded ICC profile bytes; empty if none
+    };
+
+    // Loads JPEG/PNG/TIFF preserving native bit depth and extracts the embedded
+    // ICC profile (JPEG APP2 / PNG iCCP / TIFF tag 34675). Returns a SourceImage
+    // with empty `pixels` on failure. `loadImage` above remains the display-ready
+    // sRGB fast path used by cached-preview loading; use this for importing
+    // files into the editing pipeline. Not applicable to RAW (libraw path).
+    static SourceImage loadSourceImage(const std::filesystem::path& path);
+    // Same as loadSourceImage but decodes an in-memory byte buffer (R-11), so
+    // memory-based import paths restore the source ICC and bit depth exactly as
+    // the file-path API does (avoiding sRGB-assumption for wide-gamut bytes).
+    static SourceImage loadSourceImageFromMemory(const uint8_t* data,
+                                                 size_t size);
 };
 
 } // namespace lrc

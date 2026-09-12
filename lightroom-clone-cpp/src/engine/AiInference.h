@@ -173,6 +173,11 @@ private:
     std::unique_ptr<Impl> impl_;
 
     mutable std::shared_mutex mutex_;
+    // R-06: dedicated mutex for the error state. Reads/writes to `lastError_`
+    // are guarded by this mutex instead of `mutex_`, because run()/runImage()
+    // hold a *shared* lock on `mutex_` for the whole inference body and must
+    // never try to upgrade to a write on it (that would self-deadlock).
+    mutable std::shared_mutex errMutex_;
     mutable std::string lastError_;
 };
 

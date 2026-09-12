@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -856,6 +857,36 @@ TEST_CASE("Catalog: edit history is variant-scoped", "[catalog]") {
     REQUIRE(db.listEditHistory(id, 0).size() == 1);
 }
 
+TEST_CASE("Catalog: named snapshots survive createVirtualCopy", "[catalog]") {
+    // R-13 regression: createVirtualCopy() must copy the snapshot `name`
+    // column. Before the fix only image_id/adjustment_json/created_at were
+    // copied, so named snapshots silently became unlabelled history entries.
+    const auto path = makeTempDb();
+    CatalogDatabase db(path);
+    REQUIRE(db.open());
+    const int64_t id = db.addImage("/photos/named_snap.arw", "");
+
+    Adjustments a;
+    a.exposure = 0.75;
+    // Master has one *named* snapshot plus one unlabelled auto-history entry.
+    const int64_t namedId = db.saveEditSnapshot(id, a, 0, "Golden Hour");
+    const bool savedAuto = db.saveAdjustments(id, a);
+    REQUIRE(namedId > 0);
+    REQUIRE(savedAuto);
+
+    const int v1 = db.createVirtualCopy(id);
+
+    const auto copyHist = db.listEditHistory(id, v1);
+    REQUIRE(copyHist.size() == 2);
+    // The named master snapshot must carry its label into the copy.
+    bool foundNamed = false;
+    for (const auto& s : copyHist) {
+        if (s.name == "Golden Hour")
+            foundNamed = true;
+    }
+    REQUIRE(foundNamed);
+}
+
 TEST_CASE("Catalog: virtual copies survive a reopen", "[catalog]") {
     const auto path = makeTempDb();
     {
@@ -1203,4 +1234,87 @@ TEST_CASE("FolderMonitor: isImportableFile accepts the export formats",
         std::filesystem::path("photo.arw")));
     REQUIRE_FALSE(lrc::FolderMonitor::isImportableFile(
         std::filesystem::path("notes.txt")));
+}
+
+TEST_CASE("FolderMonitor: poll reports add/modify and defers removals",
+          "[catalog]") {
+    // Unique temp folder so parallel test runs never collide.
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("lrc_fmon_" + std::to_string(static_cast<unsigned long>(
+                         std::chrono::system_clock::now()
+                             .time_since_epoch()
+                             .count())));
+    std::filesystem::create_directories(dir);
+    const auto fileA = dir / "a.jpg";
+    const auto fileB = dir / "b.jpg";
+
+    std::vector<std::filesystem::path> added, modified, removed;
+    lrc::FolderMonitor fmon(dir);
+    fmon.setCallback([&](const auto& ad, const auto& md, const auto& rm) {
+        added = ad;
+        modified = md;
+        removed = rm;
+    });
+
+    // Baseline: only a.jpg present.
+    {
+        std::ofstream f(fileA, std::ios::binary);
+        f.write("short", 5);
+    }
+    fmon.start();
+
+    // Add b.jpg -> reported as added.
+    {
+        std::ofstream f(fileB, std::ios::binary);
+        f.write("another", 7);
+    }
+    fmon.poll();
+    REQUIRE(added.size() == 1);
+    REQUIRE(added[0] == fileB);
+    REQUIRE(modified.empty());
+    REQUIRE(removed.empty());
+
+    // Overwrite a.jpg with a different length -> modified (R-14).
+    added.clear();
+    {
+        std::ofstream f(fileA, std::ios::binary);
+        f.write("much longer content!!", 21);
+    }
+    fmon.poll();
+    REQUIRE(modified.size() == 1);
+    REQUIRE(modified[0] == fileA);
+    REQUIRE(added.empty());
+    REQUIRE(removed.empty());
+
+    // Delete b.jpg -> first missing poll only starts the offline counter (R-15).
+    added.clear();
+    modified.clear();
+    std::filesystem::remove(fileB);
+    fmon.poll();
+    REQUIRE(removed.empty());
+    // Second consecutive missing poll -> real removal.
+    fmon.poll();
+    REQUIRE(removed.size() == 1);
+    REQUIRE(removed[0] == fileB);
+
+    // Folder becomes unavailable -> nothing is removed even across polls (R-15).
+    removed.clear();
+    std::error_code ec;
+    // Offline target must be a *sibling*; a directory cannot be renamed into
+    // its own subtree.
+    const auto renamed = dir.string() + "_offline";
+    std::filesystem::rename(dir, renamed, ec);  // move the watched dir away
+    REQUIRE_FALSE(ec);
+    fmon.poll();
+    fmon.poll();
+    REQUIRE(removed.empty());
+    // Restore the folder and confirm a.jpg is still tracked, never removed.
+    ec.clear();
+    std::filesystem::rename(renamed, dir, ec);
+    REQUIRE_FALSE(ec);
+    fmon.poll();
+    REQUIRE(removed.empty());
+
+    ec.clear();
+    std::filesystem::remove_all(dir, ec);
 }

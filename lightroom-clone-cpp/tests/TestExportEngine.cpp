@@ -327,6 +327,33 @@ TEST_CASE("ExportEngine: DNG export carries the DNGVersion tag", "[export]") {
     std::filesystem::remove(outPath, ec);
 }
 
+TEST_CASE("ExportEngine: DNG never embeds a display ICC profile", "[export][p1]") {
+    // R-07 regression: a linear DNG carries linear ProPhoto working-space data
+    // that is NOT converted into any display space. Embedding a display ICC
+    // (here Adobe RGB) would mislabel those pixels, so the engine must drop the
+    // choice even when the spec requests one. The dialog disables ICC for DNG;
+    // this asserts the engine honours that contract (InterColorProfile = 34675
+    // must be absent from the IFD).
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+    ExportEngine exporter(cm, pipeline);
+
+    ExportEngine::ExportSpec spec;
+    spec.icc = ExportEngine::ExportSpec::IccChoice::AdobeRGB;
+
+    const auto outPath =
+        std::filesystem::temp_directory_path() / "lrc_test_dng_noicc.dng";
+    REQUIRE(exporter.exportDng(outPath, 5, *makeLinearGradient(32, 16),
+                               Adjustments::defaults(), spec));
+    const auto bytes = readBytes(outPath);
+    const auto ifd = parseTiffIfd(bytes);
+    REQUIRE(ifd.count(34675) == 0);
+    // The DNG itself is still valid (Photometric = RGB, strips present).
+    REQUIRE(ifd.count(262) == 1);
+    REQUIRE(ifd.at(262) == 2);
+    std::error_code ec;
+    std::filesystem::remove(outPath, ec);
+}
 TEST_CASE("ImageIO: loadImage decodes a written PNG back", "[export][io]") {
     auto buf = ImageBuffer::create(8, 8, PixelFormat::U8);
     for (int y = 0; y < 8; ++y)

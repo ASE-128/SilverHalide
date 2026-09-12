@@ -242,7 +242,7 @@ ThumbnailCache::renderStandardPreviewBlob(
         return std::nullopt;
 
     auto blob = encodeStandardPreview(*built.buf, built.nativeWidth,
-                                       built.nativeHeight);
+                                       built.nativeHeight, built.sourceColor);
     if (blob.empty())
         return std::nullopt;
 

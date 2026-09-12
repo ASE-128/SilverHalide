@@ -243,7 +243,47 @@ TEST_CASE("Masks and color targets round-trip through ProfileIO JSON",
     REQUIRE(a.hash() == b.hash());
 }
 
-// --- Colour-range (HSL) masks ---
+TEST_CASE("AiMask: full parameter round-trip through ProfileIO JSON",
+          "[mask][ai][profile][ai_masks]") {
+    // R-12 regression: an AI mask (type AiMask / value 5) must survive a
+    // toJson->fromJson round-trip unchanged, including every non-default
+    // parameter. Before the fix the type was clamped to ColorRange and the
+    // AI params were silently dropped.
+    Adjustments a;
+    Mask m;
+    m.type = MaskType::AiMask;
+    m.ai.target = AiMaskTarget::Sky;
+    m.ai.threshold = 0.7f;
+    m.ai.feather = 0.2f;
+    m.ai.invert = true;
+    m.ai.modelInputSize = 640;
+    m.ai.cachedWeightVersion = 3;
+    m.ai.modelIdOverride = "builtin://sky-override";
+    m.opacity = 0.85;
+    m.exposure = 0.4;
+    a.masks.push_back(m);
+
+    // An unrelated mask alongside must be left untouched by the aiMasks pass.
+    Mask grad;
+    grad.type = MaskType::LinearGradient;
+    grad.linear.startX = 0.1f;
+    grad.linear.startY = 0.2f;
+    grad.linear.endX = 0.9f;
+    grad.linear.endY = 0.8f;
+    grad.linear.feather = 0.3f;
+    a.masks.push_back(grad);
+
+    const auto json = ProfileIO::toJson(a);
+    const Adjustments b = ProfileIO::fromJson(json);
+    REQUIRE(a == b);
+    REQUIRE(a.hash() == b.hash());
+
+    // Explicitly confirm the persisted type is still AiMask (not downgraded).
+    REQUIRE(b.masks[0].type == MaskType::AiMask);
+    REQUIRE(b.masks[0].ai.target == AiMaskTarget::Sky);
+    REQUIRE(b.masks[0].ai.modelIdOverride == "builtin://sky-override");
+    REQUIRE(b.masks[1].type == MaskType::LinearGradient);
+}
 
 TEST_CASE("ColorRange: reference colour scores ~1, inverse colour ~0",
           "[mask][colorrange]") {
@@ -360,12 +400,14 @@ TEST_CASE("ColorRange: full-field ProfileIO JSON round-trip",
     REQUIRE(a.hash() == b.hash());
 }
 
-TEST_CASE("ColorRange: fromJson clamps an out-of-range type to ColorRange",
-          "[mask][colorrange][profile]") {
+TEST_CASE("ColorRange: fromJson clamps an out-of-range type to AiMask",
+          "[mask][colorrange][ai][profile]") {
     json::Value root = json::Value::object();
     json::Value masks = json::Value::array();
     json::Value mo = json::Value::object();
-    mo["type"] = 5;  // 越界类型, 应被钳制为 ColorRange.
+    // PHASE_13 / R-12: an out-of-range type clamps to the new ceiling
+    // AiMask, never to ColorRange, so real AiMasks survive a round-trip.
+    mo["type"] = 999;
     mo["hasReference"] = true;
     mo["refR"] = 0.6;
     mo["refG"] = 0.3;
@@ -376,9 +418,7 @@ TEST_CASE("ColorRange: fromJson clamps an out-of-range type to ColorRange",
 
     const Adjustments a = ProfileIO::fromJson(root);
     REQUIRE(a.masks.size() == 1);
-    REQUIRE(a.masks[0].type == MaskType::ColorRange);
-    REQUIRE(a.masks[0].color.hasReference);
-    REQUIRE(a.masks[0].color.refR == Approx(0.6f));
+    REQUIRE(a.masks[0].type == MaskType::AiMask);
 }
 
 TEST_CASE("ColorRange: geometryHash covers the reference but not exposure",

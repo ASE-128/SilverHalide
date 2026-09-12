@@ -44,6 +44,19 @@ public:
     // non-destructive pipeline can edit them like raw files.
     ImageBufferPtr srgbToLinearProPhoto(const ImageBuffer& srgbU8) const;
 
+    // Converts a source (non-RAW) image into the linear ProPhoto F32 working
+    // space, honouring the source bit depth and its embedded ICC profile.
+    //
+    // `src` must be U8 or U16 (native depth; 16-bit sources are not truncated
+    // before the transform, see R-09). `iccBytes` is the byte-serialized source
+    // colour profile embedded in the file (JPEG APP2 / PNG iCCP / TIFF 34675);
+    // when empty the source is assumed to be sRGB (the documented fallback, so
+    // ICC-less files keep the historical behaviour). The transform runs through
+    // lcms so a wide-gamut source is interpreted in its true space, not sRGB
+    // (R-08).
+    ImageBufferPtr sourceToLinearProPhoto(
+        const ImageBuffer& src, const std::vector<uint8_t>& iccBytes) const;
+
     // Converts a libraw output_color=4 (linear ProPhoto, D65 white point) U16
     // buffer into the working linear ProPhoto (D50) U16 buffer. libraw's
     // ProPhoto uses the same ProPhoto primaries but a D65/equal-energy white
@@ -73,6 +86,23 @@ public:
      * or serialization failure.
      */
     static std::vector<uint8_t> exportProfileBytes(ExportColorProfile profile);
+
+    /**
+     * @brief Converts an sRGB-encoded buffer into the colour space of an ICC.
+     *
+     * Input `enc` must be display-ready sRGB-encoded pixels (U8 or U16). The
+     * target is `iccBytes`, the exact profile bytes the caller will embed; the
+     * transform runs through lcms (relative-colorimetric) so the exported
+     * pixels and their embedded ICC tag describe the same colour space (R-03).
+     * When `iccBytes` is empty or the target profile/transform cannot be built
+     * the input is returned unchanged, so the caller never pairs converted
+     * pixels against a missing label.
+     *
+     * @return A new buffer with the same format and dimensions as `enc`,
+     *         encoded in the target ICC space (or input if no transform ran).
+     */
+    ImageBufferPtr sRGBEncodedToProfile(
+        const ImageBuffer& enc, const std::vector<uint8_t>& iccBytes) const;
 
     // Combined 3x3 matrix mapping camera-linear RGB (libraw cam_xyz output,
     // D65-relative) into linear ProPhoto RGB. Row-major.

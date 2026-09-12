@@ -85,6 +85,21 @@ PreviewWorker::PreviewWorker(lrc::RawDecoder& decoder,
 
 PreviewWorker::~PreviewWorker() = default;
 
+void PreviewWorker::setDcpProfile(const QString& path) {
+    // Store the parsed profile on the worker thread. An empty path (or a file
+    // that no longer reads as a DCP) clears the selection, restoring libraw's
+    // built-in camera matrix on the next decode.
+    if (path.isEmpty()) {
+        dcp_.reset();
+        return;
+    }
+    auto profile = lrc::DcpProfileReader::read(toStdPath(path));
+    if (!profile)
+        dcp_.reset();
+    else
+        dcp_ = std::move(profile);
+}
+
 void PreviewWorker::loadImage(qint64 imageId, const QString& filePath,
                               qint64 generation,
                               const lrc::Adjustments& adjustments) {
@@ -102,11 +117,27 @@ void PreviewWorker::loadImage(qint64 imageId, const QString& filePath,
     // blobs (native==0) we fall back to a 2x estimate so the spatial-kernel
     // sigma scaling stays conservative (slightly larger kernels are safe; too
     // small would under-sharpen).
-    if (!viewportSize_.isEmpty() && catalog_.hasStandardPreview(imageId)) {
+    if (!dcp_ && !viewportSize_.isEmpty() && catalog_.hasStandardPreview(imageId)) {
         if (auto sp = catalog_.getStandardPreviewWithMeta(imageId)) {
             if (sp->buf && !sp->buf->empty()) {
                 linear_ = sp->buf;
                 loadedImageId_ = imageId;
+                // R-02: the standard-preview fast path uses import-time linear
+                // data and normally never reaches a RAW decode, so the camera
+                // metadata signal that drives DCP/Lensfun auto-matching would
+                // never fire. Read the metadata from the source file (no raw
+                // demosaic) and emit it so the UI stays in sync even when the
+                // preview is served from the catalog cache.
+                if (auto meta = decoder_.readMeta(toStdPath(filePath))) {
+                    if (generation == latestGeneration_)
+                        emit cameraMeta(
+                            imageId, QString::fromStdString(meta->make),
+                            QString::fromStdString(meta->model),
+                            QString::fromStdString(meta->lensMaker),
+                            QString::fromStdString(meta->lensModel),
+                            meta->focalLengthMm, meta->aperture,
+                            meta->cropFactor);
+                }
                 if (sp->nativeWidth > 0 && sp->nativeHeight > 0) {
                     fullLongEdge_ = std::max(sp->nativeWidth,
                                              sp->nativeHeight);
@@ -669,7 +700,8 @@ void PreviewWorker::exportImage(qint64 imageId, const QString& filePath,
     if (abort_.load())
         return;  // 已请求取消 (abort requested).
     lrc::DecodeParams params; // full resolution
-    auto decoded = decoder_.decode(toStdPath(filePath), params);
+    auto decoded = decoder_.decode(toStdPath(filePath), params,
+                                   dcp_ ? &*dcp_ : nullptr);
     if (!decoded) {
         emit exportFinished(false, tr("无法解码原始文件: %1").arg(filePath));
         return;

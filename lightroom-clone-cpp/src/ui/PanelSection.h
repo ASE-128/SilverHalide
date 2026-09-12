@@ -22,6 +22,7 @@ public:
     void addLayout(QLayout* layout);
 
     QVBoxLayout* bodyLayout() const { return bodyLayout_; }
+    QString title() const { return title_; }
 
     bool isExpanded() const;
     void setExpanded(bool expanded);

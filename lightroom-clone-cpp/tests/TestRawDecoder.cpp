@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "engine/ColorManager.h"
+#include "engine/DcpProfile.h"
 #include "engine/ImageFormats.h"
 #include "engine/ImageBuffer.h"
 #include "engine/ImageIO.h"
@@ -221,12 +223,23 @@ std::filesystem::path writeMinimalDNG(const uint8_t pattern[4],
     put32(0); // no next IFD
     os.write(reinterpret_cast<const char*>(extra.data()),
              static_cast<std::streamsize>(extra.size()));
-    // Pixel data: vertical gradient (bright at top, dark at bottom).
+    // Pixel data: vertical gradient (bright at top, dark at bottom). Each CFA
+    // cell is scaled by its colour so the frame carries chroma; a neutral gray
+    // field would be mapped to (1,1,1) by every row-normalised matrix and hide
+    // colour-matrix changes in the DCP test below.
     for (int y = 0; y < kHeight; ++y) {
-        const uint16_t v = static_cast<uint16_t>(kWhite * (kHeight - 1 - y) /
-                                                 (kHeight - 1));
-        for (int x = 0; x < kWidth; ++x)
-            put16(v);
+        const uint16_t base =
+            static_cast<uint16_t>(kWhite * (kHeight - 1 - y) /
+                                  (kHeight - 1));
+        for (int x = 0; x < kWidth; ++x) {
+            const uint8_t code = pattern[(y & 1) * 2 + (x & 1)];
+            uint16_t cell = base;
+            if (code == 1)             // green
+                cell = static_cast<uint16_t>(base * 0.75f);
+            else if (code == 2)        // blue
+                cell = static_cast<uint16_t>(base * 0.5f);
+            put16(cell);
+        }
     }
     os.close();
     return os ? std::filesystem::temp_directory_path() / outName
@@ -411,6 +424,48 @@ TEST_CASE("RawDecoder: rejects garbage non-RAW input", "[raw][io]") {
     std::filesystem::remove(path, ec);
 }
 
+TEST_CASE("RawDecoder: a selected DCP colour matrix changes the decode",
+          "[raw][dcp]") {
+    // R-01 regression: passing a DCP profile to decode() must re-target libraw's
+    // camera matrix (rgb_cam) so the rendered colour differs from the built-in
+    // matrix. A no-op here would mean DCP selection has no effect on the image.
+    const uint8_t pattern[4] = {0, 1, 1, 2};
+    const auto path = writeMinimalDNG(pattern, "lrc_test_dcp.dng");
+    REQUIRE_FALSE(path.empty());
+    REQUIRE(std::filesystem::exists(path));
+
+    RawDecoder decoder;
+    auto base = decoder.decode(path, {});
+    REQUIRE(base.has_value());
+
+    // A deliberately non-identity DCP camera->XYZ matrix: each output row mixes
+    // the camera channels differently than libraw's built-in Sony matrix.
+    lrc::DcpProfile dcp;
+    dcp.hasColorMatrix1 = true;
+    dcp.colorMatrix1 = {0.10f, 0.30f, 0.60f,  //
+                        0.30f, 0.60f, 0.10f,  //
+                        0.60f, 0.10f, 0.30f};
+
+    auto withDcp = decoder.decode(path, {}, &dcp);
+    REQUIRE(withDcp.has_value());
+
+    // The injection must change actual pixel values, not be a silent no-op. The
+    // two matrices diverge most where the fixture carries chroma and signal;
+    // sum absolute channel deltas across the frame so the check is robust to
+    // clipped extremes in the bright rows.
+    const auto& a = *base->linear;
+    const auto& b = *withDcp->linear;
+    double totalDiff = 0.0;
+    for (int y = 0; y < a.height(); ++y)
+        for (int x = 0; x < a.width(); ++x)
+            for (int c = 0; c < 3; ++c)
+                totalDiff += std::fabs(a.pixel(x, y, c) - b.pixel(x, y, c));
+    REQUIRE(totalDiff > 1.0);
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
 TEST_CASE("ImageFormats: raw vs importable extension classification",
           "[raw][formats]") {
     // RAW only.
@@ -434,4 +489,98 @@ TEST_CASE("ImageFormats: raw vs importable extension classification",
     REQUIRE(RawDecoder::isSupported(std::filesystem::path("photo.png")));
     REQUIRE(RawDecoder::isSupported(std::filesystem::path("photo.tif")));
     REQUIRE_FALSE(RawDecoder::isSupported(std::filesystem::path("notes.txt")));
+}
+
+TEST_CASE("RawDecoder: 16-bit TIFF bit depth survives the import (R-09)",
+          "[raw][io]") {
+    auto cm = std::make_shared<ColorManager>();
+    RawDecoder decoder;
+    decoder.setColorManager(cm);
+
+    // Two source values that only differ in the low 16 bits: 256 and 257 both
+    // round to the same 8-bit value (1), so the old "truncate to U8 first" path
+    // produced identical output for both. A correct 16-bit preserve keeps them
+    // distinct after conversion to the F32 working space.
+    auto u16 = ImageBuffer::create(2, 1, PixelFormat::U16);
+    auto* d = reinterpret_cast<uint16_t*>(u16->data().data());
+    d[0] = 256; d[1] = 0;   d[2] = 0;   // pixel 0: red = 256
+    d[3] = 257; d[4] = 0;   d[5] = 0;   // pixel 1: red = 257
+
+    const auto tif = std::filesystem::temp_directory_path() / "lrc_depth.tif";
+    REQUIRE(ImageIO::writeTiff(tif, *u16));
+    auto dec = decoder.decode(tif, {});
+    std::error_code ec;
+    std::filesystem::remove(tif, ec);
+    REQUIRE(dec.has_value());
+    REQUIRE(dec->linear->format() == PixelFormat::F32);
+    const float red256 = dec->linear->pixel(0, 0, 0);
+    const float red257 = dec->linear->pixel(1, 0, 0);
+    // The 16-bit distinction is tiny at this dark level (~1e-6), but the old
+    // "truncate to U8 first" path made the two pixels EXACTLY equal; any
+    // non-zero separation proves the depth survived the colour transform.
+    REQUIRE(std::fabs(red256 - red257) > 1e-7f);
+}
+
+TEST_CASE("RawDecoder: embedded ICC drives the non-RAW conversion (R-08, JPEG)",
+          "[raw][io]") {
+    auto cm = std::make_shared<ColorManager>();
+    RawDecoder decoder;
+    decoder.setColorManager(cm);
+
+    // Same saturated red pixels, only the embedded profile differs. The old path
+    // always treated the source as sRGB, so both decoded identically; honouring
+    // a wide-gamut profile (Adobe RGB) must change the result.
+    const auto adobe =
+        ColorManager::exportProfileBytes(ColorManager::ExportColorProfile::AdobeRGB);
+    const auto srgbProf =
+        ColorManager::exportProfileBytes(ColorManager::ExportColorProfile::SRGB);
+    REQUIRE_FALSE(adobe.empty());
+    REQUIRE_FALSE(srgbProf.empty());
+
+    const auto src = makeSolidU8(8, 4, 1.0f, 0.0f, 0.0f);
+    const auto jpgAdobe =
+        std::filesystem::temp_directory_path() / "lrc_cc_adobe.jpg";
+    const auto jpgSrgb =
+        std::filesystem::temp_directory_path() / "lrc_cc_srgb.jpg";
+    REQUIRE(ImageIO::writeJpeg(jpgAdobe, *src, 90, adobe));
+    REQUIRE(ImageIO::writeJpeg(jpgSrgb, *src, 90, srgbProf));
+
+    auto dAdobe = decoder.decode(jpgAdobe, {});
+    auto dSrgb = decoder.decode(jpgSrgb, {});
+    std::error_code ec;
+    std::filesystem::remove(jpgAdobe, ec);
+    std::filesystem::remove(jpgSrgb, ec);
+    REQUIRE(dAdobe.has_value());
+    REQUIRE(dSrgb.has_value());
+    REQUIRE(std::fabs(dAdobe->linear->pixel(0, 0, 0) -
+                      dSrgb->linear->pixel(0, 0, 0)) > 0.02f);
+}
+
+TEST_CASE("RawDecoder: PNG iCCP profile is honoured (R-08)", "[raw][io]") {
+    auto cm = std::make_shared<ColorManager>();
+    RawDecoder decoder;
+    decoder.setColorManager(cm);
+
+    const auto adobe =
+        ColorManager::exportProfileBytes(ColorManager::ExportColorProfile::AdobeRGB);
+    const auto srgbProf =
+        ColorManager::exportProfileBytes(ColorManager::ExportColorProfile::SRGB);
+    const auto src = makeSolidU8(8, 4, 1.0f, 0.0f, 0.0f);
+
+    const auto pngAdobe =
+        std::filesystem::temp_directory_path() / "lrc_cc_adobe.png";
+    const auto pngSrgb =
+        std::filesystem::temp_directory_path() / "lrc_cc_srgb.png";
+    REQUIRE(ImageIO::writePng(pngAdobe, *src, adobe));
+    REQUIRE(ImageIO::writePng(pngSrgb, *src, srgbProf));
+
+    auto dAdobe = decoder.decode(pngAdobe, {});
+    auto dSrgb = decoder.decode(pngSrgb, {});
+    std::error_code ec;
+    std::filesystem::remove(pngAdobe, ec);
+    std::filesystem::remove(pngSrgb, ec);
+    REQUIRE(dAdobe.has_value());
+    REQUIRE(dSrgb.has_value());
+    REQUIRE(std::fabs(dAdobe->linear->pixel(0, 0, 0) -
+                      dSrgb->linear->pixel(0, 0, 0)) > 0.02f);
 }

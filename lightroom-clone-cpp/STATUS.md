@@ -13,15 +13,16 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
-## 当前任务状态（2026-09-05）
+## 当前任务状态（2026-09-12）
 
-- **当前进行中的任务**：[竞品对齐优化实施规格](docs/spec/competitive-optimization-implementation-spec.md)。
-- **总体状态**：P1、P2、P3 和 T 批次尚未按规格正式实施，当前为待实施状态。
-- **首批范围**：P1-1 DirectML、P1-2 导出 ICC、P1-3 批量重命名；完成后必须补充对应测试和性能/行为证据。
-- **状态判定**：现有 AI 天空蒙版、编辑历史、SIMD 条件编译等属于基础能力，不等同于竞品规格任务已完成；以 Git 实时状态、源码/测试实测和规格中的验收记录为准。
-- **P1-3 批量重命名（工作区未提交，代码已落地但未验收）**：`src/utils/RenameTemplate.h` 实现模板渲染（`{date}/{index[:W]}/{base}`）与冲突唯一路径；导入端 `ImportDialog` 加重命名复选+模板+新文件名预览，`ImportWorker::importPaths` 按选择顺序+源文件修改日期在 Stage1 重命名（`renameMutex_` 串行化查重，失败回退）；导出端 `ExportDialog` 加批量重命名复选+模板+母版/副本预览，启用时 `MainWindow` 走 `PreviewWorker::batchExport` 为母版+所有虚拟副本按模板重命名输出。headless `[p1][rename]` 与全量（重跑）通过，GUI 构建通过。未验收：缺少导入端 DB `file_path` 批量同步集成用例与导出端真实导出断言。
-- **DCP 相机配置文件（工作区未提交，UI 接入已验收）**：DevelopPanel 已增加相机配置文件选择框；RAW 解码后的相机型号会驱动 `resources/Camera/<型号>` 扫描，选择后读取 profile 名称、ColorMatrix1/2 和 ProfileToneCurve。GUI 构建后已复制并验证 2595 个 `.dcp` 文件，Inno Setup/NSIS 也已加入资源打包；矩阵、曲线和 LUT 尚未应用到色彩管线。
-- **Lensfun（工作区未提交，依赖待验收）**：已声明 `lensfun:x64-windows`、接入 Qt-free 查询 adapter 和 RAW 镜头元数据；vcpkg 安装曾因 Ninja/MSYS2 下载与构建中断，尚未完成 Lensfun 库和真实数据库查询验证。
+- **当前进行中的任务**：[竞品对齐优化实施规格](docs/spec/competitive-optimization-implementation-spec.md) +
+  [代码业务可用性审查](docs/archive/code-business-risk-review-2026-09-06.md)（R-01 ~ R-16）。
+- **总体状态**：竞品规格 P1-3 批量重命名已落地未验收，其余批次待实施；风险审查项已逐条修复，详见下。
+- **风险审查修复进展（工作区未提交）**：R-01（DCP 注入解码/渲染）~ R-16 均已在引擎/目录/UI 层落地并登记回归测试；R-10（标准预览缓存色彩版本）、R-11（内存导入保持 ICC）、R-16（删除清理外部缓存）为最近一批，2026-09-12 验证通过。
+- **验证（2026-09-12，headless）**：当前构建树 `cmake --build build_headless -j` 通过；`ctest --test-dir build_headless` 全绿，**444 用例 / 752,709 断言** 全部通过。期间修复一处 JPEG APP2 ICC 段长度 off-by-2 的写入错误（`ImageIO::jpegIccMarkers`），否则内嵌 ICC 无法被 `extractIccFromJpeg` 恢复，会同时影响 R-08/R-10 路径。
+- **P1-3 批量重命名（工作区未提交，代码已落地但未验收）**：`src/utils/RenameTemplate.h` 实现模板渲染（`{date}/{index[:W]}/{base}`）与冲突唯一路径；导入端 `ImportDialog` 加重命名复选+模板+新文件名预览，`ImportWorker::importPaths` 按选择顺序+源文件修改日期在 Stage1 重命名（`renameMutex_` 串行化查重，失败回退）；导出端 `ExportDialog` 加批量重命名复选+模板+母版/副本预览，启用时 `MainWindow` 走 `PreviewWorker::batchExport` 为母版+所有虚拟副本按模板重命名输出。未验收：缺少导入端 DB `file_path` 批量同步集成用例与导出端真实导出断言。
+- **DCP 相机配置文件（工作区未提交，风险项 R-01 已修复）**：DevelopPanel 相机配置文件选择框选择后，DCP 的 ColorMatrix1/2 与 ProfileToneCurve 在解码阶段注入并进入渲染管线（R-01），不再只是读取文件、未应用到色彩计算。
+- **Lensfun（工作区未提交）**：已声明 `lensfun:x64-windows`、接入 Qt-free 查询 adapter 和 RAW 镜头元数据；UI 仅声明几何畸变支持（移除未实际处理的暗角/色差承诺，R-05）；vcpkg 安装仍受历史中断影响，数据库查询验证待完成。
 - **历史性能资料**：M1-M5 实施规格和四阶段加速报告位于 `docs/archive/`，仅作回溯依据，不作为当前进行中任务清单。
 
 ***

@@ -44,6 +44,12 @@ public:
     static bool applyGeometry(const Adjustments& adjustments, float* pixels,
                               int width, int height,
                               const std::filesystem::path& databasePath = {});
+
+    // NOTE: the pipeline does NOT yet apply Lensfun physiological vignetting
+    // or chromatic aberration; applyGeometry handles only geometric
+    // distortion. Post-crop vignetting is a separate manual stage (see
+    // Pipeline::renderFullLinear). The UI must not advertise Lensfun
+    // vignetting/CA as active output. (R-05)
 };
 
 } // namespace lrc

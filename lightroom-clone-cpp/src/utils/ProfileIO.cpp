@@ -246,6 +246,42 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
     }
     root["spotRemovals"] = std::move(spots);
 
+    // AI Denoise (PHASE_12). Serialized unconditionally so a round-trip is
+    // lossless even when denoise is disabled.
+    json::Value aiDenoiseObj = json::Value::object();
+    aiDenoiseObj["enabled"] = a.aiDenoise.enabled;
+    aiDenoiseObj["strength"] = a.aiDenoise.strength;
+    aiDenoiseObj["mode"] = static_cast<int>(a.aiDenoise.mode);
+    aiDenoiseObj["modelVersion"] = a.aiDenoise.modelVersion;
+    root["aiDenoise"] = std::move(aiDenoiseObj);
+
+    // AI Mask parameters (PHASE_13). Serialized only when the adjustments
+    // contain at least one AiMask so a legacy preset loads unchanged.
+    bool hasAiMask = false;
+    for (const Mask& m : a.masks) {
+        if (m.type == MaskType::AiMask) {
+            hasAiMask = true;
+            break;
+        }
+    }
+    if (hasAiMask) {
+        json::Value aiMaskArr = json::Value::array();
+        for (const Mask& m : a.masks) {
+            if (m.type != MaskType::AiMask)
+                continue;
+            json::Value ao = json::Value::object();
+            ao["aiTarget"] = static_cast<int>(m.ai.target);
+            ao["aiThreshold"] = m.ai.threshold;
+            ao["aiFeather"] = m.ai.feather;
+            ao["aiInvert"] = m.ai.invert;
+            ao["aiModelInputSize"] = m.ai.modelInputSize;
+            ao["aiCachedWeightVersion"] = m.ai.cachedWeightVersion;
+            ao["aiModelIdOverride"] = m.ai.modelIdOverride;
+            aiMaskArr.push_back(std::move(ao));
+        }
+        root["aiMasks"] = std::move(aiMaskArr);
+    }
+
     return root;
 }
 
@@ -350,9 +386,12 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
             if (!mo.isObject())
                 continue;
             Mask m;
+            // PHASE_13: cap at MaskType::AiMask (not ColorRange) so an AI mask
+            // type survives the round-trip; a lower cap silently downgraded it
+            // to a colour-range mask and lost the ai params (R-12).
             m.type = static_cast<MaskType>(
                 std::clamp(mo["type"].asNumber(0.0), 0.0,
-                           static_cast<double>(MaskType::ColorRange)));
+                           static_cast<double>(MaskType::AiMask)));
             // Bool values are stored as JSON booleans, so read with asBool.
             m.invert = mo["invert"].asBool(false);
             m.opacity = mo["opacity"].asNumber(1.0);
@@ -459,6 +498,47 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
             s.radius = static_cast<float>(so["radius"].asNumber(0.1));
             s.visible = so["visible"].asBool(true);
             a.spotRemovals.push_back(std::move(s));
+        }
+    }
+
+    // AI Denoise (PHASE_12). Missing keys keep per-field defaults.
+    if (v.contains("aiDenoise") && v["aiDenoise"].isObject()) {
+        const auto& ad = v["aiDenoise"];
+        a.aiDenoise.enabled = ad["enabled"].asBool(false);
+        a.aiDenoise.strength = ad["strength"].asNumber(100.0);
+        a.aiDenoise.mode = static_cast<AiDenoiseMode>(
+            std::clamp(ad["mode"].asInt(0), 0, 1));
+        a.aiDenoise.modelVersion = ad["modelVersion"].asInt(0);
+    }
+
+    // AI Mask parameters (PHASE_13). Only applies when the adjustments list
+    // contains masks of type AiMask; other masks are left untouched.
+    if (v.contains("aiMasks") && v["aiMasks"].isArray()) {
+        for (size_t i = 0; i < v["aiMasks"].size(); ++i) {
+            const json::Value& ao = v["aiMasks"][i];
+            if (!ao.isObject())
+                continue;
+            // Find the i-th AiMask in the existing list (masks may have been
+            // pre-populated by the geometry loop above). We match by position
+            // among AiMask entries to keep the round-trip stable.
+            size_t targetIdx = 0;
+            for (size_t j = 0; j < a.masks.size(); ++j) {
+                if (a.masks[j].type == MaskType::AiMask) {
+                    if (targetIdx == i) {
+                        // Populate the AiMask params.
+                        a.masks[j].ai.target = static_cast<AiMaskTarget>(
+                            std::clamp(ao["aiTarget"].asInt(0), 0, 2));
+                        a.masks[j].ai.threshold = ao["aiThreshold"].asNumber(0.5);
+                        a.masks[j].ai.feather = ao["aiFeather"].asNumber(0.05);
+                        a.masks[j].ai.invert = ao["aiInvert"].asBool(false);
+                        a.masks[j].ai.modelInputSize = ao["aiModelInputSize"].asInt(1024);
+                        a.masks[j].ai.cachedWeightVersion = ao["aiCachedWeightVersion"].asInt(0);
+                        a.masks[j].ai.modelIdOverride = ao["aiModelIdOverride"].asString();
+                        break;
+                    }
+                    ++targetIdx;
+                }
+            }
         }
     }
 

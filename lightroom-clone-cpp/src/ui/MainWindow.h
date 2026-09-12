@@ -131,6 +131,7 @@ private slots:
                       const QString& lensModel, float focalLengthMm,
                       float aperture, float cropFactor);
     void onDcpProfileSelected(const QString& path);
+    void openMaskWindow();
     void onFullResReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
     // M6: low-res (kCoarseMaxDim) 1:1 intermediate frame, delivered ahead of
     // fullResReady so a 1:1 slider drag gets immediate coarse feedback.
@@ -332,6 +333,7 @@ private:
     DevelopPanel* developPanel_ = nullptr;
     FilmstripWidget* filmstrip_ = nullptr;
     QScrollArea* developScroll_ = nullptr;  // scroll area wrapping developPanel_
+    QDialog* maskWindow_ = nullptr;
     QTimer* folderTimer_ = nullptr;
     // M2-1: one-shot throttle (150ms) that guarantees the last coarse frame's
     // histogram/status update lands after the throttle window ends.

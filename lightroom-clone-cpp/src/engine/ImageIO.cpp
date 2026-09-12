@@ -7,6 +7,7 @@
 #include <fstream>
 #include <limits>
 #include <unordered_map>
+#include <utility>
 
 #define STBI_WRITE_NO_STDIO
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -139,11 +140,15 @@ std::vector<uint8_t> jpegIccMarkers(const std::vector<uint8_t>& icc) {
     for (size_t c = 0; c < count; ++c) {
         const size_t begin = c * kMaxData;
         const size_t end = std::min(begin + kMaxData, icc.size());
-        const size_t payloadLen = end - begin + 14;  // 12 header + 2 length
+        // JPEG segment length must account for the 2 length bytes themselves
+        // (the parser subtracts them back via segLen-2). ICC header is 14 bytes:
+        // "ICC_PROFILE\0"(12) + seq(1) + count(1). Off-by-two here silently
+        // corrupts the ICC payload and breaks extraction (R-08).
+        const size_t segLen = end - begin + 14 + 2;
         out.push_back(0xFF);
         out.push_back(0xE2);  // APP2
-        out.push_back(static_cast<uint8_t>((payloadLen >> 8) & 0xFF));
-        out.push_back(static_cast<uint8_t>(payloadLen & 0xFF));
+        out.push_back(static_cast<uint8_t>((segLen >> 8) & 0xFF));
+        out.push_back(static_cast<uint8_t>(segLen & 0xFF));
         const char sig[] = "ICC_PROFILE\0";
         out.insert(out.end(), sig, sig + 12);
         out.push_back(static_cast<uint8_t>(c + 1));
@@ -387,8 +392,13 @@ bool writeTiffRaw(const std::filesystem::path& path, int w, int h, int bps,
 // common RGB case other tools produce: uncompressed, chunky, 8/16-bit,
 // PhotometricInterpretation = RGB (3 or 4 samples), little- or big-endian,
 // single or multiple strips, optional horizontal (Predictor 2) differencing.
-// Returns a display-ready 8-bit sRGB buffer, matching the loadImage contract.
-ImageBufferPtr loadTiff(const std::vector<uint8_t>& bytes) {
+//
+// When `preserveDepth` is true a 16-bit source is returned at U16 (not
+// truncated to 8 bits, see R-09); otherwise the result is display-ready 8-bit
+// sRGB, matching the loadImage contract. When `iccOut` is non-null the embedded
+// InterColorProfile (tag 34675) bytes, if present, are copied into it.
+ImageBufferPtr loadTiffImpl(const std::vector<uint8_t>& bytes, bool preserveDepth,
+                            std::vector<uint8_t>* iccOut) {
     const size_t n = bytes.size();
     if (n < 8)
         return ImageBuffer::create(0, 0, PixelFormat::U8);
@@ -500,8 +510,26 @@ ImageBufferPtr loadTiff(const std::vector<uint8_t>& bytes) {
 
     const size_t sampleBytes = bps / 8;
     const size_t bytesPerRow = static_cast<size_t>(w) * spp * sampleBytes;
+    // Preserve 16-bit source depth (R-09) when requested; otherwise and for
+    // 8-bit sources the output is display-ready U8.
+    PixelFormat outFmt = PixelFormat::U8;
+    if (preserveDepth && bps == 16)
+        outFmt = PixelFormat::U16;
     auto out = ImageBuffer::create(static_cast<int>(w), static_cast<int>(h),
-                                   PixelFormat::U8);
+                                   outFmt);
+
+    // Extract the embedded ICC profile (tag 34675, type BYTE): the tag parser
+    // stores each value byte sequentially in the values vector.
+    if (iccOut) {
+        iccOut->clear();
+        auto it = tags.find(34675);
+        if (it != tags.end()) {
+            iccOut->reserve(it->second.size());
+            for (uint32_t v : it->second)
+                iccOut->push_back(static_cast<uint8_t>(v & 0xFF));
+        }
+    }
+
     uint8_t* dst = out->data().data();
 
     std::vector<uint8_t> row(bytesPerRow);
@@ -547,31 +575,134 @@ ImageBufferPtr loadTiff(const std::vector<uint8_t>& bytes) {
                 }
             }
             const int y = static_cast<int>(s * rowsPerStrip + r);
-            for (uint32_t x = 0; x < w; ++x) {
-                const size_t p = static_cast<size_t>(x) * spp * sampleBytes;
-                uint8_t r8, g8, b8;
-                if (sampleBytes == 1) {
-                    r8 = row[p];
-                    g8 = row[p + 1];
-                    b8 = row[p + 2];
-                } else {
+            if (outFmt == PixelFormat::U16) {
+                uint16_t* dst16 = reinterpret_cast<uint16_t*>(dst);
+                for (uint32_t x = 0; x < w; ++x) {
+                    const size_t p = static_cast<size_t>(x) * spp * sampleBytes;
                     const uint16_t rv = row16(p), gv = row16(p + 2),
                                      bv = row16(p + 4);
-                    r8 = static_cast<uint8_t>(
-                        (static_cast<uint32_t>(rv) * 255u + 32767u) / 65535u);
-                    g8 = static_cast<uint8_t>(
-                        (static_cast<uint32_t>(gv) * 255u + 32767u) / 65535u);
-                    b8 = static_cast<uint8_t>(
-                        (static_cast<uint32_t>(bv) * 255u + 32767u) / 65535u);
+                    uint16_t* px = dst16 + (static_cast<size_t>(y) * w + x) * 3;
+                    px[0] = rv;
+                    px[1] = gv;
+                    px[2] = bv;
                 }
-                uint8_t* px = dst + (static_cast<size_t>(y) * w + x) * 3;
-                px[0] = r8;
-                px[1] = g8;
-                px[2] = b8;
+            } else {
+                for (uint32_t x = 0; x < w; ++x) {
+                    const size_t p = static_cast<size_t>(x) * spp * sampleBytes;
+                    uint8_t r8, g8, b8;
+                    if (sampleBytes == 1) {
+                        r8 = row[p];
+                        g8 = row[p + 1];
+                        b8 = row[p + 2];
+                    } else {
+                        const uint16_t rv = row16(p), gv = row16(p + 2),
+                                         bv = row16(p + 4);
+                        r8 = static_cast<uint8_t>(
+                            (static_cast<uint32_t>(rv) * 255u + 32767u) / 65535u);
+                        g8 = static_cast<uint8_t>(
+                            (static_cast<uint32_t>(gv) * 255u + 32767u) / 65535u);
+                        b8 = static_cast<uint8_t>(
+                            (static_cast<uint32_t>(bv) * 255u + 32767u) / 65535u);
+                    }
+                    uint8_t* px = dst + (static_cast<size_t>(y) * w + x) * 3;
+                    px[0] = r8;
+                    px[1] = g8;
+                    px[2] = b8;
+                }
             }
         }
     }
     return out;
+}
+
+// Reassembles an embedded ICC profile from JPEG ICC_PROFILE APP2 markers.
+// Each marker carries a 1-based sequence number and total count; the bytes must
+// be reassembled in sequence order. Returns empty on no/incomplete ICC.
+std::vector<uint8_t> extractIccFromJpeg(const std::vector<uint8_t>& jpg) {
+    size_t pixelStart = 0;
+    const auto segs = parseJpegSegments(jpg, pixelStart);
+    int count = 0;
+    std::vector<std::pair<uint8_t, std::vector<uint8_t>>> parts;  // (seq, data)
+    for (const auto& s : segs) {
+        if (s.marker != 0xE2 || s.payload.size() < 14)  // APP2 with ICC header
+            continue;
+        const char sig[] = "ICC_PROFILE\0";
+        if (std::memcmp(s.payload.data(), sig, 12) != 0)
+            continue;
+        const uint8_t seq = s.payload[12];
+        const uint8_t expectedCount = s.payload[13];
+        count = std::max(count, static_cast<int>(expectedCount));
+        parts.emplace_back(seq,
+                           std::vector<uint8_t>(s.payload.begin() + 14,
+                                                s.payload.end()));
+    }
+    if (parts.empty() || count <= 0)
+        return {};
+    // Assemble in sequence order; a gap means the profile is incomplete.
+    std::vector<uint8_t> icc;
+    for (int i = 1; i <= count; ++i) {
+        bool found = false;
+        for (const auto& part : parts)
+            if (part.first == i) {
+                icc.insert(icc.end(), part.second.begin(), part.second.end());
+                found = true;
+                break;
+            }
+        if (!found)
+            return {};
+    }
+    return icc;
+}
+
+// PNG bit depth from the IHDR chunk (byte 8 of the IHDR data). Defaults to 8.
+uint8_t pngBitDepth(const std::vector<uint8_t>& png) {
+    if (png.size() >= 25 && png[12] == 'I' && png[13] == 'H' &&
+        png[14] == 'D' && png[15] == 'R')
+        return png[24];
+    return 8;
+}
+
+// Inflates the embedded ICC from a PNG iCCP chunk. The chunk payload is
+// `profile-name\0` + compression-method + zlib-deflated profile bytes; the
+// decompression reuses stb_image's zlib decoder (already compiled in this TU).
+// Returns empty on no iCCP chunk or inflate failure.
+std::vector<uint8_t> extractIccFromPng(const std::vector<uint8_t>& png) {
+    if (png.size() < 8 || png[0] != 0x89)
+        return {};
+    size_t pos = 8;
+    while (pos + 8 <= png.size()) {
+        const size_t len =
+            (static_cast<size_t>(png[pos]) << 24) |
+            (static_cast<size_t>(png[pos + 1]) << 16) |
+            (static_cast<size_t>(png[pos + 2]) << 8) | png[pos + 3];
+        const uint8_t* typ = png.data() + pos + 4;
+        if (typ[0] == 'i' && typ[1] == 'C' && typ[2] == 'C' && typ[3] == 'P') {
+            const size_t dataOff = pos + 8;
+            if (dataOff + len > png.size())
+                return {};
+            const uint8_t* d = png.data() + dataOff;
+            size_t nameEnd = 0;
+            while (nameEnd < len && d[nameEnd] != 0)
+                ++nameEnd;
+            if (nameEnd + 2 > len)  // null + compression method
+                return {};
+            const uint8_t* zl = d + nameEnd + 2;  // past null + compression byte
+            const size_t zlen = len - (nameEnd + 2);
+            int outLen = 0;
+            char* out = stbi_zlib_decode_malloc(
+                reinterpret_cast<const char*>(zl),
+                static_cast<int>(zlen), &outLen);
+            if (!out || outLen <= 0)
+                return {};
+            std::vector<uint8_t> icc(
+                reinterpret_cast<uint8_t*>(out),
+                reinterpret_cast<uint8_t*>(out) + outLen);
+            stbi_image_free(out);
+            return icc;
+        }
+        pos += 8 + len + 4;
+    }
+    return {};
 }
 
 } // namespace
@@ -668,11 +799,13 @@ bool ImageIO::writePPM(const std::filesystem::path& path,
 }
 
 bool ImageIO::writeDng(const std::filesystem::path& path,
-                       const ImageBuffer& rgbU16) {
+                       const ImageBuffer& rgbU16,
+                       const std::vector<uint8_t>& icc) {
     if (rgbU16.format() != PixelFormat::U16 || rgbU16.empty())
         return false;
+    const std::vector<uint8_t>* iccPtr = icc.empty() ? nullptr : &icc;
     return writeTiffRaw(path, rgbU16.width(), rgbU16.height(), 16,
-                        rgbU16.data().data(), /*dng=*/true);
+                        rgbU16.data().data(), /*dng=*/true, iccPtr);
 }
 
 ImageBufferPtr ImageIO::loadImage(const std::filesystem::path& path) {
@@ -694,13 +827,92 @@ ImageBufferPtr ImageIO::loadImage(const std::filesystem::path& path) {
     if (bytes.size() >= 4 &&
         ((bytes[0] == 'I' && bytes[1] == 'I') ||
          (bytes[0] == 'M' && bytes[1] == 'M')))
-        return loadTiff(bytes);
+        return loadTiffImpl(bytes, /*preserveDepth=*/false, nullptr);
 
     return decodeStbFromMemory(bytes.data(), bytes.size());
 }
 
 ImageBufferPtr ImageIO::loadImage(const uint8_t* data, size_t size) {
     return decodeStbFromMemory(data, size);
+}
+
+namespace {
+// Shared decode core for the source (import) path: given raw file bytes, return
+// pixels at native bit depth plus the embedded source ICC (R-08/R-09). Both the
+// file-path and in-memory import APIs delegate here so they stay consistent.
+ImageIO::SourceImage decodeSourceBytes(const std::vector<uint8_t>& bytes) {
+    ImageIO::SourceImage result;
+    auto fail = [&result] {
+        result.pixels = ImageBuffer::create(0, 0, PixelFormat::U8);
+        result.icc.clear();
+        return result;
+    };
+
+    // TIFF: preserve native bit depth + extract tag 34675 ICC (R-08/R-09).
+    if (bytes.size() >= 4 &&
+        ((bytes[0] == 'I' && bytes[1] == 'I') ||
+         (bytes[0] == 'M' && bytes[1] == 'M'))) {
+        result.pixels = loadTiffImpl(bytes, /*preserveDepth=*/true, &result.icc);
+        if (!result.pixels || result.pixels->empty())
+            return fail();
+        return result;
+    }
+
+    // PNG: 16-bit sources keep their depth; extract the iCCP profile.
+    if (bytes.size() >= 8 && bytes[0] == 0x89 && bytes[1] == 'P' &&
+        bytes[2] == 'N' && bytes[3] == 'G') {
+        result.icc = extractIccFromPng(bytes);
+        if (pngBitDepth(bytes) == 16) {
+            int w = 0, h = 0, n = 0;
+            stbi_us* px = stbi_load_16_from_memory(
+                bytes.data(), static_cast<int>(bytes.size()), &w, &h, &n, 3);
+            if (!px || w <= 0 || h <= 0)
+                return fail();
+            auto out = ImageBuffer::create(w, h, PixelFormat::U16);
+            std::memcpy(out->data().data(), px,
+                        static_cast<size_t>(w) * h * 3 * 2);
+            stbi_image_free(px);
+            result.pixels = std::move(out);
+        } else {
+            result.pixels = decodeStbFromMemory(bytes.data(), bytes.size());
+        }
+        if (!result.pixels || result.pixels->empty())
+            return fail();
+        return result;
+    }
+
+    // JPEG / BMP / other: display-ready U8 pixels + best-effort APP2 ICC.
+    result.pixels = decodeStbFromMemory(bytes.data(), bytes.size());
+    if (!result.pixels || result.pixels->empty())
+        return fail();
+    result.icc = extractIccFromJpeg(bytes);
+    return result;
+}
+} // namespace
+
+ImageIO::SourceImage ImageIO::loadSourceImage(
+    const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        return {};
+    in.seekg(0, std::ios::end);
+    const std::streamsize sz = in.tellg();
+    if (sz <= 0)
+        return {};
+    in.seekg(0, std::ios::beg);
+    std::vector<uint8_t> bytes(static_cast<size_t>(sz));
+    in.read(reinterpret_cast<char*>(bytes.data()), sz);
+    if (!in.good() && !in.eof())
+        return {};
+    return decodeSourceBytes(bytes);
+}
+
+ImageIO::SourceImage ImageIO::loadSourceImageFromMemory(const uint8_t* data,
+                                                       size_t size) {
+    if (!data || size == 0)
+        return {};
+    std::vector<uint8_t> bytes(data, data + size);
+    return decodeSourceBytes(bytes);
 }
 
 std::vector<uint8_t> ImageIO::encodeJpeg(const ImageBuffer& rgbU8,

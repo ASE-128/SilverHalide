@@ -5,6 +5,7 @@
 // Runs in its own QThread; results cross back to the UI via queued signals.
 
 #include <atomic>
+#include <optional>
 #include <vector>
 
 #include <QImage>
@@ -18,6 +19,7 @@
 
 #include "app/Constants.h"
 #include "engine/Adjustments.h"
+#include "engine/DcpProfile.h"
 #include "engine/ImageBuffer.h"
 
 // Export formats understood by PreviewWorker::exportImage. Index order must
@@ -92,6 +94,14 @@ public slots:
     // for Fit/<=1:1 views. Stored and applied by the next loadImage/adjustPreview;
     // a queued connection delivers it on the worker thread so no lock is needed.
     void setPreviewTargetSize(const QSize& size);
+    // R-01: updates the active DCP camera colour profile for subsequent decodes.
+    // The payload is the absolute path to a .dcp file; an empty string clears
+    // the selection. Because this slot joins the worker thread via a queued
+    // connection, dcp_ is mutated on the same thread that runs loadImage /
+    // decodeFullRes / exportImage, so no lock is needed. Changing the profile
+    // does NOT re-decode automatically -- the UI must issue a fresh loadImage
+    // (requestPreview) so the new matrix/curve reaches the pipeline.
+    void setDcpProfile(const QString& path);
     // Decodes a raw at preview resolution, keeps it as the working image and
     // renders with the given adjustments.
     void loadImage(qint64 imageId, const QString& filePath,
@@ -252,6 +262,9 @@ private:
     qint64 loadedImageId_ = -1;
     qint64 latestGeneration_ = -1;
     std::atomic<bool> abort_{false};
+    // R-01: active DCP camera colour profile, applied at decode time. Empty when
+    // the user has not selected a profile (or selected "none"). See setDcpProfile.
+    std::optional<lrc::DcpProfile> dcp_;
 
     // PHASE_2 preview-resolution state.
     // Logical render size for the Fit/<=1:1 view (widget size x devicePixelRatio),

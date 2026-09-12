@@ -82,9 +82,12 @@ public:
 
     // Renders and writes a *linear* DNG (16-bit, demosaiced RGB with DNG tags)
     // from the linear working-space buffer. Round-trips through RawDecoder.
+    // `spec` carries the optional ICC profile for DNG embedding; watermark
+    // is intentionally skipped for linear archival formats.
     bool exportDng(const std::filesystem::path& outPath, uint64_t imageId,
                    const ImageBuffer& linear,
-                   const Adjustments& adjustments);
+                   const Adjustments& adjustments,
+                   const ExportSpec& spec = ExportSpec{});
 
     // S16: unified encode-and-write entry point. Dispatches on spec.format and
     // quality/maxDim. Returns false on any render / I/O / encode error. This is

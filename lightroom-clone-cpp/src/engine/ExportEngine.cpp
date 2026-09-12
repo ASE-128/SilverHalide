@@ -171,7 +171,11 @@ bool ExportEngine::exportJpeg(const std::filesystem::path& outPath,
         return false;
     }
     rgb = applyWatermark(rgb, spec);
-    if (!ImageIO::writeJpeg(outPath, *rgb, quality, resolveIccBytes(spec))) {
+    const auto icc = resolveIccBytes(spec);
+    // R-03: convert display sRGB pixels into the chosen ICC space so the
+    // embedded profile and the pixel data describe the same colour space.
+    rgb = cm_->sRGBEncodedToProfile(*rgb, icc);
+    if (!ImageIO::writeJpeg(outPath, *rgb, quality, icc)) {
         lastError_ = "cannot write output file";
         return false;
     }
@@ -235,7 +239,10 @@ bool ExportEngine::exportPng(const std::filesystem::path& outPath,
         return false;
     }
     rgb = applyWatermark(rgb, spec);
-    if (!ImageIO::writePng(outPath, *rgb, resolveIccBytes(spec))) {
+    const auto icc = resolveIccBytes(spec);
+    // R-03: real sRGB -> target ICC pixel conversion (see sRGBEncodedToProfile).
+    rgb = cm_->sRGBEncodedToProfile(*rgb, icc);
+    if (!ImageIO::writePng(outPath, *rgb, icc)) {
         lastError_ = "cannot write output file";
         return false;
     }
@@ -256,7 +263,11 @@ bool ExportEngine::exportTiff(const std::filesystem::path& outPath,
             return false;
         }
         rgb = applyWatermark(rgb, spec);
-        if (!ImageIO::writeTiff(outPath, *rgb, resolveIccBytes(spec))) {
+        const auto icc8 = resolveIccBytes(spec);
+        // R-03: mirror JPEG/PNG — convert the display sRGB pixels into the chosen
+        // ICC space before embedding the same profile, so pixels and tag agree.
+        rgb = cm_->sRGBEncodedToProfile(*rgb, icc8);
+        if (!ImageIO::writeTiff(outPath, *rgb, icc8)) {
             lastError_ = "cannot write output file";
             return false;
         }
@@ -276,7 +287,13 @@ bool ExportEngine::exportTiff(const std::filesystem::path& outPath,
             *lin, *u16, 64, [&](const float* s, float* d, size_t n) {
                 cm_->linearProPhotoToSRGB(s, d, n);
             });
-        if (!ImageIO::writeTiff(outPath, *u16, resolveIccBytes(spec))) {
+        const auto icc16 = resolveIccBytes(spec);
+        // R-03: the pixels above are sRGB-encoded; convert them into the chosen
+        // ICC space so the embedded profile and the data describe the same colour
+        // space. When icc16 is empty (None/sRGB default) this is a no-op clone.
+        const auto conv = cm_->sRGBEncodedToProfile(*u16, icc16);
+        const ImageBuffer& out = conv ? *conv : *u16;
+        if (!ImageIO::writeTiff(outPath, out, icc16)) {
             lastError_ = "cannot write output file";
             return false;
         }
@@ -288,7 +305,8 @@ bool ExportEngine::exportTiff(const std::filesystem::path& outPath,
 
 bool ExportEngine::exportDng(const std::filesystem::path& outPath,
                              uint64_t imageId, const ImageBuffer& linear,
-                             const Adjustments& adjustments) {
+                             const Adjustments& adjustments,
+                             const ExportSpec& spec) {
     lastError_.clear();
     // Linear DNG stores the working-space data unchanged (no sRGB conversion),
     // preserving the widest tonal range for later re-editing.
@@ -302,7 +320,12 @@ bool ExportEngine::exportDng(const std::filesystem::path& outPath,
                                    PixelFormat::U16);
     // S16: strip-parallel quantization, no colour conversion (linear DNG).
     quantizeToU16Parallel(*lin, *u16, 64, nullptr);
-    if (!ImageIO::writeDng(outPath, *u16)) {
+    // R-07: linear DNG carries linear ProPhoto working-space data that is NOT
+    // converted into any display space, so embedding a display ICC (sRGB /
+    // Adobe RGB / Display P3) would mislabel the colour space (the R-03 class
+    // of bug). The profile is intentionally omitted; the dialog disables the
+    // ICC (and watermark) choices for DNG so nothing is silently dropped.
+    if (!ImageIO::writeDng(outPath, *u16, {})) {
         lastError_ = "cannot write output file";
         return false;
     }
@@ -350,7 +373,7 @@ bool ExportEngine::encodeAndWrite(const std::filesystem::path& outPath,
         case ExportSpec::Format::Tiff16:
             return exportTiff(outPath, imageId, linear, adjustments, 16, spec);
         case ExportSpec::Format::Dng:
-            return exportDng(outPath, imageId, linear, adjustments);
+            return exportDng(outPath, imageId, linear, adjustments, spec);
     }
     lastError_ = "unknown export format";
     return false;

@@ -184,13 +184,14 @@ TEST_CASE("ThumbnailCache: renderStandardPreviewBlob produces a v2 catalog blob"
     auto rendered = cache.renderStandardPreviewBlob(srcPath);
     REQUIRE(rendered.has_value());
 
-    // Blob carries the v2 magic + version.
-    REQUIRE(rendered->blob.size() >= 32u);
+    // Blob carries the v3 magic + version (RFC v3 records source colour for
+    // cache invalidation, R-10).
+    REQUIRE(rendered->blob.size() >= 40u); // v3 header
     REQUIRE(rendered->blob[0] == 'S');
     REQUIRE(rendered->blob[1] == 'H');
     REQUIRE(rendered->blob[2] == 'S');
     REQUIRE(rendered->blob[3] == 'P');
-    REQUIRE(rendered->blob[4] == 2u); // version == 2
+    REQUIRE(rendered->blob[4] == 3u); // version == 3
 
     // Decode through the public StandardPreview API to confirm round-trip.
     auto decoded = decodeStandardPreview(rendered->blob);

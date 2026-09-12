@@ -302,6 +302,20 @@ void ExportDialog::onFormatChanged(int index) {
     // Show the quality row only for the lossy JPEG format.
     qualityRow_->setVisible(index == 0);
 
+    // R-07: keep the dialog honest about what each format actually keeps.
+    //   IC  profile  : embedded for JPEG/PNG/TIFF (pixels are converted to match, see
+    //                  Engine sRGBEncodedToProfile). DNG stores linear ProPhoto data
+    //                  that is not converted into any display space, so embedding a
+    //                  display ICC would mislabel it -> disable the choice.
+    //   watermark    : composited onto the display (U8) rasters JPEG/PNG/TIFF-8 only;
+    //                  TIFF-16 and DNG are linear/archival and never carry it -> disable.
+    const bool supportsIcc = (index != 4);                            // all but DNG
+    const bool supportsWatermark = (index == 0 || index == 1 || index == 2); // JPEG/PNG/TIFF8
+    if (iccCombo_)
+        iccCombo_->setEnabled(supportsIcc);
+    if (wmRow_)
+        wmRow_->setEnabled(supportsWatermark);
+
     currentSuffix_ = QString::fromLatin1(kFormatSuffixes[index]);
 
     // Keep the user's typed base name; switching formats only swaps the file

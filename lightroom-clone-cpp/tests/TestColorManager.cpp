@@ -268,3 +268,54 @@ TEST_CASE("ColorManager: failed loadDisplayProfile keeps a loaded custom profile
     std::error_code ec;
     std::filesystem::remove(iccPath, ec);
 }
+
+TEST_CASE("ColorManager: sRGBEncodedToProfile converts pixels into the target ICC space",
+          "[color][p1]") {
+    // R-03 regression: exporting to a non-sRGB ICC must actually transform the
+    // pixels into that space (not just embed the tag). Verify by round-tripping
+    // the converted output back from AdobeRGB to sRGB with an independent test-side
+    // lcms transform — if the pixels had been left in sRGB, the second leg would be
+    // a no-op and the source colour would not be recovered closely.
+    ColorManager cm;
+    const auto adobeBytes = ColorManager::exportProfileBytes(
+        ColorManager::ExportColorProfile::AdobeRGB);
+    REQUIRE_FALSE(adobeBytes.empty());
+
+    // A mid-saturation colour comfortably inside the AdobeRGB gamut.
+    const uint8_t r = 200, g = 120, b = 60;
+    auto src = ImageBuffer::create(1, 1, PixelFormat::U8);
+    src->data()[0] = r;
+    src->data()[1] = g;
+    src->data()[2] = b;
+
+    auto out = cm.sRGBEncodedToProfile(*src, adobeBytes);
+    REQUIRE(out->width() == 1);
+    REQUIRE(out->format() == PixelFormat::U8);
+    const uint8_t* p = out->data().data();
+    // A genuine conversion must move at least one channel; otherwise the pixels
+    // were left in sRGB while the file would be tagged AdobeRGB.
+    const bool unchanged = (p[0] == r && p[1] == g && p[2] == b);
+    REQUIRE_FALSE(unchanged);
+
+    // Recover sRGB from the converted AdobeRGB output and compare to the source.
+    cmsHPROFILE srcP = cmsOpenProfileFromMem(
+        adobeBytes.data(), static_cast<cmsUInt32Number>(adobeBytes.size()));
+    cmsHPROFILE dstP = cmsCreate_sRGBProfile();
+    REQUIRE(srcP);
+    REQUIRE(dstP);
+    cmsHTRANSFORM tf = cmsCreateTransform(
+        srcP, TYPE_RGB_8, dstP, TYPE_RGB_8, INTENT_RELATIVE_COLORIMETRIC,
+        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE);
+    REQUIRE(tf);
+    uint8_t back[3];
+    cmsDoTransform(tf, p, back, 1);
+    cmsDeleteTransform(tf);
+    cmsCloseProfile(dstP);
+    cmsCloseProfile(srcP);
+
+    // The sRGB<->AdobeRGB round-trip is visually lossless in the mid-tones; a
+    // tight tolerance confirms the pixels really were transformed and recovered.
+    REQUIRE(std::abs(int(back[0]) - int(r)) <= 3);
+    REQUIRE(std::abs(int(back[1]) - int(g)) <= 3);
+    REQUIRE(std::abs(int(back[2]) - int(b)) <= 3);
+}

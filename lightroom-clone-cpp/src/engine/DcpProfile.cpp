@@ -138,6 +138,25 @@ bool readMatrix(const std::vector<uint8_t>& bytes, const TagValue& tag,
     return true;
 }
 
+// Reads one DCP curve sample (ToneCurve tag 50940) whose storage type varies
+// by encoder: SHORT(3) / UNDEFINED(7) are 16-bit; BYTE(1) is a single byte.
+// Values are returned as their raw numeric magnitude (DCP stores 16-bit curve
+// magnitudes, so typical samples land in [0, 65535]).
+float readCurveSample(const std::vector<uint8_t>& bytes, size_t offset,
+                      uint16_t type, bool le) {
+    switch (type) {
+    case 1:  // BYTE
+        return offset < bytes.size() ? static_cast<float>(bytes[offset]) : 0.0f;
+    case 3:  // SHORT
+    case 7:  // UNDEFINED (commonly carries the 16-bit curve)
+        return offset + 2 <= bytes.size()
+                   ? static_cast<float>(read16(bytes, offset, le))
+                   : 0.0f;
+    default:
+        return 0.0f;
+    }
+}
+
 } // namespace
 
 bool DcpProfileReader::isDcp(const std::filesystem::path& path) {
@@ -172,7 +191,19 @@ std::optional<DcpProfile> DcpProfileReader::read(
         profile.hasColorMatrix1 = readMatrix(bytes, tag, le, profile.colorMatrix1);
     if (findTag(bytes, 50722, le, tag))
         profile.hasColorMatrix2 = readMatrix(bytes, tag, le, profile.colorMatrix2);
-    profile.toneCurveSize = findTag(bytes, 50940, le, tag) ? tag.count : 0;
+    // Tone curve (50940) carries the DCP output curve as a run of 16-bit
+    // samples. `count` is the full sample count; we keep up to the curve array
+    // capacity (most profiles ship 256 points). The curve domain is implicit:
+    // input x is spread uniformly across the samples from 0 to 65535.
+    if (findTag(bytes, 50940, le, tag) && tag.count > 0) {
+        const size_t sample = typeSize(tag.type) ? typeSize(tag.type) : 1;
+        const size_t n = std::min<size_t>(tag.count, profile.toneCurve.size());
+        const size_t offset = valueOffset(tag);
+        for (size_t i = 0; i < n; ++i)
+            profile.toneCurve[i] =
+                readCurveSample(bytes, offset + i * sample, tag.type, le);
+        profile.toneCurveSize = n;
+    }
     if (profile.name.empty())
         profile.name = path.stem().string();
     return profile;

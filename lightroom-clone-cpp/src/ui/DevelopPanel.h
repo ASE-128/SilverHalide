@@ -36,6 +36,7 @@ class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QSlider;
+class QTabBar;
 class QTabWidget;
 class QVBoxLayout;
 
@@ -126,6 +127,7 @@ public:
     void setRangeSubSamplerChecked(bool active);
 
 public slots:
+    void setSectionMode(int mode);
     // 公开槽:选中蒙版工具(线性/径向/画笔)或 None 禁用. 语义与面板按钮一致:
     // 勾选对应按钮、设 activeMaskTool_,并按现有逻辑 emit maskEditRequested.
     // MainWindow 从快捷键 K/M/Shift+M 及(未来)工具栏调用.
@@ -218,6 +220,7 @@ signals:
     // User toggled spot visualization (invert + high-contrast preview); the
     // viewport switches its display mode.
     void visualizeSpotsToggled(bool active);
+    void maskWindowRequested();
 
     // --- metadata (M8) ------------------------------------------------------
     // The user edited one of the metadata fields or the keyword list; MainWindow
@@ -402,6 +405,8 @@ private:
     std::vector<std::vector<HSLRow>> hslRows_; // [colorIndex] -> rows
     std::vector<SplitToneRow> splitToneRows_;
     std::vector<MaskRow> maskRows_;
+    std::vector<PanelSection*> sections_;
+    QTabBar* sectionTabs_ = nullptr;
     lrc::Adjustments current_;
     QTimer debounce_;
     QTimer coarseDebounce_;

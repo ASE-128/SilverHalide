@@ -351,6 +351,8 @@ void MainWindow::buildUi() {
             &MainWindow::onAdjustmentsChangedCoarse);
     connect(developPanel_, &DevelopPanel::adjustmentsCommitted, this,
             &MainWindow::onAdjustmentsCommitted);
+        connect(developPanel_, &DevelopPanel::maskWindowRequested, this,
+            &MainWindow::openMaskWindow);
     // M3 reserve: slider-drag gesture begin/end (currently just a flag; future
     // work will coalesce one drag into a single undo entry).
     connect(developPanel_, &DevelopPanel::editGestureStarted, this,
@@ -486,6 +488,37 @@ void MainWindow::buildUi() {
             &MainWindow::onSmartCollectionSelected);
     connect(navigator_, &NavigatorWidget::newSmartCollectionRequested, this,
             &MainWindow::onNewSmartCollectionRequested);
+}
+
+void MainWindow::openMaskWindow() {
+    if (maskWindow_ && maskWindow_->isVisible()) {
+        maskWindow_->raise();
+        maskWindow_->activateWindow();
+        return;
+    }
+    if (!maskWindow_) {
+        maskWindow_ = new QDialog(this);
+        maskWindow_->setWindowTitle(tr("蒙版"));
+        maskWindow_->setAttribute(Qt::WA_DeleteOnClose, false);
+        connect(maskWindow_, &QDialog::finished, this, [this]() {
+            if (!maskWindow_)
+                return;
+            if (auto* layout = maskWindow_->layout())
+                layout->removeWidget(developPanel_);
+            developPanel_->setParent(developScroll_);
+            developScroll_->setWidget(developPanel_);
+            developPanel_->setSectionMode(0);
+        });
+    }
+    developScroll_->takeWidget();
+    developPanel_->setParent(maskWindow_);
+    auto* layout = new QVBoxLayout(maskWindow_);
+    layout->setContentsMargins(6, 6, 6, 6);
+    layout->addWidget(developPanel_);
+    maskWindow_->resize(420, 720);
+    maskWindow_->show();
+    maskWindow_->raise();
+    maskWindow_->activateWindow();
 }
 
 void MainWindow::buildMenus() {
@@ -1123,22 +1156,33 @@ void MainWindow::importFolder() {
         return;
     }
     folderMonitor_ = std::make_unique<lrc::FolderMonitor>(toStdPath(dir));
-    folderMonitor_->setCallback([this](const auto& added, const auto& removed) {
-        if (!removed.empty()) {
-            for (const auto& p : removed) {
-                if (auto rec =
-                        catalog_->findImageByPath(lrc::pathToUtf8(p)))
-                    catalog_->removeImage(rec->id);
+    folderMonitor_->setCallback(
+        [this](const auto& added, const auto& modified, const auto& removed) {
+            if (!removed.empty()) {
+                for (const auto& p : removed) {
+                    if (auto rec =
+                            catalog_->findImageByPath(lrc::pathToUtf8(p)))
+                        catalog_->removeImage(rec->id);
+                }
             }
-        }
-        if (!added.empty()) {
-            QStringList paths;
-            for (const auto& p : added)
-                paths << fromStdPath(p);
-            startImport(paths);
-        }
-        refreshFilmstrip();
-    });
+            if (!modified.empty()) {
+                // R-14: the source file was replaced in place (size/mtime
+                // changed). Drop its cached previews so stale pixels are never
+                // reused; the editor re-decodes from disk on next load.
+                for (const auto& p : modified) {
+                    if (auto rec =
+                            catalog_->findImageByPath(lrc::pathToUtf8(p)))
+                        catalog_->invalidatePreviews(rec->id);
+                }
+            }
+            if (!added.empty()) {
+                QStringList paths;
+                for (const auto& p : added)
+                    paths << fromStdPath(p);
+                startImport(paths);
+            }
+            refreshFilmstrip();
+        });
     folderMonitor_->start();
     folderTimer_->start();
     // Folder imports reference files in place (Add) — nothing is copied/moved.
@@ -1298,7 +1342,7 @@ void MainWindow::onManageSnapshots() {
                                  tr("请先在胶片栏选择一张图片。"));
         return;
     }
-    SnapshotDialog dlg(*catalog_, currentImageId_, /*variant=*/0, this);
+    SnapshotDialog dlg(*catalog_, currentImageId_, currentVariantId_, this);
     // Applying a snapshot is equivalent to restoring an undo step: reuse the
     // same panel/preview/persist path (without re-pushing the history). The
     // master variant is used for snapshots; virtual copies keep their own.
@@ -1368,6 +1412,12 @@ void MainWindow::loadImageState(int imageId, int variantId) {
     currentFilePath_ = filePath;
     currentDcpProfilePath_.clear();
     developPanel_->setDcpProfiles({}, {});
+    // R-01: reset the worker's DCP selection on image switch so a profile chosen
+    // for the previous camera never leaks into a new photo.
+    const QString noDcp;
+    QMetaObject::invokeMethod(previewWorker_, "setDcpProfile",
+                              Qt::QueuedConnection,
+                              Q_ARG(QString, noDcp));
     currentAdjustments_ =
         catalog_->loadAdjustments(imageId, variantId)
             .value_or(lrc::Adjustments::defaults());
@@ -1448,13 +1498,14 @@ void MainWindow::refreshLensfunProfile(const QString& cameraMake,
         return;
     }
     const auto& profile = profiles.front();
-    const QString status = tr("已匹配：%1 @ %2mm f/%3（畸变 %4，暗角 %5，色差 %6）")
+    // Only geometric distortion is actually applied by the pipeline stage.
+    // Lensfun's physiological vignetting and chromatic aberration are NOT
+    // rendered, so the UI must not advertise them as supported (R-05).
+    const QString status = tr("已匹配：%1 @ %2mm f/%3（畸变 %4）")
         .arg(QString::fromStdString(profile.lensModel))
         .arg(QString::number(focalLengthMm, 'f', 1))
         .arg(QString::number(aperture, 'f', 1))
-        .arg(profile.hasDistortion ? tr("支持") : tr("无"))
-        .arg(profile.hasVignetting ? tr("支持") : tr("无"))
-        .arg(profile.hasChromaticAberration ? tr("支持") : tr("无"));
+        .arg(profile.hasDistortion ? tr("支持") : tr("无"));
     // Populate the factual Lensfun identity + capture fields on the current
     // adjustment stack so the Pipeline stage has everything it needs. The
     // enabled flag defaults to true the first time a profile is detected for
@@ -1506,17 +1557,28 @@ void MainWindow::refreshDcpProfiles(const QString& cameraModel) {
 
 void MainWindow::onDcpProfileSelected(const QString& path) {
     currentDcpProfilePath_ = path;
+    // R-01: forward the selection to the worker thread so the next RAW decode
+    // injects the profile's colour matrix / tone curve. The selection is stored
+    // on the worker; any adjustment commit up to this point is harmless because
+    // the DCP only takes effect at decode time.
+    QMetaObject::invokeMethod(previewWorker_, "setDcpProfile",
+                              Qt::QueuedConnection,
+                              Q_ARG(QString, path));
     if (path.isEmpty()) {
         developPanel_->setDcpProfileStatus(tr("未加载 DCP"));
-        return;
+    } else {
+        const auto profile = lrc::DcpProfileReader::read(toStdPath(path));
+        if (!profile) {
+            developPanel_->setDcpProfileStatus(tr("DCP 读取失败"));
+        } else {
+            developPanel_->setDcpProfileStatus(tr("已应用相机配置"));
+        }
     }
-    const auto profile = lrc::DcpProfileReader::read(toStdPath(path));
-    if (!profile) {
-        developPanel_->setDcpProfileStatus(tr("DCP 读取失败"));
-        return;
-    }
-    developPanel_->setDcpProfileStatus(
-        tr("已读取矩阵/曲线（尚未应用到管线）"));
+    // R-01: a DCP change requires a full re-decode (the matrix/curve is baked at
+    // decode time and the standard-preview cache is bypassed while a profile is
+    // active), so re-issue the preview load rather than a re-render.
+    if (currentImageId_ >= 0 && !currentFilePath_.isEmpty())
+        requestPreview(currentFilePath_, currentAdjustments_);
 }
 
 void MainWindow::onImageVariantSelected(int64_t imageId, int variantId) {

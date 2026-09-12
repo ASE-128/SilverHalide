@@ -211,6 +211,11 @@ public:
     // whether its blob is decodable -- use getStandardPreview to check that).
     bool hasStandardPreview(int64_t imageId) const;
 
+    // Removes every preview row (embedded thumb/full-res and standard) for the
+    // image. Called when the source file is modified in place (R-14) so a stale
+    // cached decode is not reused; the pixels are re-decoded on next load.
+    bool invalidatePreviews(int64_t imageId);
+
     // --- catalog management ----------------------------------------------
     // Writes a consistent backup of the catalog file (WAL checkpointed).
     bool backup(const std::filesystem::path& destPath) const;

@@ -26,6 +26,7 @@
 namespace lrc {
 
 class ColorManager;
+struct DcpProfile;
 
 struct DecodeParams {
     // Use libraw's fast half-resolution path (speeds up previews/thumbnails).
@@ -60,6 +61,12 @@ struct DecodedImage {
     // Linear ProPhoto RGB: U16 for RAW files, F32 for JPEG/PNG/TIFF.
     ImageBufferPtr linear;
     RawMeta meta;
+    // Stable (non-cryptographic) hash of the embedded source ICC used for the
+    // non-RAW conversion; 0 when the source had no ICC (sRGB default) or for
+    // RAW files. Lets a standard-preview cache record which source colour space
+    // produced its pixels, and invalidate a cached preview if the source colour
+    // disposition changes (R-10).
+    uint32_t sourceColorHash = 0;
 };
 
 class RawDecoder {
@@ -75,8 +82,24 @@ public:
     // Returns a non-empty linear ProPhoto RGB buffer on success. Dispatches
     // on the file extension: RAW/DNG go through libraw, everything else
     // (JPEG/PNG/TIFF) through stb_image + the color manager.
+    //
+    // `dcp` is an optional camera colour profile. When non-null and the path is
+    // a RAW file, its ColorMatrix1 replaces libraw's built-in camera matrix in
+    // the decode (so a user-selected DCP actually changes the rendered colour,
+    // see R-01), and its tone curve is applied afterwards. It is ignored for
+    // non-RAW files. Ownership stays with the caller for the duration of the
+    // call.
     std::optional<DecodedImage> decode(const std::filesystem::path& path,
-                                       const DecodeParams& params) const;
+                                       const DecodeParams& params,
+                                       const DcpProfile* dcp = nullptr) const;
+
+    // Lightweight metadata-only read for RAW paths: opens the file with libraw
+    // and returns the camera / lens / exposure metadata WITHOUT demosaicing or
+    // colour conversion (no unpack/process). This lets UI paths that serve a
+    // cached standard preview still refresh DCP/Lensfun auto-matching, which
+    // today only happens on a real RAW decode. Returns nullopt for non-RAW
+    // paths or when the file cannot be opened.
+    std::optional<RawMeta> readMeta(const std::filesystem::path& path) const;
 
     // Extracts the embedded JPEG preview as raw bytes, if present and large
     // enough. Used by the thumbnail cache for fast browsing (RAW files only).

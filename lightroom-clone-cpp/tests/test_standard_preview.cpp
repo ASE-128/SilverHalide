@@ -12,6 +12,7 @@
 
 #include "catalog/CatalogDatabase.h"
 #include "catalog/StandardPreview.h"
+#include "engine/ColorManager.h"
 #include "engine/ImageBuffer.h"
 #include "engine/ImageIO.h"
 #include "utils/MathUtils.h"
@@ -164,9 +165,9 @@ TEST_CASE("StandardPreview: v2 encode/decode round-trips native dimensions",
             buf->setPixel(x, y, 2, 0.25f);
         }
 
-    // v2 path: encode with native dimensions, decode must report them back.
+    // v3 encode with native dimensions; decode reports them back.
     auto blob = encodeStandardPreview(*buf, nativeW, nativeH);
-    REQUIRE(blob.size() == 32u + static_cast<size_t>(w) * h * 3 * sizeof(float));
+    REQUIRE(blob.size() == 40u + static_cast<size_t>(w) * h * 3 * sizeof(float));
 
     auto decoded = decodeStandardPreview(blob);
     REQUIRE(decoded.buf);
@@ -175,6 +176,10 @@ TEST_CASE("StandardPreview: v2 encode/decode round-trips native dimensions",
     REQUIRE(decoded.buf->format() == PixelFormat::F32);
     REQUIRE(decoded.nativeWidth == nativeW);
     REQUIRE(decoded.nativeHeight == nativeH);
+    // The v3 header records the source-colour identity and the current
+    // conversion policy version (R-10); single-arg encode used sourceColor 0.
+    REQUIRE(decoded.sourceColor == 0);
+    REQUIRE(decoded.colorVersion == kStandardPreviewColorVersion);
 
     // Pixel-exact payload.
     for (int y = 0; y < h; ++y)
@@ -184,7 +189,7 @@ TEST_CASE("StandardPreview: v2 encode/decode round-trips native dimensions",
                         Approx(buf->pixel(x, y, c)).epsilon(1e-6));
 }
 
-TEST_CASE("StandardPreview: legacy v1 blob is still decodable (native=0)",
+TEST_CASE("StandardPreview: single-arg encode records native=0 / colour=none",
           "[standard-preview][S8a]") {
     const int w = 8;
     const int h = 6;
@@ -194,9 +199,9 @@ TEST_CASE("StandardPreview: legacy v1 blob is still decodable (native=0)",
             for (int c = 0; c < 3; ++c)
                 buf->setPixel(x, y, c, 0.4f);
 
-    // Legacy v1 encode (single-arg overload) -> 24-byte header, no native dims.
+    // Single-arg overload -> current v3 header with no native dims / colour.
     auto blob = encodeStandardPreview(*buf);
-    REQUIRE(blob.size() == 24u + static_cast<size_t>(w) * h * 3 * sizeof(float));
+    REQUIRE(blob.size() == 40u + static_cast<size_t>(w) * h * 3 * sizeof(float));
 
     auto decoded = decodeStandardPreview(blob);
     REQUIRE(decoded.buf);
@@ -206,10 +211,10 @@ TEST_CASE("StandardPreview: legacy v1 blob is still decodable (native=0)",
     REQUIRE(decoded.nativeHeight == 0);
 }
 
-TEST_CASE("StandardPreview: v1 blob with truncated v2-style tail is rejected",
+TEST_CASE("StandardPreview: obsolete v1/v2 blobs are rejected as stale (R-10)",
           "[standard-preview][S8a]") {
-    // A v1 blob (24-byte header) must NOT be misread as v2 by the decoder even
-    // if the payload happens to start with bytes that look like a nativeW/H pair.
+    // Any blob whose header version is not the current v3 was produced before
+    // ICC-aware conversion (R-08/R-09) and must be regenerated, never reused.
     const int w = 2;
     const int h = 2;
     auto buf = ImageBuffer::create(w, h, PixelFormat::F32);
@@ -217,14 +222,30 @@ TEST_CASE("StandardPreview: v1 blob with truncated v2-style tail is rejected",
         for (int x = 0; x < w; ++x)
             for (int c = 0; c < 3; ++c)
                 buf->setPixel(x, y, c, 0.5f);
-    auto blob = encodeStandardPreview(*buf); // v1
-    REQUIRE(blob.size() == 24u + 2u * 2 * 3 * 4u);
 
-    // Decoder must accept it as v1 (native=0), not crash, not misreport dims.
-    auto decoded = decodeStandardPreview(blob);
-    REQUIRE(decoded.buf);
-    REQUIRE(decoded.nativeWidth == 0);
-    REQUIRE(decoded.nativeHeight == 0);
+    // A v2 header (32 bytes: magic, version=2, w, h, channels, format, nativeW,
+    // nativeH) with a valid payload must be treated as stale.
+    std::vector<uint8_t> v2 = {'S', 'H', 'S', 'P'};
+    auto pushU32 = [&v2](uint32_t v) {
+        for (int i = 0; i < 4; ++i)
+            v2.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFFu));
+    };
+    pushU32(2);  // version
+    pushU32(w);
+    pushU32(h);
+    pushU32(3);                        // channels
+    pushU32(2);                        // format F32
+    pushU32(4);                        // nativeW
+    pushU32(4);                        // nativeH
+    const auto* src = buf->data().data();
+    v2.insert(v2.end(), src, src + static_cast<size_t>(w) * h * 3 * sizeof(float));
+
+    auto stale = decodeStandardPreview(v2);
+    REQUIRE_FALSE(stale.buf);  // stale -> must regenerate (R-10)
+
+    // A current v3 blob from the same pixels still decodes.
+    auto current = decodeStandardPreview(encodeStandardPreview(*buf));
+    REQUIRE(current.buf);
 }
 
 TEST_CASE("StandardPreview: buildStandardPreview2 reports native dimensions",
@@ -243,6 +264,43 @@ TEST_CASE("StandardPreview: buildStandardPreview2 reports native dimensions",
     // Non-RAW sources report native dimensions equal to the source size.
     REQUIRE(built.nativeWidth == 1280);
     REQUIRE(built.nativeHeight == 960);
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("StandardPreview: source-colour hash is recorded in the blob (R-10)",
+          "[standard-preview][R10]") {
+    const auto dir = makeTempDir("r10color");
+    std::error_code ec;
+    const auto srcPath = dir / "src.jpg";
+    auto src = makeSource(640, 400);
+
+    // Untagged JPEG -> fallback sRGB -> sourceColor == 0.
+    REQUIRE(ImageIO::writeJpeg(srcPath, *src, 90));
+    auto builtPlain = buildStandardPreview2(lrc::pathToUtf8(srcPath));
+    REQUIRE(builtPlain.buf);
+    REQUIRE(builtPlain.sourceColor == 0);
+
+    // Adobe RGB-tagged JPEG -> non-zero source-colour hash that round-trips
+    // through encode/decode. This is the record that lets a future policy
+    // change or source-ICC swap invalidate the cached preview (R-10).
+    const auto adobe = ColorManager::exportProfileBytes(
+        ColorManager::ExportColorProfile::AdobeRGB);
+    REQUIRE_FALSE(adobe.empty());
+    const auto tagged = dir / "adobe.jpg";
+    REQUIRE(ImageIO::writeJpeg(tagged, *src, 90, adobe));
+    auto builtTagged = buildStandardPreview2(lrc::pathToUtf8(tagged));
+    REQUIRE(builtTagged.buf);
+    REQUIRE_FALSE(builtTagged.sourceColor == 0);
+
+    auto blob = encodeStandardPreview(*builtTagged.buf,
+                                      builtTagged.nativeWidth,
+                                      builtTagged.nativeHeight,
+                                      builtTagged.sourceColor);
+    auto decoded = decodeStandardPreview(blob);
+    REQUIRE(decoded.buf);
+    REQUIRE(decoded.sourceColor == builtTagged.sourceColor);
+    REQUIRE(decoded.colorVersion == kStandardPreviewColorVersion);
 
     std::filesystem::remove_all(dir, ec);
 }

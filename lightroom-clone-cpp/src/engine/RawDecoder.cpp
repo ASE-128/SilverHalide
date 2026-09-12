@@ -6,6 +6,7 @@
 #include <libraw/libraw.h>
 
 #include "engine/ColorManager.h"
+#include "engine/DcpProfile.h"
 #include "engine/ImageFormats.h"
 #include "engine/ImageIO.h"
 #include "utils/Parallel.h"
@@ -16,6 +17,182 @@ namespace {
 
 bool rawOk(const char* what, int ret) {
     return ret == LIBRAW_SUCCESS;
+}
+
+// Assembles the camera / lens / exposure metadata and native dimensions from an
+// opened LibRaw instance. Shared by decode() and readMeta() so both report
+// identical EXIF-derived values. `width`/`height` are the "as-decoded" frame
+// dimensions (halved for half-size previews); nativeWidth/Height are always the
+// full-resolution, rotation-corrected dimensions.
+RawMeta makeRawMeta(const LibRaw& raw, int width, int height) {
+    RawMeta meta;
+    meta.make = std::string(raw.imgdata.idata.make);
+    meta.model = std::string(raw.imgdata.idata.model);
+    meta.lensMaker = std::string(raw.imgdata.lens.LensMake);
+    meta.lensModel = std::string(raw.imgdata.lens.Lens);
+    meta.focalLengthMm = raw.imgdata.other.focal_len;
+    meta.aperture = raw.imgdata.other.aperture;
+    meta.cropFactor = raw.imgdata.lens.FocalLengthIn35mmFormat > 0.0f &&
+                              meta.focalLengthMm > 0.0f
+                          ? raw.imgdata.lens.FocalLengthIn35mmFormat /
+                                meta.focalLengthMm
+                          : 1.0f;
+    meta.width = width;
+    meta.height = height;
+    // 原生尺寸 = 全尺寸解码 (halfSize=false) 的输出，含 90° 翻转换算 (native).
+    // img->width 已被 half_size 减半，不能当原生尺寸 (img is halved by half_size).
+    const bool rotated = (raw.imgdata.sizes.flip & 4) != 0;
+    meta.nativeWidth = rotated ? raw.imgdata.sizes.iheight : raw.imgdata.sizes.iwidth;
+    meta.nativeHeight = rotated ? raw.imgdata.sizes.iwidth : raw.imgdata.sizes.iheight;
+    // As-shot white balance multipliers (relative to green).
+    const double gm = raw.imgdata.color.cam_mul[1] > 0 ? raw.imgdata.color.cam_mul[1] : 1.0;
+    meta.asShotWBR = raw.imgdata.color.cam_mul[0] / gm;
+    meta.asShotWBG = 1.0;
+    meta.asShotWBB = raw.imgdata.color.cam_mul[2] / gm;
+    return meta;
+}
+
+// Inverts a non-singular 3x3 matrix (row-major) via the adjugate/determinant
+// formula. Used to compute the Moore–Penrose pseudo-inverse below.
+bool invert3x3(const double m[3][3], double out[3][3]) {
+    const double a = m[0][0], b = m[0][1], c = m[0][2];
+    const double d = m[1][0], e = m[1][1], f = m[1][2];
+    const double g = m[2][0], h = m[2][1], i = m[2][2];
+    const double det = a * (e * i - f * h) - b * (d * i - f * g) +
+                       c * (d * h - e * g);
+    if (det == 0.0)
+        return false;
+    const double inv = 1.0 / det;
+    out[0][0] = (e * i - f * h) * inv;
+    out[0][1] = (c * h - b * i) * inv;
+    out[0][2] = (b * f - c * e) * inv;
+    out[1][0] = (f * g - d * i) * inv;
+    out[1][1] = (a * i - c * g) * inv;
+    out[1][2] = (c * d - a * f) * inv;
+    out[2][0] = (d * h - e * g) * inv;
+    out[2][1] = (b * g - a * h) * inv;
+    out[2][2] = (a * e - b * d) * inv;
+    return true;
+}
+
+// R-01: re-target libraw's colour pipeline at a DCP ColorMatrix1 instead of its
+// built-in camera matrix.
+//
+// libraw applies its camera matrix through the public `imgdata.color.rgb_cam`
+// member, which `dcraw_process()` -> `convert_to_rgb()` reads verbatim. We
+// recompute rgb_cam from the DCP matrix, replicating libraw's own derivation
+// (`cam_xyz_coeff`: camera->XYZ matrix composed with the sRGB XYZ basis,
+// row-normalised, then pseudo-inverted and transposed into rgb_cam). Because
+// `cam_xyz_coeff` is protected, we reproduce the arithmetic here.
+//
+// IMPORTANT: rgb_cam and the as-shot white balance (`pre_mul`) are only weakly
+// coupled; we write rgb_cam and NEVER touch pre_mul, so the sensor's WB gains
+// stay exactly as libraw calibrated them. Re-deriving white balance from an
+// arbitrary DCP matrix is the failure this decoder already documented ("every
+// RAW came out green") — we avoid it by construction.
+//
+// `dcp` stays owned by the caller; this helper only reads it.
+void injectDcpColorMatrix(LibRaw& raw, const DcpProfile& dcp) {
+    if (!dcp.hasColorMatrix1)
+        return;
+    // Location of xyz_rgb in libraw (XYZ_from_sRGB, D65) — mirroring the
+    // constant the library uses in cam_xyz_coeff.
+    static const double kXyzRgb[3][3] = {
+        {0.4124564, 0.3575761, 0.1804375},
+        {0.2126729, 0.7151522, 0.0721750},
+        {0.0193339, 0.1191920, 0.9503041}};
+    const int colors = raw.imgdata.idata.colors;
+    if (colors < 3)
+        return;
+
+    // DCP ColorMatrix1 maps camera RGB -> XYZ(D50) with rows = X,Y,Z and
+    // columns = R,G,B. libraw's cam_xyz is [colorChannel][XYZ], so transpose
+    // the DCP matrix onto that channel-major layout, then compose with the RGB
+    // basis exactly as cam_xyz_coeff does.
+    double camRgb[4][3] = {};
+    for (int c = 0; c < colors; ++c)
+        for (int j = 0; j < 3; ++j) {
+            double sum = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double camXyz =
+                    c < 3 ? dcp.colorMatrix1[k * 3 + c] : 0.0;
+                sum += camXyz * kXyzRgb[k][j];
+            }
+            camRgb[c][j] = sum;
+        }
+    // Row-normalise (dcraw normalises each camera channel so its sum is 1).
+    for (int c = 0; c < colors; ++c) {
+        double rowSum = camRgb[c][0] + camRgb[c][1] + camRgb[c][2];
+        if (rowSum > 1e-5)
+            for (int j = 0; j < 3; ++j)
+                camRgb[c][j] /= rowSum;
+    }
+
+    // Moore–Penrose pseudo-inverse rgb_cam = (A^T A)^{-1} A^T: A is colors x 3
+    // (camRgb), so A^T A is 3x3 (invertible for 3>=3 independent channels).
+    double ata[3][3] = {};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < colors; ++k)
+                ata[i][j] += camRgb[k][i] * camRgb[k][j];
+    double ataInv[3][3];
+    if (!invert3x3(ata, ataInv))
+        return;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < colors; ++j) {
+            double v = 0.0;
+            for (int k = 0; k < 3; ++k)
+                v += ataInv[i][k] * camRgb[j][k];
+            // dcraw stores the transpose: rgb_cam[i][j] = pseudoInv[j][i].
+            raw.imgdata.color.rgb_cam[i][j] = static_cast<float>(v);
+        }
+}
+
+// R-01: applies a DCP tone curve (uniform 16-bit input domain across its
+// samples) to the working-space linear buffer in place. The curve maps a
+// linear input x in [0, 65535] onto an output curve magnitude; we re-map the
+// working-space values onto that domain and interpolate between neighbouring
+// samples. Kept conservative: out-of-range inputs are clamped to the curve
+// ends. The curve/white-point mapping should be re-verified against a real DCP
+// + reference transform during acceptance (see the review report's R-01).
+ImageBufferPtr applyDcpToneCurve(const ImageBufferPtr& src,
+                                 const DcpProfile& dcp) {
+    if (!src || src->format() != PixelFormat::F32 || dcp.toneCurveSize < 2)
+        return src;
+    const float* in =
+        reinterpret_cast<const float*>(src->data().data());
+    const size_t nPixels = static_cast<size_t>(src->width()) * src->height();
+    auto out = ImageBuffer::create(src->width(), src->height(),
+                                   PixelFormat::F32);
+    float* o = reinterpret_cast<float*>(out->data().data());
+    const float last = static_cast<float>(dcp.toneCurveSize - 1);
+    const float kMaxDomain = 65535.0f;
+    lrc::parallel::parallelFor(
+        nPixels, lrc::parallel::defaultGrain(nPixels),
+        [&](size_t begin, size_t end) {
+            for (size_t i = begin; i < end; ++i) {
+                const size_t base = i * 3;
+                for (int c = 0; c < 3; ++c) {
+                    float v = in[base + c];
+                    if (v <= 0.0f) {
+                        o[base + c] = dcp.toneCurve[0];
+                        continue;
+                    }
+                    if (v >= kMaxDomain) {
+                        o[base + c] = dcp.toneCurve[dcp.toneCurveSize - 1];
+                        continue;
+                    }
+                    const float xf = (v / kMaxDomain) * last;
+                    const long i0 = static_cast<long>(xf);
+                    const long i1 = i0 < static_cast<long>(last) ? i0 + 1 : i0;
+                    const float frac = xf - static_cast<float>(i0);
+                    o[base + c] =
+                        dcp.toneCurve[i0] * (1.0f - frac) +
+                        dcp.toneCurve[i1] * frac;
+                }
+            }
+        });
+    return out;
 }
 
 } // namespace
@@ -30,8 +207,24 @@ bool RawDecoder::isSupported(const std::filesystem::path& path) {
     return isImportablePath(path);
 }
 
+std::optional<RawMeta> RawDecoder::readMeta(
+    const std::filesystem::path& path) const {
+    // Metadata-only reads are only meaningful for RAW files; the JPEG/PNG/TIFF
+    // path has no libraw instance to open (EXIF extraction for those formats is
+    // out of scope for this lightweight API).
+    if (!isRawPath(path))
+        return std::nullopt;
+    LibRaw raw;
+    if (!rawOk("open", raw.open_file(path.string().c_str())))
+        return std::nullopt;
+    // No unpack / process: the reported frame dimensions are the raw's native
+    // full-res sizes (this path never halves).
+    return makeRawMeta(raw, raw.imgdata.sizes.width, raw.imgdata.sizes.height);
+}
+
 std::optional<DecodedImage> RawDecoder::decode(
-    const std::filesystem::path& path, const DecodeParams& params) const {
+    const std::filesystem::path& path, const DecodeParams& params,
+    const DcpProfile* dcp) const {
     // Non-RAW formats (JPEG/PNG/TIFF) never reach libraw: they are already
     // demosaiced and rendered, so libraw would mis-treat them as camera data.
     if (!isRawPath(path))
@@ -64,6 +257,13 @@ std::optional<DecodedImage> RawDecoder::decode(
     p.gamm[1] = 1.0;      // keep a perfectly linear response
     p.half_size = params.halfSize ? 1 : 0;
 
+    // R-01: swap libraw's built-in camera matrix for a user-selected DCP colour
+    // matrix. Must run after open_file (rgb_cam is computed in identify) and
+    // before dcraw_process (whose convert_to_rgb() snapshots rgb_cam). The
+    // white balance (pre_mul) is preserved by the helper.
+    if (dcp)
+        injectDcpColorMatrix(raw, *dcp);
+
     if (!rawOk("unpack", raw.unpack()))
         return std::nullopt;
     if (!rawOk("process", raw.dcraw_process()))
@@ -76,30 +276,7 @@ std::optional<DecodedImage> RawDecoder::decode(
         return std::nullopt;
     }
 
-    RawMeta meta;
-    meta.make = std::string(raw.imgdata.idata.make);
-    meta.model = std::string(raw.imgdata.idata.model);
-    meta.lensMaker = std::string(raw.imgdata.lens.LensMake);
-    meta.lensModel = std::string(raw.imgdata.lens.Lens);
-    meta.focalLengthMm = raw.imgdata.other.focal_len;
-    meta.aperture = raw.imgdata.other.aperture;
-    meta.cropFactor = raw.imgdata.lens.FocalLengthIn35mmFormat > 0.0f &&
-                              meta.focalLengthMm > 0.0f
-                          ? raw.imgdata.lens.FocalLengthIn35mmFormat /
-                                meta.focalLengthMm
-                          : 1.0f;
-    meta.width = img->width;
-    meta.height = img->height;
-    // 原生尺寸 = 全尺寸解码 (halfSize=false) 的输出，含 90° 翻转换算 (native).
-    // img->width 已被 half_size 减半，不能当原生尺寸 (img is halved by half_size).
-    const bool rotated = (raw.imgdata.sizes.flip & 4) != 0;
-    meta.nativeWidth = rotated ? raw.imgdata.sizes.iheight : raw.imgdata.sizes.iwidth;
-    meta.nativeHeight = rotated ? raw.imgdata.sizes.iwidth : raw.imgdata.sizes.iheight;
-    // As-shot white balance multipliers (relative to green).
-    const double gm = raw.imgdata.color.cam_mul[1] > 0 ? raw.imgdata.color.cam_mul[1] : 1.0;
-    meta.asShotWBR = raw.imgdata.color.cam_mul[0] / gm;
-    meta.asShotWBG = 1.0;
-    meta.asShotWBB = raw.imgdata.color.cam_mul[2] / gm;
+    RawMeta meta = makeRawMeta(raw, img->width, img->height);
 
     // Copy the decoded 16-bit RGB data into an ImageBuffer.
     auto linear = ImageBuffer::create(img->width, img->height, PixelFormat::U16);
@@ -136,6 +313,13 @@ std::optional<DecodedImage> RawDecoder::decode(
     // libraw's ProPhoto space; the GUI always injects one.
     if (cm_)
         linear = cm_->fromDcrawProPhoto(*linear);
+
+    // R-01: apply the DCP tone curve in the working space. The curve lives on
+    // the linear working buffer (F32); when no color manager is present the
+    // buffer stays U16 and the curve is skipped (headless format tests only).
+    // Zero-cost no-op when the profile carries no curve or `linear` is not F32.
+    if (dcp && linear && linear->format() == PixelFormat::F32)
+        linear = applyDcpToneCurve(linear, *dcp);
 
     if (params.maxDim > 0) {
         const int longest = std::max(linear->width(), linear->height());
@@ -177,14 +361,17 @@ std::optional<DecodedImage> RawDecoder::decodeNonRaw(
     if (!cm_)
         return std::nullopt;
 
-    // stb_image reads JPEG/PNG/TIFF into a display-ready 8-bit sRGB buffer.
-    auto srgb = ImageIO::loadImage(path);
-    if (!srgb || srgb->empty())
+    // Load the source at native bit depth and with its embedded ICC profile, so
+    // a wide-gamut (Adobe RGB / Display P3) or 16-bit file is converted from its
+    // true source space instead of being assumed sRGB at 8-bit (R-08/R-09).
+    auto src = ImageIO::loadSourceImage(path);
+    if (!src.pixels || src.pixels->empty())
         return std::nullopt;
 
     // Convert to the same linear ProPhoto working space the RAW path uses, so
-    // the rest of the pipeline treats every import identically.
-    auto linear = cm_->srgbToLinearProPhoto(*srgb);
+    // the rest of the pipeline treats every import identically. An empty ICC
+    // falls back to sRGB (the documented convention for untagged files).
+    auto linear = cm_->sourceToLinearProPhoto(*src.pixels, src.icc);
     if (!linear || linear->empty())
         return std::nullopt;
 
@@ -211,7 +398,16 @@ std::optional<DecodedImage> RawDecoder::decodeNonRaw(
     meta.nativeHeight = nativeH;
     // As-shot WB and camToProPhoto are RAW-only concepts; for an sRGB file the
     // buffer already sits in ProPhoto, so the identity defaults apply.
-    return DecodedImage{std::move(linear), std::move(meta)};
+
+    // FNV-1a over the embedded source ICC so a catalog preview can record which
+    // colour space produced these pixels (R-10). 0 == untagged sRGB source.
+    uint32_t cc = 2166136261u;
+    for (uint8_t b : src.icc) {
+        cc ^= b;
+        cc *= 16777619u;
+    }
+    return DecodedImage{std::move(linear), std::move(meta),
+                        src.icc.empty() ? 0u : cc};
 }
 
 } // namespace lrc

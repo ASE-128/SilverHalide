@@ -5,8 +5,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
+#include <system_error>
 #include <utility>
 
 #include <sqlite3.h>
@@ -908,13 +910,51 @@ bool CatalogDatabase::removeImage(int64_t id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!db_)
         return false;
+    // Collect the external on-disk cache files referenced by this row
+    // (thumbnail_path / fullres_path) so they are removed with the record.
+    // The DB-level dependencies (edits/history/variants/previews) are cleaned by
+    // the FK cascade, but those two files live outside SQLite and are not (R-16).
+    std::vector<std::string> cacheFiles;
+    {
+        Stmt q(db_,
+               "SELECT thumbnail_path, fullres_path FROM images WHERE id=?1;",
+               &stmtCache_);
+        if (q.ok()) {
+            sqlite3_bind_int64(q.stmt, 1, id);
+            if (q.step() == SQLITE_ROW) {
+                if (auto* p = reinterpret_cast<const char*>(
+                        sqlite3_column_text(q.stmt, 0));
+                    p && *p)
+                    cacheFiles.emplace_back(p);
+                if (auto* p = reinterpret_cast<const char*>(
+                        sqlite3_column_text(q.stmt, 1));
+                    p && *p)
+                    cacheFiles.emplace_back(p);
+            }
+        }
+    }
+
     Stmt s(db_, "DELETE FROM images WHERE id = ?1;", &stmtCache_);
     if (!s.ok()) {
         lastError_ = sqlite3_errmsg(db_);
         return false;
     }
     sqlite3_bind_int64(s.stmt, 1, id);
-    return s.step() == SQLITE_DONE;
+    const bool ok = s.step() == SQLITE_DONE;
+
+    // Best-effort removal of the referenced cache files. The stored paths may
+    // be relative to the working directory; never throw and never fail the
+    // call on a stale/missing file (R-16).
+    if (ok) {
+        for (const std::string& rel : cacheFiles) {
+            std::error_code ec;
+            std::filesystem::path p = std::filesystem::u8path(rel);
+            if (p.is_relative())
+                p = std::filesystem::absolute(p);
+            std::filesystem::remove(p, ec);
+        }
+    }
+    return ok;
 }
 
 std::vector<ImageRecord> CatalogDatabase::listImages() const {
@@ -1195,6 +1235,19 @@ bool CatalogDatabase::hasStandardPreview(int64_t imageId) const {
     sqlite3_bind_int64(s.stmt, 1, imageId);
     sqlite3_bind_int(s.stmt, 2, static_cast<int>(PreviewKind::Standard));
     return s.step() == SQLITE_ROW;
+}
+
+bool CatalogDatabase::invalidatePreviews(int64_t imageId) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return false;
+    Stmt s(db_, "DELETE FROM previews WHERE image_id = ?1;", &stmtCache_);
+    if (!s.ok()) {
+        lastError_ = sqlite3_errmsg(db_);
+        return false;
+    }
+    sqlite3_bind_int64(s.stmt, 1, imageId);
+    return s.step() == SQLITE_DONE;
 }
 
 bool CatalogDatabase::saveAdjustments(int64_t imageId,
@@ -1523,8 +1576,8 @@ int CatalogDatabase::createVirtualCopy(int64_t imageId) {
 
         Stmt cpHist(db_,
                     "INSERT INTO edit_history(image_id, variant_id, "
-                    "adjustment_json, created_at) SELECT image_id, ?2, "
-                    "adjustment_json, created_at FROM edit_history "
+                    "adjustment_json, name, created_at) SELECT image_id, ?2, "
+                    "adjustment_json, name, created_at FROM edit_history "
                     "WHERE image_id = ?1 AND variant_id = 0;", &stmtCache_);
         if (!cpHist.ok()) {
             lastError_ = sqlite3_errmsg(db_);

@@ -19,8 +19,10 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStandardItemModel>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include "app/Constants.h"
 #include "catalog/CatalogDatabase.h"
@@ -30,6 +32,14 @@
 #include "ui/PanelSection.h"
 
 namespace {
+
+class NoWheelSlider final : public QSlider {
+public:
+    using QSlider::QSlider;
+
+protected:
+    void wheelEvent(QWheelEvent* event) override { event->ignore(); }
+};
 
 const char* kColorNames[8] = {
     QT_TR_NOOP("红"), QT_TR_NOOP("橙"), QT_TR_NOOP("黄"), QT_TR_NOOP("绿"),
@@ -44,7 +54,7 @@ QWidget* makeSliderRow(QWidget* parent, QSlider*& slider,
     h->setSpacing(6);
     auto* lbl = new QLabel(parent->tr(label), parent);
     lbl->setFixedWidth(46);
-    slider = new QSlider(Qt::Horizontal, parent);
+    slider = new NoWheelSlider(Qt::Horizontal, parent);
     spin = new QDoubleSpinBox(parent);
     spin->setDecimals(decimals);
     spin->setSingleStep(std::pow(10.0, -static_cast<double>(decimals)));
@@ -103,9 +113,21 @@ DevelopPanel::DevelopPanel(QWidget* parent)
 
     auto addSection = [&](const QString& title) {
         auto* section = new PanelSection(title, this);
+        sections_.push_back(section);
         root->addWidget(section);
         return section;
     };
+
+    sectionTabs_ = new QTabBar(this);
+    sectionTabs_->addTab(tr("编辑"));
+    sectionTabs_->addTab(tr("裁剪"));
+    sectionTabs_->addTab(tr("蒙版"));
+    sectionTabs_->addTab(tr("元数据"));
+    sectionTabs_->setExpanding(true);
+    sectionTabs_->setDocumentMode(true);
+    root->addWidget(sectionTabs_);
+    connect(sectionTabs_, &QTabBar::currentChanged, this,
+            &DevelopPanel::setSectionMode);
 
     // ---- 基本 ---------------------------------------------------------------
     PanelSection* basic = addSection(tr("基本"));
@@ -228,7 +250,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     auto* aiNrRow = new QHBoxLayout;
     aiNrRow->setSpacing(6);
     aiDenoiseEnabledCheck_ = new QCheckBox(tr("启用"), this);
-    aiDenoiseStrengthSlider_ = new QSlider(Qt::Horizontal, this);
+    aiDenoiseStrengthSlider_ = new NoWheelSlider(Qt::Horizontal, this);
     aiDenoiseStrengthSlider_->setRange(0, 100);
     aiDenoiseStrengthSlider_->setValue(0);
     aiDenoiseStrengthSpin_ = new QDoubleSpinBox(this);
@@ -577,6 +599,12 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     // ---- 蒙版（局部调整） ---------------------------------------------------
     PanelSection* maskSec = addSection(tr("蒙版"));
 
+        auto* detachMaskBtn = new QPushButton(tr("独立蒙版窗口"), this);
+        detachMaskBtn->setProperty("secondary", true);
+        maskSec->addWidget(detachMaskBtn);
+        connect(detachMaskBtn, &QPushButton::clicked, this,
+            &DevelopPanel::maskWindowRequested);
+
     // Tool buttons: linear gradient / radial gradient / brush, exclusive.
     auto* maskToolsRow = new QHBoxLayout;
     maskToolsRow->setSpacing(6);
@@ -678,7 +706,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
         h->setSpacing(6);
         auto* lbl = new QLabel(tr(label), this);
         lbl->setFixedWidth(46);
-        slider = new QSlider(Qt::Horizontal, this);
+        slider = new NoWheelSlider(Qt::Horizontal, this);
         slider->setRange(0, 10000);
         slider->setSingleStep(100);
         h->addWidget(lbl);
@@ -1021,7 +1049,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     spotRadiusRow->setSpacing(6);
     auto* spotRadiusLabel = new QLabel(tr("半径"), this);
     spotRadiusLabel->setFixedWidth(46);
-    spotRadiusSlider_ = new QSlider(Qt::Horizontal, this);
+    spotRadiusSlider_ = new NoWheelSlider(Qt::Horizontal, this);
     spotRadiusSlider_->setRange(0, 10000);
     spotRadiusSlider_->setSingleStep(100);
     spotRadiusSpin_ = new QDoubleSpinBox(this);
@@ -1146,6 +1174,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     metadataCommit_.setInterval(lrc::app::throttle::kMetadataCommitMs);
     connect(&metadataCommit_, &QTimer::timeout, this,
             &DevelopPanel::emitMetadataEdited);
+    setSectionMode(0);
 }
 
 void DevelopPanel::addRow(Row row) {
@@ -1432,8 +1461,7 @@ void DevelopPanel::addAiMask(lrc::AiMaskTarget target) {
     }
     updateMaskSectionVisibility();
     syncMaskSliders();
-    // No maskEditRequested: AiMask has no on-canvas geometry to edit. The
-    // preview still re-renders because scheduleDebounce fires.
+    emit maskEditRequested(current_.masks[static_cast<size_t>(index)], index);
     emit maskToolActivated(lrc::MaskType::AiMask);
     scheduleDebounce();
 }
@@ -1697,8 +1725,26 @@ void DevelopPanel::syncMaskSection() {
     {
         const QSignalBlocker b(maskCombo_);
         maskCombo_->clear();
-        for (size_t i = 0; i < current_.masks.size(); ++i)
-            maskCombo_->addItem(tr("蒙版 %1").arg(static_cast<int>(i) + 1));
+        for (size_t i = 0; i < current_.masks.size(); ++i) {
+            const lrc::Mask& mask = current_.masks[i];
+            QString label;
+            if (mask.type == lrc::MaskType::AiMask) {
+                switch (mask.ai.target) {
+                    case lrc::AiMaskTarget::Subject:
+                        label = tr("AI 主体");
+                        break;
+                    case lrc::AiMaskTarget::Sky:
+                        label = tr("AI 天空");
+                        break;
+                    case lrc::AiMaskTarget::Background:
+                        label = tr("AI 背景");
+                        break;
+                }
+            } else {
+                label = tr("蒙版 %1").arg(static_cast<int>(i) + 1);
+            }
+            maskCombo_->addItem(label);
+        }
         // clear()+addItem auto-selects index 0; restore the kept selection, or
         // explicitly deselect when the tool was disarmed (keep == -1) so the
         // combo does not silently show "蒙版 1" as selected.
@@ -1744,6 +1790,20 @@ void DevelopPanel::clearMaskTool() {
     syncMaskSection();
     syncMaskSliders();
     emit maskToolActivated(lrc::MaskType::None);
+}
+
+void DevelopPanel::setSectionMode(int mode) {
+    const bool showEdit = mode == 0;
+    const bool showMask = mode == 2;
+    const bool showMetadata = mode == 3;
+    for (PanelSection* section : sections_) {
+        const QString title = section->title();
+        const bool visible = (showEdit && title != tr("蒙版") &&
+                              title != tr("元数据")) ||
+                             (showMask && title == tr("蒙版")) ||
+                             (showMetadata && title == tr("元数据"));
+        section->setVisible(visible);
+    }
 }
 
 // --- colour-range mask --------------------------------------------------------
