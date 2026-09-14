@@ -162,7 +162,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     if (catalogPath.isEmpty())
         catalogPath = Application::defaultCatalogPath();
     catalogPath_ = catalogPath;
-    catalog_ = std::make_unique<lrc::CatalogDatabase>(toStdPath(catalogPath));
+    // 目录即库: the stored catalog location may be a folder (new layout) or a
+    // lone legacy .lrcat file. Resolve the SQLite library file and preview
+    // side-directory from it; CatalogDatabase externalizes previews to disk.
+    catalog_ = std::make_unique<lrc::CatalogDatabase>(
+        toStdPath(Application::catalogDbFile(catalogPath)),
+        toStdPath(Application::catalogPreviewDir(catalogPath)));
     if (!catalog_->open()) {
         QMessageBox::critical(
             this, tr("目录错误"),
@@ -182,8 +187,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     if (storedRoot && !storedRoot->empty()) {
         libraryRoot_ = QString::fromStdString(*storedRoot);
     } else {
-        libraryRoot_ = QFileInfo(catalogPath).absolutePath() +
-                       QStringLiteral("/Library");
+        // 目录即库: for a folder-as-library catalog the managed library lives
+        // *inside* the catalog folder; for a lone legacy .lrcat it sits next to
+        // the file (its containing directory).
+        const QString container = QFileInfo(catalogPath).isDir()
+                                      ? catalogPath
+                                      : QFileInfo(catalogPath).absolutePath();
+        libraryRoot_ = container + QStringLiteral("/Library");
         QDir().mkpath(libraryRoot_);
         catalog_->setSetting("library_root", libraryRoot_.toStdString());
     }
@@ -822,13 +832,12 @@ void MainWindow::onMaskToolActivated(lrc::MaskType tool) {
 }
 
 void MainWindow::newCatalog() {
-    const QString dir =
-        QFileInfo(Application::defaultCatalogPath()).absolutePath();
-    const QString path = QFileDialog::getSaveFileName(
-        this, tr("新建目录"),
-        dir + QLatin1Char('/') +
-            QString::fromLatin1(lrc::app::kDefaultCatalogFile),
-        tr("目录数据库 (*.lrcat)"));
+    // 目录即库: the user picks a *folder*; the SQLite library file
+    // (<folder>/<folderName>.shcat) and preview side-dir are created there on
+    // the next launch. A "catalog" is now a directory, not a lone .lrcat file.
+    const QString dir = Application::defaultCatalogPath();
+    const QString path = QFileDialog::getExistingDirectory(
+        this, tr("新建目录"), dir);
     if (path.isEmpty())
         return;
     QSettings settings;
@@ -839,10 +848,13 @@ void MainWindow::newCatalog() {
 }
 
 void MainWindow::openCatalog() {
-    const QString dir =
-        QFileInfo(Application::defaultCatalogPath()).absolutePath();
+    // 目录即库: select a catalog *folder*. A legacy lone .lrcat file is still
+    // openable — the file dialog's filter accepts both so existing users can
+    // migrate their old single-file catalogs in place.
+    const QString dir = Application::defaultCatalogPath();
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("打开目录"), dir, tr("目录数据库 (*.lrcat)"));
+        this, tr("打开目录"), dir,
+        tr("目录(*.shcat);;目录数据库 (*.lrcat)"));
     if (path.isEmpty())
         return;
     QSettings settings;
@@ -854,8 +866,8 @@ void MainWindow::openCatalog() {
 
 void MainWindow::backupCatalog() {
     const QString path = QFileDialog::getSaveFileName(
-        this, tr("备份目录"), QDir::homePath() + QStringLiteral("/backup.lrcat"),
-        tr("目录数据库 (*.lrcat)"));
+        this, tr("备份目录"), QDir::homePath() + QStringLiteral("/backup.shcat"),
+        tr("目录 (*.shcat)"));
     if (path.isEmpty())
         return;
     if (dbOpRunning_) {
@@ -2548,7 +2560,9 @@ void MainWindow::importPreset() {
     }
     const QString path = QFileDialog::getOpenFileName(
         this, tr("导入预设"), QString(),
-        tr("Lightroom 预设 (*.xmp);;本应用预设 (*.lrp)"));
+        // .xmp remains a readable legacy preset format (Lightroom compatibility);
+        // the visible name uses our own vocabulary, not the Lightroom brand.
+        tr("XMP 预设 (*.xmp);;本应用预设 (*.lrp)"));
     if (path.isEmpty())
         return;
 
@@ -2591,7 +2605,7 @@ void MainWindow::exportPreset() {
     QString selectedFilter;
     QString path = QFileDialog::getSaveFileName(
         this, tr("导出预设"), suggested,
-        tr("Lightroom 预设 (*.xmp);;本应用预设 (*.lrp)"), &selectedFilter);
+        tr("XMP 预设 (*.xmp);;本应用预设 (*.lrp)"), &selectedFilter);
     if (path.isEmpty())
         return;
 

@@ -25,6 +25,36 @@
 - **Lensfun（工作区未提交）**：已声明 `lensfun:x64-windows`、接入 Qt-free 查询 adapter 和 RAW 镜头元数据；UI 仅声明几何畸变支持（移除未实际处理的暗角/色差承诺，R-05）；vcpkg 安装仍受历史中断影响，数据库查询验证待完成。
 - **历史性能资料**：M1-M5 实施规格和四阶段加速报告位于 `docs/archive/`，仅作回溯依据，不作为当前进行中任务清单。
 
+## Catalog 持久化层重构与无模型打包（2026-09-14，工作区未提交）
+
+本轮对 `src/catalog` 持久化层做了整体升级，并完成 UI「目录即库」装配与无模型安装包。涉及的新增/修改类如下。
+
+**引擎/目录层（Qt-free）**：
+
+- `CatalogDatabase`（.h/.cpp，改动最大）：引入**版本化迁移**框架 `applyMigrations/migrateSqlVersion/migrateV1-4/migrateEnsureColumn/migrateEnsureColumnOn`，以 `PRAGMA user_version` + `schema_migrations` 表注册版本，每次迁移在事务内执行、失败整体回滚并关库（不再部分应用）。新增/改造：
+  - **预览外置**：previews 由 `data BLOB` 改为磁盘文件 + `path` 列；`previewPathFor/    previewFilePath/storePreviewImpl/finishPreviewExport` 写入 `<previewDir>/<id低3位hex>/<id>_<kind>.shcat`，迁移按可续跑方式把存量 BLOB 导成文件后删行瘦库。
+  - **文件指纹**：images 增 `file_size/file_mtime` 列 + `setFingerprint/detectModifiedImages/addImage(fileSize,fileMtime)`，支撑外部修改检测与导入幂等。
+  - **清单完整性**：统一 `applyPragmas`（foreign_keys=ON、WAL、synchronous=NORMAL、busy_timeout=5000）；表转 STRICT + CHECK；file_path 唯一索引改大小写不敏感；补 `collection_images`/`panorama_sources` 反向索引。
+  - **单连接并发**：移除双连接 import 系列，改单连接 + busy_timeout 队列。
+  - **检索能力**：FTS5 外置内容 + `images_search`（COALESCE 处理 NULL 关键字）；phash 分段 `phash_seg` 表粗筛 `scanPhashCandidates`；接入 sqlite-vec `vec0` 64 维 `images_vec`，`annByEmbedding/rebuildSearchIndexes` 支持降级。
+  - **生命周期**：edit_history 增 `kind` 列（auto/snapshot），`enableAutoSnapshotRetention` 每图自动历史保留 20 条。
+
+- `CatalogDatabase` 公开 API 补充注释（Doxygen `@brief/@param/@return`），引擎/目录层保持 Qt-free。
+
+**UI/装配层**：
+
+- `src/app/Constants.h`：`kDefaultCatalogFile` → `Default.shcat`；新增 `kPreviewSideDir=previews.shcat`、`kCatalogDbSuffix=.shcat`。
+- `src/app/Application.{h,cpp}`：`defaultCatalogPath()` 改返回**目录**（`AppData/…/Default`，目录即库），保留 legacy `.lrcat`/`.shcat` 单文件迁移（旧文件存在且新目录未建时返回旧文件）；新增 `catalogDbFile()`（目录→`<dir>/<stem>.shcat`，文件→原样）、`catalogPreviewDir()`（目录→`<dir>/previews.shcat`）。
+- `src/ui/MainWindow.cpp`：CatalogDatabase 构造传入 dbFile+previewDir；`newCatalog` 选目录、`openCatalog` 接受 `.shcat` 目录与 legacy `.lrcat`；libraryRoot 目录在目录内、legacy 文件在文件旁。移除用户可见 lr 名称：备份 `backup.lrcat`→`.shcat`、预设对话框 `Lightroom 预设`→`XMP 预设`（保留 `.xmp`/`.lrcat`/DCP 兼容读取能力）。
+- `src/catalog/CatalogDatabase.cpp` `open()`：新建目录前先 `create_directories(parent)`，目录不存在时自动创建而非报错。
+- `src/ui/ImportWorker.cpp`：改单连接批量事务（`addImage` 带指纹 / `storePreview` / `beginTransaction`）；修复 `fileFingerprint` chrono 模板 `duration` 类型错误（否则 GUI 无法编译）。
+
+**测试**：[TestCatalogDatabase.cpp](file:///d:/Desktop/SilverHalide-src/lightroom-clone-cpp/tests/TestCatalogDatabase.cpp) 新增 3 用例——文件指纹外改检测、重复 phash + 64 维 embedding ANN 索引（goal 6）、自动编辑历史保留 20 条且命名快照不受限。
+
+**打包**：新增 [packaging/installer-nomodels.iss](file:///d:/Desktop/SilverHalide-src/lightroom-clone-cpp/packaging/installer-nomodels.iss)（无模型 Inno Setup 变体：**链接并打包 onnxruntime.dll，仅不含 models/\* 模型权重文件**；保留 lensfun.dll+glib 链与全部 DCP profiles）。补齐 [install_stage](file:///d:/Desktop/SilverHalide-src/lightroom-clone-cpp/build_gui/install_stage) 的 lensfun 运行库链（`lensfun.dll`+`glib-2.0-0.dll`+`iconv-2.dll`+`intl-8.dll`+`pcre2-8.dll`），顺带解决「找不到 lensfun.dll」问题；产物 `dist/Silver Halide Setup 1.0.0 (No Models).exe`（实测静默安装：无 models、有 onnxruntime.dll/lensfun/DCP）。
+
+**验证**：GUI 编译通过；headless catalog **62 用例 / 2106 断言** 全绿。全量 headless 仅为 `TestRawDecoder.cc` off-by-2 ICC 前置问题及既有 pipeline/颜色路径失败（与本次无关）。
+
 ***
 
 # 内部开发历史（2.x dev milestones，仅作历史记录）

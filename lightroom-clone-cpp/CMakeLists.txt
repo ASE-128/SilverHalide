@@ -201,7 +201,31 @@ else()
   add_library(sqlite3 STATIC "${sqlite3fc_SOURCE_DIR}/sqlite3.c")
   target_include_directories(sqlite3 PUBLIC "${sqlite3fc_SOURCE_DIR}")
 endif()
-target_compile_definitions(sqlite3 PUBLIC SQLITE_THREADSAFE=1 SQLITE_USE_URI=1)
+# FTS5 (goal 6) ships inside the amalgamation; it only needs the feature
+# macro enabled. It stays PUBLIC so dependent targets (lrc_catalog) see it.
+target_compile_definitions(sqlite3 PUBLIC SQLITE_THREADSAFE=1 SQLITE_USE_URI=1
+                                     SQLITE_ENABLE_FTS5)
+
+# --- sqlite-vec (goal 6: 64-dim embedding KNN via the vec0 virtual table) ----
+# Vendored amalgamation compiled as a static, SQLITE_CORE unit so the vec0 vtab
+# is registered directly on a connection (registerVecModule). The catalog code
+# guards every vec0 use behind LRC_HAS_SQLITE_VEC + a runtime hasModule("vec0")
+# check, so a build without this target simply degrades to phash screening.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/third_party/sqlitevec/sqlite-vec.c")
+  add_library(sqlite_vec STATIC third_party/sqlitevec/sqlite-vec.c)
+  target_include_directories(sqlite_vec PUBLIC third_party/sqlitevec)
+  # Pulls in sqlite3.h (third_party/sqlite) so sqlite-vec.h resolves, and the
+  # sqlite3 core symbols it calls under SQLITE_CORE.
+  target_link_libraries(sqlite_vec PUBLIC sqlite3)
+  target_compile_definitions(sqlite_vec PUBLIC SQLITE_CORE SQLITE_VEC_STATIC
+                                       SQLITE_VEC_OMIT_FS)
+  if(MSVC)
+    target_compile_options(sqlite_vec PRIVATE /W1)
+  endif()
+  set(LRC_HAS_SQLITE_VEC ON CACHE INTERNAL "sqlite-vec amalgamation linked")
+else()
+  message(STATUS "sqlite-vec: omitted (third_party/sqlitevec/sqlite-vec.c missing)")
+endif()
 
 # --- pugixml (vendored single-header-pair XML parser, XMP sidecars) ---------
 if(NOT TARGET pugixml)
@@ -340,6 +364,12 @@ set(LRC_UTILS_SOURCES
 add_library(lrc_engine STATIC ${LRC_ENGINE_SOURCES} ${LRC_UTILS_SOURCES})
 target_include_directories(lrc_engine PUBLIC src)
 target_link_libraries(lrc_engine PUBLIC raw lcms2 sqlite3 stb_image_write pugixml Threads::Threads)
+if(TARGET sqlite_vec AND LRC_HAS_SQLITE_VEC)
+  # vec0 KNN for photo_features embeddings (goal 6). PRIVATE is enough here —
+  # catalog links lrc_engine so the vec symbols resolve transitively.
+  target_link_libraries(lrc_engine PUBLIC sqlite_vec)
+  target_compile_definitions(lrc_engine PUBLIC LRC_HAS_SQLITE_VEC=1)
+endif()
 # libraw pulls in <windows.h>, whose min/max macros clobber std::min/std::max.
 target_compile_definitions(lrc_engine PUBLIC LIBRAW_NODLL=1 NOMINMAX)
 if(LRC_LENSFUN_FOUND)

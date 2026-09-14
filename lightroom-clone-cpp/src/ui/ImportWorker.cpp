@@ -83,6 +83,31 @@ std::string sourceDateString(const std::filesystem::path& p) {
     return buf;
 }
 
+// Reads the on-disk fingerprint (byte size + unix last-write-time) of `p` for
+// the images.file_size/file_mtime columns (goal 4). Returns false when the file
+// cannot be stat()ted; callers then pass (0,0) = "unknown / keep current".
+bool fileFingerprint(const std::filesystem::path& p, int64_t& size,
+                     int64_t& mtime) {
+    std::error_code ec;
+    const auto fs = std::filesystem::file_size(p, ec);
+    if (ec)
+        return false;
+    size = static_cast<int64_t>(fs);
+    auto ft = std::filesystem::last_write_time(p, ec);
+    if (ec) {
+        mtime = 0;
+        return true;
+    }
+    // Convert the filesystem clock's last-write-time to a unix time_t: shift by
+    // (now on both clocks) and cast into system_clock::duration. Mirrors the
+    // working conversion in sourceDateString above.
+    const auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        ft - std::filesystem::file_time_type::clock::now() +
+        std::chrono::system_clock::now());
+    mtime = static_cast<int64_t>(std::chrono::system_clock::to_time_t(sys));
+    return true;
+}
+
 } // namespace
 
 ImportWorker::ImportWorker(lrc::CatalogDatabase& catalog,
@@ -117,33 +142,11 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
     QMutex firstErrorMutex;
     std::string firstError;
 
-    // S3: the import runs on its own catalog connection so the batch
-    // transaction is fully isolated from UI-thread writes (ratings /
-    // adjustments) on the primary connection. A cancelled import's rollback can
-    // therefore never undo an edit the user saved while the import ran.
-    if (!catalog_.openImportConnection()) {
-        // finishedImport first so the UI clears its "importing" state, then the
-        // warning (longer status display) is the final message the user sees.
-        emit finishedImport(0);
-        emit importWarning(tr("无法为导入打开目录连接：%1")
-                               .arg(QString::fromStdString(
-                                   catalog_.importLastError())));
-        return;
-    }
-    // RAII: close the import connection on every exit path so the handle is
-    // released and no file handle stays open after the import.
-    struct ImportConnectionGuard {
-        lrc::CatalogDatabase& db;
-        ~ImportConnectionGuard() { db.closeImportConnection(); }
-    } importGuard{catalog_};
-
-    if (!catalog_.beginImportTransaction()) {
-        emit finishedImport(0);
-        emit importWarning(tr("导入事务启动失败：%1")
-                               .arg(QString::fromStdString(
-                                   catalog_.importLastError())));
-        return;
-    }
+    // S3: imports share the single catalog connection (goal 5). A batch
+    // transaction is opened just before the DB-serial stage and committed every
+    // kImportBatchSize rows; UI-thread writes queue on the single connection via
+    // the busy_timeout, so a cancelled import's rollback can never undo an edit
+    // the user saved while the import ran.
 
     // ===================================================================
     // Stage 1 (IO + DNG convert): produces the on-disk catalog path each file
@@ -285,10 +288,10 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
     if (abort_.load()) {
         // 取消时回滚未提交的插入,不 emit finishedImport (roll back the
         // pending inserts and return without finishedImport).
-        if (!catalog_.rollbackImportTransaction())
+        if (!catalog_.rollbackTransaction())
             emit importWarning(tr("取消导入时回滚失败：%1")
                                    .arg(QString::fromStdString(
-                                       catalog_.importLastError())));
+                                       catalog_.lastError())));
         return;
     }
 
@@ -341,10 +344,10 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
     });
 
     if (abort_.load()) {
-        if (!catalog_.rollbackImportTransaction())
+        if (!catalog_.rollbackTransaction())
             emit importWarning(tr("取消导入时回滚失败：%1")
                                    .arg(QString::fromStdString(
-                                       catalog_.importLastError())));
+                                       catalog_.lastError())));
         return;
     }
 
@@ -353,25 +356,32 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
     // preview records, committing every kImportBatchSize rows so a crash or
     // abort loses at most the last partial batch instead of the whole import.
     // ===================================================================
+    if (!catalog_.beginTransaction()) {
+        emit finishedImport(0);
+        emit importWarning(tr("导入事务启动失败：%1")
+                               .arg(QString::fromStdString(
+                                   catalog_.lastError())));
+        return;
+    }
     int committedBatchRows = 0;
     int rowsInBatch = 0;
 
     auto flushBatch = [&]() -> bool {
         if (rowsInBatch == 0)
             return true;
-        if (!catalog_.commitImportTransaction()) {
+        if (!catalog_.commitTransaction()) {
             // S2: a failed COMMIT leaves the transaction open; CatalogDatabase
             // rolled it back internally. Report the failure and abort: only the
             // already-committed batches landed.
             emit importWarning(tr("导入批次提交失败：%1")
                                    .arg(QString::fromStdString(
-                                       catalog_.importLastError())));
+                                       catalog_.lastError())));
             return false;
         }
-        if (!catalog_.beginImportTransaction()) {
+        if (!catalog_.beginTransaction()) {
             emit importWarning(tr("导入事务重启失败：%1")
                                    .arg(QString::fromStdString(
-                                       catalog_.importLastError())));
+                                       catalog_.lastError())));
             return false;
         }
         committedBatchRows += rowsInBatch;
@@ -394,12 +404,16 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
         }
 
         const std::string dbPath = fromStdPath(f.catalogPath).toStdString();
-        const int64_t id = catalog_.addImageImport(
-            dbPath, std::string{}, mode != lrc::ImportMode::Add);
+        // Record the on-disk fingerprint (byte size + mtime, goal 4) so later
+        // external modifications can be detected and re-imports stay idempotent.
+        int64_t fsize = 0, fmtime = 0;
+        (void)fileFingerprint(f.catalogPath, fsize, fmtime);
+        const int64_t id = catalog_.addImage(
+            dbPath, std::string{}, mode != lrc::ImportMode::Add, fsize, fmtime);
         if (id <= 0) {
             emit importWarning(tr("写入目录失败：%1")
                                    .arg(QString::fromStdString(
-                                       catalog_.importLastError())));
+                                       catalog_.lastError())));
             ++done;
             emit progress(done, total);
             continue;
@@ -411,9 +425,9 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
         // first 1:1 view, so import is not bottlenecked on a full-res render
         // per photo.
         if (f.thumb) {
-            catalog_.storePreviewImport(id, lrc::PreviewKind::Thumbnail,
-                                        f.thumb->bytes, f.thumb->width,
-                                        f.thumb->height);
+            catalog_.storePreview(id, lrc::PreviewKind::Thumbnail,
+                                  f.thumb->bytes, f.thumb->width,
+                                  f.thumb->height);
             const int imageId = static_cast<int>(id);
             // M2-3: decode the just-encoded JPEG in the worker thread and
             // ship a ready QImage to the UI (queued connection, no
@@ -432,11 +446,11 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
         }
         if (f.standard) {
             // The standard preview blob is stored verbatim (header v2 +
-            // payload). Storing via storePreviewImport(Standard) skips a
-            // wasteful ImageBuffer round-trip — the v2 blob already carries
+            // payload). Storing via storePreview(Standard) skips a wasteful
+            // ImageBuffer round-trip — the v2 blob already carries
             // width/height/nativeW/nativeH, and decodeStandardPreview on read
             // reads them back directly.
-            catalog_.storePreviewImport(
+            catalog_.storePreview(
                 id, lrc::PreviewKind::Standard, f.standard->blob,
                 f.standard->previewWidth, f.standard->previewHeight);
         }

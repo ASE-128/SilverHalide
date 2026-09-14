@@ -133,7 +133,20 @@ enum class PreviewKind : int { Thumbnail = 1, FullRes = 2, Standard = 3 };
 
 class CatalogDatabase {
 public:
-    explicit CatalogDatabase(std::filesystem::path dbPath);
+    // @brief Opens a catalog stored at `dbPath` (the SQLite database file), with
+    //        externalized preview blobs kept under `previewDir`.
+    //
+    // The catalog has been a single `.lrcat` file historically; UI callers now
+    // point at a catalog *folder* and resolve the database file + a
+    // `previews.shcat/` data directory from it (Lightroom-style layout). When a
+    // caller that still holds only a `.lrcat` path opens the database, an
+    // adjacent `<stem> Previews.shcat/` directory is derived automatically.
+    //
+    // @param dbPath    Path to the SQLite catalog file.
+    // @param previewDir Directory holding externalized preview files (created
+    //                   on first use). Defaults to a sibling of dbPath.
+    explicit CatalogDatabase(std::filesystem::path dbPath,
+                             std::filesystem::path previewDir = {});
     ~CatalogDatabase();
 
     CatalogDatabase(const CatalogDatabase&) = delete;
@@ -150,10 +163,22 @@ public:
 
     // --- images ----------------------------------------------------------
     // Inserts a new image. If the path already exists, the existing row id is
-    // returned instead (imports are idempotent).
+    // returned instead (imports are idempotent). `fileSize` / `fileMtime` are
+    // the on-disk fingerprint (bytes and unix-last-write-time) used to detect
+    // later external modification; 0 means "unknown / keep current". On an
+    // idempotent hit the fingerprint is refreshed so re-imports never leave
+    // stale sizes behind (goal 4).
     int64_t addImage(const std::string& filePath,
                      const std::string& thumbnailPath,
-                     bool isManaged = false);
+                     bool isManaged = false,
+                     int64_t fileSize = 0, int64_t fileMtime = 0);
+    // Updates the on-disk fingerprint of an existing row. Returns false when the
+    // image is absent.
+    bool setFingerprint(int64_t id, int64_t fileSize, int64_t fileMtime);
+    // Returns the ids whose stored fingerprint no longer matches the given
+    // (size, mtime) — i.e. externally modified files to re-import / re-decode.
+    std::vector<int64_t> detectModifiedImages(int64_t fileSize,
+                                              int64_t fileMtime) const;
     bool setRating(int64_t id, int rating);
     bool setLabelColor(int64_t id, int color);
     bool setFlag(int64_t id, int flag);
@@ -171,17 +196,27 @@ public:
      *  Returns false when `newFilePath` already belongs to another row (would
      *  violate the UNIQUE(file_path) constraint) or the image is absent. */
     bool updateImagePath(int64_t id, const std::string& newFilePath);
-    // Stores an embedded preview (thumbnail or full-res JPEG) inside the
-    // catalog file, replacing any previous value. (embedded preview blob)
+    // Stores an embedded preview (thumbnail / full-res / standard) as an
+    // externalized file under the catalog preview directory, replacing any
+    // previous value. The API keeps the byte-vector form so existing UI callers
+    // (MainWindow / PreviewWorker) need no changes; the bytes are written to
+    // disk under `previews.shcat/<hex>/<imageId>_<kind>.shcat` and only the
+    // path column is persisted in the database (externalized BLOBs, goal 2).
     bool storePreview(int64_t imageId, PreviewKind kind,
                       const std::vector<uint8_t>& data,
                       int width = 0, int height = 0);
-    // Returns the embedded preview bytes, or nullopt when absent.
+    // Returns the embedded preview bytes by reading the externalized file, or
+    // nullopt when absent.
     std::optional<std::vector<uint8_t>> loadPreview(
         int64_t imageId, PreviewKind kind) const;
     // Embedded preview pixel dimensions (0,0 when not recorded), or nullopt
     // when the preview is absent.
     std::optional<std::pair<int, int>> previewSize(
+        int64_t imageId, PreviewKind kind) const;
+    // Absolute path of the externalized preview file for (imageId, kind), or
+    // nullopt when it is not recorded. Callers that read the bytes themselves
+    // (e.g. mmap / streaming) can use this to skip the byte round-trip.
+    std::optional<std::filesystem::path> previewFilePath(
         int64_t imageId, PreviewKind kind) const;
 
     // --- standard preview --------------------------------------------------
@@ -363,6 +398,15 @@ public:
     };
     std::vector<PhashCandidatePair> scanPhashCandidates(
         int maxHamming = 8) const;
+    // Approximate nearest neighbours in the 64-dim embedding space via the
+    // sqlite-vec vec0 virtual table (goal 6). Returns the k closest image ids
+    // ordered by ascending distance, or empty when the vec index is
+    // unavailable (sqlite-vec not linked) or has no data.
+    std::vector<int64_t> annByEmbedding(const std::vector<float>& query,
+                                        int k = 200) const;
+    // Rebuilds the derived search data (keyword/phash-segment/embedding
+    // indices). Returns false only when the database is closed.
+    bool rebuildSearchIndexes();
     // Stack management (duplicate groups).  stackId == 0 means "not stacked".
     bool setStackId(int64_t imageId, int64_t stackId);
     // Returns every image id belonging to the same stack (including the
@@ -372,50 +416,42 @@ public:
     // stacked at all, or 1 when no stack has ever been created.
     int64_t nextStackId() const;
 
-    // --- transactions (primary connection) --------------------------------
-    // Wrap a batch of writes on the primary connection. The import worker must
-    // NOT use these -- it uses the isolated import connection below so its
-    // transaction never absorbs UI-thread writes.
+    // --- transactions -------------------------------------------------------
+    // Wrap a batch of writes on the single catalog connection. The import
+    // worker drives its batch through these (goal 5: single connection + a
+    // busy_timeout, replacing the historical dual-connection design) so a
+    // cancelled import's rollback can never undo an edit the user saved while
+    // the import ran concurrently.
     bool beginTransaction();
     bool commitTransaction();
     bool rollbackTransaction();
 
-    // --- import connection (S3: isolated batch transactions) ---------------
-    // The import worker writes through its own second connection to the same
-    // catalog file so a batch-import transaction never absorbs UI-thread writes
-    // (ratings / adjustments) issued on the primary connection. WAL mode lets
-    // the two connections operate concurrently; a cancelled import's rollback
-    // can therefore never undo an edit the user saved while the import ran.
-    //
-    // Caller must pair every openImportConnection() with closeImportConnection()
-    // (RAII-style; ImportWorker does this) so the handle is released and no
-    // file handle is left open. Operations on the import connection are guarded
-    // by their own mutex -- sharing the primary mutex with SQLite's cross-
-    // connection write lock would deadlock (UI holds the primary mutex while
-    // waiting on SQLite, and the import thread needs that mutex to release the
-    // lock).
-    bool openImportConnection();
-    void closeImportConnection();
-    bool isImportConnectionOpen() const;
-    bool beginImportTransaction();
-    bool commitImportTransaction();
-    bool rollbackImportTransaction();
-    // addImage / storePreview against the import connection (valid only while
-    // it is open). Distinct from the primary-connection addImage/storePreview.
-    int64_t addImageImport(const std::string& filePath,
-                           const std::string& thumbnailPath,
-                           bool isManaged = false);
-    bool storePreviewImport(int64_t imageId, PreviewKind kind,
-                            const std::vector<uint8_t>& data,
-                            int width = 0, int height = 0);
-    // Error message from the last import-connection operation. Separate from
-    // lastError() because the two connections are driven from different threads
-    // and a UI-thread write must not clobber the import thread's error text.
-    // Reads under importMutex_ so teardown (close on the UI thread) cannot race
-    // the import thread's read.
-    std::string importLastError() const;
-
 private:
+    // --- versioned schema migrations (goal 1) ------------------------------
+    // Runs every migration 1..kSchemaVersion whose ledger is not yet recorded,
+    // each inside its own transaction (see migrateSqlVersion). Returns false,
+    // leaving the connection unusable, when any step fails so a half-applied
+    // schema is never left behind.
+    bool applyMigrations();
+    // Runs the transactional SQL body for schema version `v`: suspends FK
+    // checks, BEGIN IMMEDIATE, dispatches migrateV1..V4, then on success commits
+    // and (outside the transaction) bumps PRAGMA user_version and inserts the
+    // schema_migrations ledger row. Any failure ROLLBACKs the whole step.
+    bool migrateSqlVersion(int v, std::string* errOut);
+    bool migrateV1(std::string* errOut);
+    bool migrateV2(std::string* errOut);
+    bool migrateV3(std::string* errOut);
+    bool migrateV4(std::string* errOut);
+    // Migration-scoped ALTER TABLE ADD COLUMN on images / an arbitrary table,
+    // used only from within a migration transaction.
+    void migrateEnsureColumn(const char* column, const char* decl);
+    void migrateEnsureColumnOn(const char* table, const char* column,
+                               const char* decl);
+    // Resumable export of legacy `previews` BLOBs to externalized files (goal
+    // 2). Idempotent: rows already exported (path column populated / _bak row
+    // dropped) are skipped, so an interrupted migration continues cleanly.
+    bool finishPreviewExport();
+
     bool exec(const char* sql);
     bool execOn(sqlite3* db, const char* sql, std::string* errOut);
     void ensureColumn(const char* column, const char* decl);
@@ -428,33 +464,41 @@ private:
     // True when the image has a variant-0 edit that differs from the defaults.
     bool hasNonDefaultEdits(int64_t imageId);
     bool isInTransaction() const { return inTransaction_; }
-    // Shared statement bodies for addImage/storePreview; `db` selects the
-    // primary or the import connection, `errOut` the matching error slot.
+    // Shared insert body for addImage; `errOut` selects the error slot.
     int64_t addImageImpl(sqlite3* db, const std::string& filePath,
                          const std::string& thumbnailPath, bool isManaged,
+                         int64_t fileSize, int64_t fileMtime,
                          std::string* errOut);
+    // Shared insert/upsert body for storePreview on a specific connection.
+    // Writes the bytes to an externalized file (goal 2) and records only the
+    // path column. `errOut` selects the error slot.
     bool storePreviewImpl(sqlite3* db, int64_t imageId, PreviewKind kind,
-                          const std::vector<uint8_t>& data, int width,
-                          int height, std::string* errOut);
+                          const std::vector<uint8_t>& data, int width, int height,
+                          std::string* errOut);
     // Finalizes every statement held by stmtCache_. Called from close() so the
     // handles do not leak and sqlite3_close() can succeed, and from backup() so
     // cached statements cannot block the WAL checkpoint with SQLITE_LOCKED.
     void finalizeAllCached() const;
 
     std::filesystem::path path_;
+    std::filesystem::path previewDir_;  // externalized preview files root
     sqlite3* db_ = nullptr;
     bool inTransaction_ = false;
     mutable std::string lastError_;
-    sqlite3* importDb_ = nullptr;
-    bool importInTransaction_ = false;
-    mutable std::string importError_;
-    mutable std::mutex importMutex_;
     // Prepared-statement cache (key = SQL text). Statements are reset and
     // re-bound before every use and kept for the lifetime of the database,
     // avoiding a prepare/finalize cycle on every hot-path call. All access
     // happens while mutex_ is held, so no extra locking is required.
     mutable std::unordered_map<std::string, sqlite3_stmt*> stmtCache_;
     mutable std::recursive_mutex mutex_;
+
+    // Resolves the on-disk path for a preview blob, creating the shard
+    // directory as needed, and the preview-root path. `mkdir` must be true for
+    // writers. When no preview root is configured, a sibling `<stem>
+    // Previews.shcat/` is derived from the database file.
+    std::filesystem::path previewRootDir() const;
+    std::filesystem::path previewPathFor(int64_t imageId, PreviewKind kind,
+                                         bool mkdir) const;
 };
 
 } // namespace lrc

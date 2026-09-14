@@ -1200,6 +1200,99 @@ TEST_CASE("Catalog: panorama sources record, replace and list", "[catalog]") {
     REQUIRE(db.listPanoramaSources(s1).empty());
 }
 
+TEST_CASE("Catalog: file fingerprint tracking detects external modification",
+          "[catalog]") {
+    const auto path = makeTempDb();
+    CatalogDatabase db(path);
+    REQUIRE(db.open());
+    const int64_t id = db.addImage("/photos/fp.arw", "", true, 1000, 2000);
+    REQUIRE(id > 0);
+
+    // A fingerprint equal to the stored one is not "modified".
+    REQUIRE(db.detectModifiedImages(1000, 2000).empty());
+
+    // A differing size or mtime marks the file externally modified.
+    const auto sizeChanged = db.detectModifiedImages(9999, 2000);
+    REQUIRE(std::find(sizeChanged.begin(), sizeChanged.end(), id) !=
+            sizeChanged.end());
+    const auto mtimeChanged = db.detectModifiedImages(1000, 9999);
+    REQUIRE(std::find(mtimeChanged.begin(), mtimeChanged.end(), id) !=
+            mtimeChanged.end());
+
+    // setFingerprint refreshes the stored value; the new pair is no longer dirty.
+    REQUIRE(db.setFingerprint(id, 5000, 6000));
+    REQUIRE(db.detectModifiedImages(5000, 6000).empty());
+    REQUIRE(!db.setFingerprint(424242, 1, 1));  // absent image -> false
+}
+
+TEST_CASE("Catalog: duplicate phash and embedding ANN index (goal 6)",
+          "[catalog]") {
+    const auto path = makeTempDb();
+    CatalogDatabase db(path);
+    REQUIRE(db.open());
+    const int64_t a = db.addImage("/photos/a.arw", "");
+    const int64_t b = db.addImage("/photos/b.arw", "");
+    const int64_t c = db.addImage("/photos/c.arw", "");
+
+    // a and b share a perceptual hash; c differs.
+    const uint64_t phashShared = 0xABCDABCDABCDABCDULL;
+    const uint64_t phashOther = 0x123456789ABCDEF0ULL;
+    std::vector<float> va(64, 1.0f);
+    std::vector<float> vb(va);        // near, but distinct from a -> small, nonzero distance
+    vb[0] = 0.5f;
+    std::vector<float> vc(64, 0.0f);
+    REQUIRE(db.storePhotoFeatures(a, phashShared, va));
+    REQUIRE(db.storePhotoFeatures(b, phashShared, vb));
+    REQUIRE(db.storePhotoFeatures(c, phashOther, vc));
+
+    // phash segment screen: the shared-hash pair is within hamming 0.
+    const auto pairs = db.scanPhashCandidates(0);
+    REQUIRE(std::any_of(pairs.begin(), pairs.end(), [&](const auto& p) {
+        return (p.aId == a && p.bId == b) || (p.aId == b && p.bId == a);
+    }));
+
+    // Rebuild the derived (FTS / phash-seg / vec0) indexes, then ANN query the
+    // vec0 virtual table: a's vector is an exact match and must come back first.
+    const bool rebuilt = db.rebuildSearchIndexes();
+    INFO("rebuildSearchIndexes lastError: " << db.lastError());
+    REQUIRE(rebuilt);
+    const auto nearest = db.annByEmbedding(va, 5);
+    REQUIRE(!nearest.empty());
+    REQUIRE(nearest.front() == a);
+}
+
+TEST_CASE("Catalog: automatic edit history prunes to 20, snapshots survive",
+          "[catalog]") {
+    const auto path = makeTempDb();
+    CatalogDatabase db(path);
+    REQUIRE(db.open());
+    const int64_t id = db.addImage("/photos/history.arw", "");
+    const Adjustments adj;
+
+    // 25 automatic saves; only the newest 20 may survive pruning.
+    for (int i = 0; i < 25; ++i)
+        REQUIRE(db.saveEditSnapshot(id, adj) > 0);
+    auto hist = db.listEditHistory(id);
+    REQUIRE(hist.size() == 20);
+
+    // Named snapshots are exempt from automatic pruning.
+    REQUIRE(db.saveEditSnapshot(id, adj, 0, "keep flagship") > 0);
+    hist = db.listEditHistory(id);
+    REQUIRE(hist.size() == 21);
+    REQUIRE(std::any_of(hist.begin(), hist.end(), [](const EditSnapshot& s) {
+        return s.name == "keep flagship";
+    }));
+
+    // Additional automatic saves still prune only the auto kind.
+    for (int i = 0; i < 5; ++i)
+        REQUIRE(db.saveEditSnapshot(id, adj) > 0);
+    hist = db.listEditHistory(id);
+    REQUIRE(hist.size() == 21);
+    REQUIRE(std::any_of(hist.begin(), hist.end(), [](const EditSnapshot& s) {
+        return s.name == "keep flagship";
+    }));
+}
+
 TEST_CASE("FolderMonitor: isRawFile accepts every Sony RAW extension",
           "[catalog]") {
     for (const std::string& ext : lrc::FolderMonitor::rawExtensions())

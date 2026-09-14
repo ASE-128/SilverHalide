@@ -12,8 +12,16 @@ inline constexpr const char* kAppOrganization = "ASE-128";
 // Name of the built-in default catalog. When no catalog has been chosen
 // or created, imports go into this catalog. (default catalog name)
 inline constexpr const char* kDefaultCatalogName = "Default";
-// File name of the built-in default catalog.
-inline constexpr const char* kDefaultCatalogFile = "Default.lrcat";
+// The catalog is a *folder* (目录即库, Lightroom-style). Within that folder
+// the SQLite library file is named `<folderName>.shcat` and the externalized
+// previews live in a side directory. These constants pin the file/dir names.
+inline constexpr const char* kDefaultCatalogFile = "Default.shcat";
+// Name of the preview side-directory inside a catalog folder.
+inline constexpr const char* kPreviewSideDir = "previews.shcat";
+// Suffix of the catalog SQLite library file (was .lrcat before the 目录即库
+// refactor; kept here as the single source for both the default and new
+// catalogs).
+inline constexpr const char* kCatalogDbSuffix = ".shcat";
 
 // Longest preview side (pixels). Slider updates must complete a full
 // preview render within 200 ms at this resolution.

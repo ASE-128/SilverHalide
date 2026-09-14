@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
@@ -469,12 +471,151 @@ void ensureTableColumnImpl(sqlite3* db, const char* table, const char* column,
     sqlite3_exec(db, alter.c_str(), nullptr, nullptr, nullptr);
 }
 
+// Applies the connection-level PRAGMA set. Every connection (currently a
+// single catalog connection) must run these so foreign-key cascades, WAL
+// journaling, durability and write-lock queuing are identical everywhere
+// (goal 3). Covers foreign_keys, journal_mode=WAL, synchronous=NORMAL and a
+// busy_timeout so a concurrent writer drains before SQLITE_BUSY surfaces.
+bool applyPragmas(sqlite3* db, std::string* errOut) {
+    return sqlite3_exec(db, "PRAGMA foreign_keys=ON;"
+                        "PRAGMA journal_mode=WAL;"
+                        "PRAGMA synchronous=NORMAL;"
+                        "PRAGMA busy_timeout=5000;",
+                        nullptr, nullptr, nullptr) == SQLITE_OK;
+}
+
+// True when a module name appears in the runtime module list (e.g. check that
+// sqlite-vec → 'vec0' or FTS5 is actually linked before building virtual
+// tables for it).
+bool hasModule(sqlite3* db, const char* module) {
+    sqlite3_stmt* stmt = nullptr;
+    const std::string sql =
+        std::string("SELECT 1 FROM pragma_module_list WHERE name = ?1 LIMIT 1;");
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(stmt, 1, module, -1, SQLITE_TRANSIENT);
+    const bool found = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+// Writes the preview file to disk via write-temp + atomic rename. The temporary
+// file lives next to the destination (same volume) so rename() is atomic and the
+// destination never holds a partially written preview, even across a crash.
+// Empty `data` produces an empty file. Returns false only on a hard I/O failure.
+bool writePreviewFileAtomically(const std::filesystem::path& path,
+                                const std::vector<uint8_t>& data) {
+    std::error_code ec;
+    if (auto parent = path.parent_path(); !parent.empty())
+        std::filesystem::create_directories(parent, ec);
+    const std::string tmp = path.string() + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f)
+        return false;
+    const bool wrote =
+        data.empty() || std::fwrite(data.data(), 1, data.size(), f) == data.size();
+    if (std::fclose(f) != 0)
+        return false;
+    if (!wrote) {
+        std::filesystem::remove(tmp, ec);
+        return false;
+    }
+    std::filesystem::rename(tmp, path.string(), ec);
+    return !ec ? true : false;
+}
+
+// Reads an externalized preview file into a byte vector, or nullopt when the
+// file is missing / unreadable. Used by loadPreview / getStandardPreview to
+// turn the stored path column back into the bytes the UI expects.
+std::optional<std::vector<uint8_t>> readPreviewFile(
+    const std::filesystem::path& path) {
+    std::ifstream in(path.string(), std::ios::binary);
+    if (!in)
+        return std::nullopt;
+    std::vector<uint8_t> bytes;
+    in.seekg(0, std::ios::end);
+    const std::streamoff len = in.tellg();
+    if (len > 0) {
+        in.seekg(0, std::ios::beg);
+        bytes.resize(static_cast<size_t>(len));
+        in.read(reinterpret_cast<char*>(bytes.data()), len);
+        if (!in)
+            return std::nullopt;
+    }
+    return bytes;
+}
+
+#ifdef LRC_HAS_SQLITE_VEC
+// sqlite-vec is compiled as C; the entry point needs C linkage even from this
+// C++ unit. Declared at namespace scope because extern "C" is illegal inside a
+// function body.
+extern "C" int sqlite3_vec_init(sqlite3*, char**, void*);
+#endif
+
+// Registers the sqlite-vec extension entry point directly on an already-open
+// connection so the `vec0` virtual table is available (goal 6). When sqlite-vec
+// is not statically linked (LRC_HAS_SQLITE_VEC undefined) this is a no-op and
+// migrateV4's hasModule("vec0") check simply leaves the vec index absent. The
+// third argument is the sqlite3_api_routines* pointer; passing nullptr is safe
+// because sqlite-vec is compiled with SQLITE_CORE (it calls sqlite3_* directly).
+bool registerVecModule(sqlite3* db) {
+#ifdef LRC_HAS_SQLITE_VEC
+    return sqlite3_vec_init(db, nullptr, nullptr) == SQLITE_OK;
+#else
+    (void)db;
+    return false;
+#endif
+}
+
+// Parameters used by the versioned schema migrations (goal 1). `kSchemaVersion`
+// is the current schema version; each migration numbered 1..kSchemaVersion
+// upgrades a catalog one step and is recorded in `schema_migrations`. All SQL
+// migrations run inside a single transaction and either fully apply or fully
+// roll back.
+constexpr int kSchemaVersion = 4;
+
 } // namespace
 
-CatalogDatabase::CatalogDatabase(std::filesystem::path dbPath)
-    : path_(std::move(dbPath)) {}
+CatalogDatabase::CatalogDatabase(std::filesystem::path dbPath,
+                                 std::filesystem::path previewDir)
+    : path_(std::move(dbPath)), previewDir_(std::move(previewDir)) {}
 
 CatalogDatabase::~CatalogDatabase() { close(); }
+
+// Resolves the root directory that holds the externalized preview files. When
+// the caller supplied an explicit previewDir_ (the catalog-folder layout) it
+// is used verbatim; otherwise an adjacent sibling `<stem> Previews.shcat/` is
+// derived from the database file so a lone `.lrcat` still externalizes safely.
+std::filesystem::path CatalogDatabase::previewRootDir() const {
+    if (!previewDir_.empty())
+        return previewDir_;
+    return path_.parent_path() /
+           (path_.stem().generic_string() + " Previews.shcat");
+}
+
+// Resolves the on-disk file for a preview record, sharded by the first three
+// hex digits of the image id to avoid an unbounded single directory. The file
+// name is `<imageId>_<kind>.shcat`. `mkdir` creates the shard directory (must
+// be true for writers); the path is stable so a reader can rebuild it without
+// touching the filesystem.
+std::filesystem::path CatalogDatabase::previewPathFor(
+    int64_t imageId, PreviewKind kind, bool mkdir) const {
+    const std::filesystem::path root = previewRootDir();
+    char hex[17];
+    std::snprintf(hex, sizeof(hex), "%llx",
+                  static_cast<unsigned long long>(imageId));
+    std::string h = hex;
+    if (h.size() < 3)
+        h.insert(0, 3 - h.size(), '0');
+    const std::filesystem::path dir = root / h.substr(0, 3);
+    if (mkdir) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+    }
+    const std::string fname = std::to_string(imageId) + "_" +
+                              std::to_string(static_cast<int>(kind)) + ".shcat";
+    return dir / fname;
+}
 
 bool CatalogDatabase::open() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -482,6 +623,13 @@ bool CatalogDatabase::open() {
         return true;
     const int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
                       SQLITE_OPEN_FULLMUTEX;
+    // 目录即库: a catalog is a folder holding <folder>/<stem>.shcat. Create the
+    // (possibly empty) containing directory before sqlite3_open so a fresh
+    // catalog folder that does not exist yet is created instead of failing with
+    // "unable to open database file". Also covers a selected folder that was
+    // removed between the dialog and the restart.
+    std::error_code mkdirEc;
+    std::filesystem::create_directories(path_.parent_path(), mkdirEc);
     const int rc = sqlite3_open_v2(path_.string().c_str(), &db_, flags, nullptr);
     if (rc != SQLITE_OK) {
         lastError_ = db_ ? sqlite3_errmsg(db_) : "sqlite open failed";
@@ -490,25 +638,31 @@ bool CatalogDatabase::open() {
         db_ = nullptr;
         return false;
     }
-    // M1: every PRAGMA that changes durability or cascade behaviour must be
-    // verified. A silently failing foreign_keys PRAGMA would disable ON DELETE
-    // CASCADE without any signal; a failing WAL/synchronous PRAGMA would leave
-    // the catalog on a different journal mode than the rest of the app expects.
-    // busy_timeout lets a concurrent writer (e.g. an active import on its own
-    // connection) finish before a UI-thread write fails with SQLITE_BUSY.
-    if (!execOn(db_, "PRAGMA foreign_keys=ON;", &lastError_) ||
-        !execOn(db_, "PRAGMA journal_mode=WAL;", &lastError_) ||
-        !execOn(db_, "PRAGMA synchronous=NORMAL;", &lastError_) ||
-        !execOn(db_, "PRAGMA busy_timeout=5000;", &lastError_)) {
+    // Every connection initialises the identical PRAGMA set (foreign_keys on,
+    // WAL, synchronous=NORMAL, busy_timeout). A silently failing pragma here
+    // would leave the catalog on the wrong journal/durability mode.
+    if (!applyPragmas(db_, &lastError_)) {
+        lastError_ = "pragma setup failed: " + lastError_;
         sqlite3_close(db_);
         db_ = nullptr;
         return false;
     }
 
-    const char* kSchema =
+    // Register the sqlite-vec extension (goal 6) so `vec0` virtual tables can
+    // be created/queried on this connection. No-op when sqlite-vec is not
+    // linked into the binary (LRC_HAS_SQLITE_VEC undefined).
+    (void)registerVecModule(db_);
+
+    // Baseline schema. This is intentionally the historical shape (non-STRICT,
+    // `previews` with a BLOB) so existing catalogs upgrade through the versioned
+    // migrations below; new catalogs start at version 0 and are upgraded to the
+    // current schema the same way. `schema_migrations` and `previews` are
+    // created by the migrations (v1 / v3) so a brand-new file must establish
+    // only the foundational tables here.
+    const char* kBase =
         "CREATE TABLE IF NOT EXISTS images ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "  file_path TEXT NOT NULL UNIQUE,"
+        "  file_path TEXT NOT NULL,"
         "  import_date TEXT NOT NULL,"
         "  rating INTEGER NOT NULL DEFAULT 0,"
         "  label_color INTEGER NOT NULL DEFAULT 0,"
@@ -525,13 +679,10 @@ bool CatalogDatabase::open() {
         "CREATE TABLE IF NOT EXISTS edit_history ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  image_id INTEGER NOT NULL,"
-        "  variant_id INTEGER NOT NULL DEFAULT 0,"
         "  adjustment_json TEXT NOT NULL,"
         "  created_at TEXT NOT NULL,"
         "  FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE"
         ");"
-        "CREATE INDEX IF NOT EXISTS idx_edit_history_image "
-        "ON edit_history(image_id, id);"
         "CREATE TABLE IF NOT EXISTS variants ("
         "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
         "  variant_id INTEGER NOT NULL DEFAULT 0,"
@@ -550,8 +701,6 @@ bool CatalogDatabase::open() {
         "  keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,"
         "  PRIMARY KEY (image_id, keyword_id)"
         ");"
-        "CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword "
-        "ON photo_keywords(keyword_id);"
         "CREATE TABLE IF NOT EXISTS smart_collections ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  name TEXT NOT NULL,"
@@ -571,9 +720,6 @@ bool CatalogDatabase::open() {
         "ON DELETE CASCADE,"
         "  PRIMARY KEY (panorama_image_id, source_image_id)"
         ");"
-        // PHASE_14: perceptual hash + 64-dim deep embedding per image.  Both
-        // are updated atomically via storePhotoFeatures(); the stack_id
-        // column lives on images itself (ensureColumn'd after this CREATE).
         "CREATE TABLE IF NOT EXISTS photo_features ("
         "  image_id INTEGER PRIMARY KEY NOT NULL REFERENCES images(id) "
         "ON DELETE CASCADE,"
@@ -590,7 +736,6 @@ bool CatalogDatabase::open() {
         "  key TEXT PRIMARY KEY,"
         "  value TEXT NOT NULL"
         ");"
-        "CREATE INDEX IF NOT EXISTS idx_images_path ON images(file_path);"
         "CREATE TABLE IF NOT EXISTS collections ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  name TEXT NOT NULL,"
@@ -601,81 +746,544 @@ bool CatalogDatabase::open() {
         "ON DELETE CASCADE,"
         "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
         "  PRIMARY KEY (collection_id, image_id)"
-        ");"
-        "CREATE INDEX IF NOT EXISTS idx_collection_images_image "
-        "ON collection_images(image_id);"
-        "CREATE TABLE IF NOT EXISTS previews ("
-        "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
-        "  kind INTEGER NOT NULL,"
-        "  data BLOB NOT NULL,"
-        "  width INTEGER NOT NULL DEFAULT 0,"
-        "  height INTEGER NOT NULL DEFAULT 0,"
-        "  PRIMARY KEY (image_id, kind)"
         ");";
-    if (!exec(kSchema))
+    if (!exec(kBase))
         return false;
 
-    // Migrate catalogs created before the `flag` / `is_managed` /
-    // `fullres_path` columns, and before the M6/M8 columns.
-    ensureColumn("flag", "INTEGER NOT NULL DEFAULT 0");
-    ensureColumn("is_managed", "INTEGER NOT NULL DEFAULT 0");
-    ensureColumn("fullres_path", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn("title", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn("caption", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn("copyright", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn("creator", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn("date_taken", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn("camera", "TEXT NOT NULL DEFAULT ''");
-    ensureColumn("lens", "TEXT NOT NULL DEFAULT ''");
-    // PHASE_14: stack id for duplicate / burst stacking — 0 = unstacked.
-    ensureColumn("stack_id", "INTEGER NOT NULL DEFAULT 0");
-
-    // M6: edit_history gains variant_id (the edits table needs a full rebuild,
-    // handled by ensureEditsVariant below because its old primary key cannot be
-    // widened in place). The variant index is created after the column exists so
-    // the migration also works on catalogs that predate M6.
-    ensureColumnOn("edit_history", "variant_id",
-                   "INTEGER NOT NULL DEFAULT 0");
-    // P1-5: snapshot labels. Added as its own migration so it works on
-    // catalogs that predate M6 (which still run this open()).
-    ensureColumnOn("edit_history", "name", "TEXT NOT NULL DEFAULT ''");
-    if (!exec("CREATE INDEX IF NOT EXISTS idx_edit_history_variant "
-              "ON edit_history(image_id, variant_id, id);"))
+    // A fresh catalog (just created above) and an older catalog both start at
+    // PRAGMA user_version 0. Apply the versioned migrations; any failure closes
+    // the connection so the caller refuses to enter the workspace (a partially
+    // migrated catalog is never used).
+    if (!applyMigrations()) {
+        // applyMigrations() has already closed db_ on failure.
         return false;
-    ensureEditsVariant();
+    }
 
-    // Query-plan indexes for the common listImages filters and the default
-    // sort. Created after ensureColumn so they are valid even on catalogs
-    // migrated from builds that predate the `flag` column; IF NOT EXISTS keeps
-    // the migration idempotent on every re-open.
-    if (!exec(
+    // Finish any deferred, non-transactional preview export left behind by an
+    // interrupted externalization migration (a `previews_old` table with
+    // remaining rows, see migrateV3 / exportLegacyPreviews).
+    if (!finishPreviewExport()) {
+        finalizeAllCached();
+        sqlite3_close(db_);
+        db_ = nullptr;
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Versioned migrations (goal 1). Each migrateV{n} runs inside a single
+// transaction opened by applyMigrations(); on success applyMigrations commits,
+// bumps PRAGMA user_version and records the version in schema_migrations.
+// ---------------------------------------------------------------------------
+
+bool CatalogDatabase::applyMigrations() {
+    int v = -1;
+    {
+        Stmt s(db_, "PRAGMA user_version;");
+        if (s.step() == SQLITE_ROW)
+            v = sqlite3_column_int(s.stmt, 0);
+    }
+    if (v < 0)
+        return false;
+    if (v >= kSchemaVersion)
+        return true;
+
+    for (++v; v <= kSchemaVersion; ++v) {
+        const bool sqlOk = migrateSqlVersion(v, &lastError_);
+        if (!sqlOk) {
+            const std::string failed = lastError_;
+            finalizeAllCached();
+            sqlite3_close(db_);
+            db_ = nullptr;
+            lastError_ = "catalog migration to version " + std::to_string(v) +
+                         " failed: " + failed;
+            return false;
+        }
+    }
+    return true;
+}
+
+// Runs the transactional SQL body for a single schema version. Handles FK
+// suspension (outside the transaction — PRAGMA foreign_keys cannot toggle
+// inside one), the transaction, the body, and after commit the user_version
+// bump + schema_migrations insert (both disallowed inside a transaction).
+bool CatalogDatabase::migrateSqlVersion(int v, std::string* errOut) {
+    (void)sqlite3_exec(db_, "PRAGMA foreign_keys=OFF;", nullptr, nullptr, nullptr);
+    if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) != SQLITE_OK)
+        return false;
+
+    bool ok = false;
+    switch (v) {
+        case 1: ok = migrateV1(errOut); break;
+        case 2: ok = migrateV2(errOut); break;
+        case 3: ok = migrateV3(errOut); break;
+        case 4: ok = migrateV4(errOut); break;
+        default: ok = false; break;
+    }
+
+    if (!ok) {
+        (void)sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        (void)sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
+        return false;
+    }
+    if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        (void)sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        (void)sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
+        return false;
+    }
+    // user_version / schema_migrations must be set outside the transaction.
+    const std::string verSQL = "PRAGMA user_version=" + std::to_string(v) + ";";
+    if (sqlite3_exec(db_, verSQL.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK)
+        return false;
+    // Ensure the ledger table exists (created here, right before its first row).
+    (void)sqlite3_exec(db_,
+                       "CREATE TABLE IF NOT EXISTS schema_migrations("
+                       "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                       "  version INTEGER NOT NULL UNIQUE,"
+                       "  name TEXT NOT NULL,"
+                       "  applied_at TEXT NOT NULL);",
+                       nullptr, nullptr, nullptr);
+    const std::string ins = "INSERT OR IGNORE INTO schema_migrations(version, "
+                            "name, applied_at) VALUES(" + std::to_string(v) +
+                            ", 'migrate_v" + std::to_string(v) + "', '" +
+                            nowIso8601Utc() + "');";
+    if (sqlite3_exec(db_, ins.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK)
+        return false;
+    (void)sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
+    return true;
+}
+
+void CatalogDatabase::migrateEnsureColumn(const char* column, const char* decl) {
+    ensureTableColumnImpl(db_, "images", column, decl);
+}
+void CatalogDatabase::migrateEnsureColumnOn(const char* table, const char* column,
+                                            const char* decl) {
+    ensureTableColumnImpl(db_, table, column, decl);
+}
+
+bool CatalogDatabase::migrateV1(std::string* errOut) {
+    // Broaden images with every column that historic builds appended (weights,
+    // metadata, stacking) plus the new file-tracking fingerprint columns.
+    migrateEnsureColumn("flag", "INTEGER NOT NULL DEFAULT 0");
+    migrateEnsureColumn("is_managed", "INTEGER NOT NULL DEFAULT 0");
+    migrateEnsureColumn("fullres_path", "TEXT NOT NULL DEFAULT ''");
+    migrateEnsureColumn("title", "TEXT NOT NULL DEFAULT ''");
+    migrateEnsureColumn("caption", "TEXT NOT NULL DEFAULT ''");
+    migrateEnsureColumn("copyright", "TEXT NOT NULL DEFAULT ''");
+    migrateEnsureColumn("creator", "TEXT NOT NULL DEFAULT ''");
+    migrateEnsureColumn("date_taken", "TEXT NOT NULL DEFAULT ''");
+    migrateEnsureColumn("camera", "TEXT NOT NULL DEFAULT ''");
+    migrateEnsureColumn("lens", "TEXT NOT NULL DEFAULT ''");
+    migrateEnsureColumn("stack_id", "INTEGER NOT NULL DEFAULT 0");
+    migrateEnsureColumn("file_size", "INTEGER NOT NULL DEFAULT 0");
+    migrateEnsureColumn("file_mtime", "INTEGER NOT NULL DEFAULT 0");
+    migrateEnsureColumnOn("edit_history", "variant_id", "INTEGER NOT NULL DEFAULT 0");
+    migrateEnsureColumnOn("edit_history", "name", "TEXT NOT NULL DEFAULT ''");
+
+    // Rebuild images as STRICT with CHECK constraints; the old inline
+    // UNIQUE(file_path) is replaced by a separate case-insensitive unique index.
+    const bool ok =
+        sqlite3_exec(db_,
+            "CREATE TABLE images_new ("
+            "  id INTEGER PRIMARY KEY,"
+            "  file_path TEXT NOT NULL,"
+            "  import_date TEXT NOT NULL,"
+            "  rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),"
+            "  label_color INTEGER NOT NULL DEFAULT 0 "
+            "    CHECK(label_color BETWEEN 0 AND 7),"
+            "  flag INTEGER NOT NULL DEFAULT 0 CHECK(flag IN (-1,0,1)),"
+            "  thumbnail_path TEXT NOT NULL DEFAULT '',"
+            "  fullres_path TEXT NOT NULL DEFAULT '',"
+            "  is_managed INTEGER NOT NULL DEFAULT 0,"
+            "  title TEXT NOT NULL DEFAULT '',"
+            "  caption TEXT NOT NULL DEFAULT '',"
+            "  copyright TEXT NOT NULL DEFAULT '',"
+            "  creator TEXT NOT NULL DEFAULT '',"
+            "  date_taken TEXT NOT NULL DEFAULT '',"
+            "  camera TEXT NOT NULL DEFAULT '',"
+            "  lens TEXT NOT NULL DEFAULT '',"
+            "  stack_id INTEGER NOT NULL DEFAULT 0,"
+            "  file_size INTEGER NOT NULL DEFAULT 0,"
+            "  file_mtime INTEGER NOT NULL DEFAULT 0"
+            ") STRICT;"
+            "INSERT INTO images_new(id, file_path, import_date, rating, "
+            "  label_color, flag, thumbnail_path, fullres_path, is_managed, "
+            "  title, caption, copyright, creator, date_taken, camera, lens, "
+            "  stack_id, file_size, file_mtime) "
+            "SELECT id, file_path, import_date, rating, label_color, flag, "
+            "  thumbnail_path, IFNULL(fullres_path,''), is_managed, title, "
+            "  caption, copyright, creator, date_taken, camera, lens, "
+            "  IFNULL(stack_id,0), IFNULL(file_size,0), IFNULL(file_mtime,0) "
+            "FROM images;"
+            "DROP TABLE images;"
+            "ALTER TABLE images_new RENAME TO images;"
+            // Case-insensitive uniqueness (goal 3) — Windows file paths collide
+            // only by case, so store them case-insensitively unique.
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_images_path "
+            "  ON images(file_path COLLATE NOCASE);"
+            // Query-plan indexes for the common listImages filters / default sort.
             "CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating);"
             "CREATE INDEX IF NOT EXISTS idx_images_flag ON images(flag);"
             "CREATE INDEX IF NOT EXISTS idx_images_import_date "
-            "ON images(import_date);"
+            "  ON images(import_date);"
             "CREATE INDEX IF NOT EXISTS idx_images_label_color "
-            "ON images(label_color);"))
+            "  ON images(label_color);",
+            nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (!ok)
+        *errOut = sqlite3_errmsg(db_);
+    return ok;
+}
+
+bool CatalogDatabase::migrateV2(std::string* errOut) {
+    // Rebuild the editing tables as STRICT and give edit_history a `kind` column
+    // (auto history vs. named snapshots, goal 7) plus the lookup index.
+    const bool ok =
+        sqlite3_exec(db_,
+            "CREATE TABLE edits_new ("
+            "  image_id INTEGER NOT NULL,"
+            "  variant_id INTEGER NOT NULL DEFAULT 0,"
+            "  adjustment_json TEXT NOT NULL,"
+            "  PRIMARY KEY (image_id, variant_id),"
+            "  FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE"
+            ") STRICT;"
+            "INSERT INTO edits_new SELECT image_id, variant_id, adjustment_json "
+            "FROM edits;"
+            "DROP TABLE edits;"
+            "ALTER TABLE edits_new RENAME TO edits;"
+            "CREATE TABLE edit_history_new ("
+            "  id INTEGER PRIMARY KEY,"
+            "  image_id INTEGER NOT NULL,"
+            "  variant_id INTEGER NOT NULL DEFAULT 0,"
+            "  adjustment_json TEXT NOT NULL,"
+            "  created_at TEXT NOT NULL,"
+            "  name TEXT NOT NULL DEFAULT '',"
+            "  kind TEXT NOT NULL DEFAULT 'auto',"
+            "  FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE"
+            ") STRICT;"
+            "INSERT INTO edit_history_new(id, image_id, variant_id, "
+            "  adjustment_json, created_at, name, kind) "
+            "SELECT id, image_id, variant_id, adjustment_json, created_at, name, "
+            "  CASE WHEN name IS NOT NULL AND name != '' THEN 'snapshot' "
+            "       ELSE 'auto' END FROM edit_history;"
+            "DROP TABLE edit_history;"
+            "ALTER TABLE edit_history_new RENAME TO edit_history;"
+            "CREATE INDEX IF NOT EXISTS idx_edit_history_lookup "
+            "  ON edit_history(image_id, variant_id, kind);"
+            "CREATE TABLE variants_new ("
+            "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
+            "  variant_id INTEGER NOT NULL DEFAULT 0,"
+            "  name TEXT NOT NULL DEFAULT '',"
+            "  is_master INTEGER NOT NULL DEFAULT 0,"
+            "  created_at INTEGER NOT NULL DEFAULT 0,"
+            "  PRIMARY KEY (image_id, variant_id)"
+            ") STRICT;"
+            "INSERT INTO variants_new SELECT image_id, variant_id, name, "
+            "is_master, created_at FROM variants;"
+            "DROP TABLE variants;"
+            "ALTER TABLE variants_new RENAME TO variants;"
+            "CREATE TABLE photo_features_new ("
+            "  image_id INTEGER PRIMARY KEY NOT NULL REFERENCES images(id) "
+            "ON DELETE CASCADE,"
+            "  phash INTEGER NOT NULL DEFAULT 0,"
+            "  model_version INTEGER NOT NULL DEFAULT 1 CHECK(model_version > 0),"
+            "  embedding BLOB NOT NULL DEFAULT X''"
+            ") STRICT;"
+            "INSERT INTO photo_features_new SELECT image_id, phash, "
+            "model_version, embedding FROM photo_features;"
+            "DROP TABLE photo_features;"
+            "ALTER TABLE photo_features_new RENAME TO photo_features;",
+            nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (!ok)
+        *errOut = sqlite3_errmsg(db_);
+    return ok;
+}
+
+bool CatalogDatabase::migrateV3(std::string* errOut) {
+    // Externalize preview BLOBs (goal 2): the `previews` table drops its `data`
+    // BLOB and keeps only the disk path. Existing rows are moved to
+    // `previews_old` here; the actual file export runs outside transactions in
+    // finishPreviewExport() (resumable if interrupted).
+    const bool hasPreview = tableHasColumn(db_, "previews", "data");
+    const bool tableExists = tableHasColumn(db_, "previews", "kind");
+    if (!tableExists) {
+        // Brand-new catalog / baseline did not create it.
+        const bool created =
+            sqlite3_exec(db_,
+                "CREATE TABLE previews ("
+                "  image_id INTEGER NOT NULL REFERENCES images(id) "
+                "ON DELETE CASCADE,"
+                "  kind INTEGER NOT NULL CHECK(kind IN (1,2,3)),"
+                "  path TEXT NOT NULL DEFAULT '',"
+                "  width INTEGER NOT NULL DEFAULT 0,"
+                "  height INTEGER NOT NULL DEFAULT 0,"
+                "  PRIMARY KEY (image_id, kind)"
+                ") STRICT;",
+                nullptr, nullptr, nullptr) == SQLITE_OK;
+        if (!created)
+            *errOut = sqlite3_errmsg(db_);
+        return created;
+    }
+    if (!hasPreview) {
+        // Already the new shape — nothing to do (re-run after a crash resume).
+        return true;
+    }
+    const bool ok =
+        sqlite3_exec(db_,
+            "ALTER TABLE previews RENAME TO previews_old;"
+            "CREATE TABLE previews ("
+            "  image_id INTEGER NOT NULL REFERENCES images(id) "
+            "ON DELETE CASCADE,"
+            "  kind INTEGER NOT NULL CHECK(kind IN (1,2,3)),"
+            "  path TEXT NOT NULL DEFAULT '',"
+            "  width INTEGER NOT NULL DEFAULT 0,"
+            "  height INTEGER NOT NULL DEFAULT 0,"
+            "  PRIMARY KEY (image_id, kind)"
+            ") STRICT;",
+            nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (!ok)
+        *errOut = sqlite3_errmsg(db_);
+    return ok;
+}
+
+bool CatalogDatabase::migrateV4(std::string* errOut) {
+    const bool hasFts = hasModule(db_, "fts5");
+
+    // Materialised search table shadowed by the FTS5 index (goal 6). `file_name`
+    // carries the full path so FTS tokenizes the basename tokens too.
+    const bool searchCreated =
+        sqlite3_exec(db_,
+            "CREATE TABLE IF NOT EXISTS images_search ("
+            "  image_id INTEGER PRIMARY KEY,"
+            "  title TEXT NOT NULL DEFAULT '',"
+            "  caption TEXT NOT NULL DEFAULT '',"
+            "  file_name TEXT NOT NULL DEFAULT '',"
+            "  keywords TEXT NOT NULL DEFAULT ''"
+            ") STRICT;",
+            nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (!searchCreated) {
+        *errOut = sqlite3_errmsg(db_);
         return false;
+    }
+    // Backfill the search table once from current images + keyword assignments.
+    bool backfilled =
+        sqlite3_exec(db_,
+            "INSERT OR IGNORE INTO images_search(image_id, title, caption, "
+            "  file_name) "
+            "SELECT id, title, caption, file_path FROM images;",
+            nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (backfilled) {
+        backfilled =
+            sqlite3_exec(db_,
+                "UPDATE images_search SET keywords = COALESCE(("
+                "  SELECT group_concat(k.name, ' / ') FROM photo_keywords pk "
+                "  JOIN keywords k ON k.id = pk.keyword_id "
+                "  WHERE pk.image_id = images_search.image_id"
+                "), '');",
+                nullptr, nullptr, nullptr) == SQLITE_OK;
+    }
+    if (!backfilled) {
+        *errOut = sqlite3_errmsg(db_);
+        return false;
+    }
+
+    // Triggered upkeep: keep images_search in step with images/photo_keywords.
+    (void)sqlite3_exec(db_,
+        "CREATE TRIGGER IF NOT EXISTS img_search_ai AFTER INSERT ON images BEGIN "
+        "  INSERT INTO images_search(image_id, title, caption, file_name) "
+        "    VALUES(new.id, new.title, new.caption, new.file_path); "
+        "END;"
+        "CREATE TRIGGER IF NOT EXISTS img_search_au AFTER UPDATE ON images BEGIN "
+        "  UPDATE images_search SET title=new.title, caption=new.caption, "
+        "    file_name=new.file_path WHERE image_id=old.id; "
+        "END;"
+        "CREATE TRIGGER IF NOT EXISTS img_search_ad AFTER DELETE ON images BEGIN "
+        "  DELETE FROM images_search WHERE image_id=old.id; "
+        "END;"
+        "CREATE TRIGGER IF NOT EXISTS kw_search_ai AFTER INSERT ON photo_keywords "
+        "BEGIN "
+        "  UPDATE images_search SET keywords = COALESCE(("
+        "    SELECT group_concat(k.name, ' / ') FROM photo_keywords pk "
+        "    JOIN keywords k ON k.id = pk.keyword_id "
+        "    WHERE pk.image_id = new.image_id), '') "
+        "  WHERE image_id = new.image_id; "
+        "END;"
+        "CREATE TRIGGER IF NOT EXISTS kw_search_ad AFTER DELETE ON photo_keywords "
+        "BEGIN "
+        "  UPDATE images_search SET keywords = COALESCE(("
+        "    SELECT group_concat(k.name, ' / ') FROM photo_keywords pk "
+        "    JOIN keywords k ON k.id = pk.keyword_id "
+        "    WHERE pk.image_id = old.image_id), '') "
+        "  WHERE image_id = old.image_id; "
+        "END;",
+        nullptr, nullptr, nullptr);
+
+    if (hasFts) {
+        // External-content FTS5 index over images_search (ROWID = image_id).
+        const bool fts =
+            sqlite3_exec(db_,
+                "CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5("
+                "  title, caption, file_name, keywords,"
+                "  content='images_search');"
+                "CREATE TRIGGER IF NOT EXISTS fts_search_ai AFTER INSERT ON "
+                "images_search BEGIN "
+                "  INSERT INTO images_fts(rowid, title, caption, file_name, "
+                "keywords) VALUES(new.image_id, new.title, new.caption, "
+                "new.file_name, new.keywords); END;"
+                "CREATE TRIGGER IF NOT EXISTS fts_search_ad AFTER DELETE ON "
+                "images_search BEGIN "
+                "  INSERT INTO images_fts(images_fts, rowid, title, caption, "
+                "file_name, keywords) VALUES('delete', old.image_id, old.title, "
+                "old.caption, old.file_name, old.keywords); END;"
+                "CREATE TRIGGER IF NOT EXISTS fts_search_au AFTER UPDATE ON "
+                "images_search BEGIN "
+                "  INSERT INTO images_fts(images_fts, rowid, title, caption, "
+                "file_name, keywords) VALUES('delete', old.image_id, "
+                "old.title, old.caption, old.file_name, old.keywords); "
+                "  INSERT INTO images_fts(rowid, title, caption, file_name, "
+                "keywords) VALUES(new.image_id, new.title, new.caption, "
+                "new.file_name, new.keywords); END;",
+                nullptr, nullptr, nullptr) == SQLITE_OK;
+        if (!fts) {
+            *errOut = sqlite3_errmsg(db_);
+            return false;
+        }
+    }
+
+    // phash segments — coarse 16-bit thumbnails over the 64-bit phash (goal 6)
+    // so a Hamming pre-filter never scans the whole photo_features table.
+    const bool seg =
+        sqlite3_exec(db_,
+            "CREATE TABLE IF NOT EXISTS phash_seg ("
+            "  image_id INTEGER NOT NULL,"
+            "  seg_idx INTEGER NOT NULL CHECK(seg_idx BETWEEN 0 AND 3),"
+            "  seg_val INTEGER NOT NULL,"
+            "  PRIMARY KEY (image_id, seg_idx)"
+            ") STRICT;"
+            "CREATE INDEX IF NOT EXISTS idx_phash_seg ON phash_seg(seg_idx, seg_val);"
+            "REPLACE INTO phash_seg(image_id, seg_idx, seg_val) "
+            "SELECT image_id, 0, (phash & 0xFFFF) FROM photo_features;"
+            "REPLACE INTO phash_seg(image_id, seg_idx, seg_val) "
+            "SELECT image_id, 1, ((phash >> 16) & 0xFFFF) FROM photo_features;"
+            "REPLACE INTO phash_seg(image_id, seg_idx, seg_val) "
+            "SELECT image_id, 2, ((phash >> 32) & 0xFFFF) FROM photo_features;"
+            "REPLACE INTO phash_seg(image_id, seg_idx, seg_val) "
+            "SELECT image_id, 3, ((phash >> 48) & 0xFFFF) FROM photo_features;",
+            nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (!seg) {
+        *errOut = sqlite3_errmsg(db_);
+        return false;
+    }
+
+    // Goal 3 — reverse query indexes on the child side of many-to-many links:
+    // "which collections/panoramas cite this image", and keyword reverse
+    // lookups. The forward (child_id,PARENT...) primary keys cover parent->child
+    // scans; these cover the child->parents direction.
+    const bool rev =
+        sqlite3_exec(db_,
+            "CREATE INDEX IF NOT EXISTS idx_collection_images_image "
+            "  ON collection_images(image_id);"
+            "CREATE INDEX IF NOT EXISTS idx_panorama_sources_source "
+            "  ON panorama_sources(source_image_id);"
+            "CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword "
+            "  ON photo_keywords(keyword_id);",
+            nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (!rev) {
+        *errOut = sqlite3_errmsg(db_);
+        return false;
+    }
+
+    if (hasModule(db_, "vec0")) {
+        // 64-dim embedding ANN index (goal 6).
+        (void)sqlite3_exec(db_,
+            "CREATE VIRTUAL TABLE IF NOT EXISTS images_vec USING vec0("
+            "  image_id INTEGER PRIMARY KEY, embedding float[64]);",
+            nullptr, nullptr, nullptr);
+    }
+    return true;
+}
+
+// Exports remaining legacy preview rows (previews_old) to disk files and clears
+// them. Each row commits independently so an interrupted run only loses one
+// export and is resumed on the next open(). Returns false only on a hard
+// database error. (goal 2, resumable migration)
+bool CatalogDatabase::finishPreviewExport() {
+    const bool hasOld = tableHasColumn(db_, "previews_old", "kind");
+    if (!hasOld)
+        return true;
+    for (;;) {
+        int64_t imageId = 0;
+        int kind = 0;
+        std::vector<uint8_t> data;
+        int width = 0, height = 0;
+        bool any = false;
+        {
+            Stmt s(db_, "SELECT image_id, kind, data, width, height FROM "
+                        "previews_old LIMIT 1;");
+            if (!s.ok())
+                return false;
+            if (s.step() == SQLITE_ROW) {
+                any = true;
+                imageId = sqlite3_column_int64(s.stmt, 0);
+                kind = sqlite3_column_int(s.stmt, 1);
+                const int bytes = sqlite3_column_bytes(s.stmt, 2);
+                const auto* p = static_cast<const uint8_t*>(
+                    sqlite3_column_blob(s.stmt, 2));
+                if (bytes > 0 && p)
+                    data.assign(p, p + bytes);
+                width = sqlite3_column_int(s.stmt, 3);
+                height = sqlite3_column_int(s.stmt, 4);
+            }
+        }
+        if (!any)
+            break;
+        const auto path =
+            previewPathFor(imageId, static_cast<PreviewKind>(kind), true);
+        bool wrote = writePreviewFileAtomically(path, data);
+        if (!wrote)
+            continue;  // leave the row; retried on next open
+        if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) !=
+            SQLITE_OK)
+            return false;
+        Stmt ins(db_, "INSERT INTO previews(image_id, kind, path, width, height) "
+                      "VALUES(?1, ?2, ?3, ?4, ?5);");
+        Stmt del(db_, "DELETE FROM previews_old WHERE image_id=?1 AND kind=?2;");
+        bool stepOk = ins.ok() && del.ok();
+        if (stepOk) {
+            sqlite3_bind_int64(ins.stmt, 1, imageId);
+            sqlite3_bind_int(ins.stmt, 2, kind);
+            const std::string rel = path.lexically_relative(previewRootDir())
+                                        .generic_string();
+            sqlite3_bind_text(ins.stmt, 3, rel.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(ins.stmt, 4, width);
+            sqlite3_bind_int(ins.stmt, 5, height);
+            sqlite3_bind_int64(del.stmt, 1, imageId);
+            sqlite3_bind_int(del.stmt, 2, kind);
+            stepOk = ins.step() == SQLITE_DONE && del.step() == SQLITE_DONE;
+        }
+        if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+            (void)sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
+        }
+        (void)stepOk;  // worst case a row is left for the next resume pass
+    }
+    // All exported — drop the staging table and shrink the database file.
+    sqlite3_exec(db_, "DROP TABLE previews_old;", nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, "VACUUM;", nullptr, nullptr, nullptr);
     return true;
 }
 
 void CatalogDatabase::close() {
-    // Teardown closes the secondary import connection first (rolling back a
-    // dangling transaction so no uncommitted writes linger in the WAL), then
-    // the primary connection.
-    std::lock_guard<std::mutex> importLock(importMutex_);
-    if (importDb_) {
-        if (importInTransaction_) {
-            (void)execOn(importDb_, "ROLLBACK;", &importError_);
-            importInTransaction_ = false;
-        }
-        sqlite3_close(importDb_);
-        importDb_ = nullptr;
-    }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (db_) {
         // Release every cached prepared statement first; sqlite3_close() fails
-        // (SQLITE_BUSY) while any statement is still outstanding.
+        // (SQLITE_BUSY) while any statement is still outstanding. A dangling
+        // transaction (paranoia) is rolled back so no uncommitted writes linger
+        // in the WAL.
+        if (inTransaction_) {
+            (void)execOn(db_, "ROLLBACK;", &lastError_);
+            inTransaction_ = false;
+        }
         finalizeAllCached();
         sqlite3_close(db_);
         db_ = nullptr;
@@ -743,14 +1351,18 @@ bool CatalogDatabase::execOn(sqlite3* db, const char* sql, std::string* errOut) 
     return true;
 }
 
-int64_t CatalogDatabase::addImageImpl(sqlite3* db, const std::string& filePath,
-                                      const std::string& thumbnailPath,
-                                      bool isManaged, std::string* errOut) {
+int64_t CatalogDatabase::addImageImpl(
+    sqlite3* db, const std::string& filePath, const std::string& thumbnailPath,
+    bool isManaged, int64_t fileSize, int64_t fileMtime, std::string* errOut) {
     // An existing row keeps its current managed state so re-importing the same
-    // file (idempotent import) never flips a copied file to "added".
+    // file (idempotent import) never flips a copied file to "added". The
+    // on-disk fingerprint (file_size / file_mtime, goal 4) is recorded on
+    // insert and refreshed on an idempotent re-import hit so stale sizes never
+    // linger behind.
     Stmt ins(db,
              "INSERT OR IGNORE INTO images(file_path, import_date, "
-             "thumbnail_path, is_managed) VALUES(?1, ?2, ?3, ?4);");
+             "thumbnail_path, is_managed, file_size, file_mtime) "
+             "VALUES(?1, ?2, ?3, ?4, ?5, ?6);");
     if (!ins.ok()) {
         *errOut = sqlite3_errmsg(db);
         return -1;
@@ -760,34 +1372,45 @@ int64_t CatalogDatabase::addImageImpl(sqlite3* db, const std::string& filePath,
     sqlite3_bind_text(ins.stmt, 2, date.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(ins.stmt, 3, thumbnailPath.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(ins.stmt, 4, isManaged ? 1 : 0);
+    sqlite3_bind_int64(ins.stmt, 5, fileSize);
+    sqlite3_bind_int64(ins.stmt, 6, fileMtime);
     if (ins.step() != SQLITE_DONE) {
         *errOut = sqlite3_errmsg(db);
         return -1;
     }
 
-    Stmt sel(db, "SELECT id, is_managed FROM images WHERE file_path = ?1;");
+    // The case-insensitive file_path unique index means a row may exist even
+    // when the case differs; look it up the same way the index defines it.
+    Stmt sel(db, "SELECT id, is_managed FROM images WHERE file_path = ?1 "
+                 "COLLATE NOCASE;");
     if (!sel.ok()) {
         *errOut = sqlite3_errmsg(db);
         return -1;
     }
     sqlite3_bind_text(sel.stmt, 1, filePath.c_str(), -1, SQLITE_TRANSIENT);
     if (sel.step() == SQLITE_ROW) {
-        // Idempotent re-import: promote the record to managed when needed. The
-        // UPDATE runs on the same connection so a re-import never mixes the
-        // primary and import connections mid-statement.
-        if (isManaged && sqlite3_column_int(sel.stmt, 1) == 0) {
-            Stmt upd(db, "UPDATE images SET is_managed = 1 WHERE id = ?1;");
-            if (!upd.ok()) {
-                *errOut = sqlite3_errmsg(db);
-                return -1;
-            }
-            sqlite3_bind_int64(upd.stmt, 1, sqlite3_column_int64(sel.stmt, 0));
-            if (upd.step() != SQLITE_DONE) {
-                *errOut = sqlite3_errmsg(db);
-                return -1;
-            }
+        const int64_t id = sqlite3_column_int64(sel.stmt, 0);
+        // Promote to managed and refresh the fingerprint on an idempotent hit.
+        // MAX() is a scalar function on integers; NULLIF(x,0)->NULL keeps the
+        // stored value when the caller passed 0 ("unknown / keep current").
+        Stmt upd(db,
+                 "UPDATE images SET is_managed = MAX(is_managed, ?1), "
+                 "  file_size = COALESCE(NULLIF(?2,0), file_size), "
+                 "  file_mtime = COALESCE(NULLIF(?3,0), file_mtime) "
+                 "WHERE id = ?4;");
+        if (!upd.ok()) {
+            *errOut = sqlite3_errmsg(db);
+            return -1;
         }
-        return sqlite3_column_int64(sel.stmt, 0);
+        sqlite3_bind_int(upd.stmt, 1, isManaged ? 1 : 0);
+        sqlite3_bind_int64(upd.stmt, 2, fileSize);
+        sqlite3_bind_int64(upd.stmt, 3, fileMtime);
+        sqlite3_bind_int64(upd.stmt, 4, id);
+        if (upd.step() != SQLITE_DONE) {
+            *errOut = sqlite3_errmsg(db);
+            return -1;
+        }
+        return id;
     }
     *errOut = sqlite3_errmsg(db);
     return -1;
@@ -795,23 +1418,58 @@ int64_t CatalogDatabase::addImageImpl(sqlite3* db, const std::string& filePath,
 
 int64_t CatalogDatabase::addImage(const std::string& filePath,
                                   const std::string& thumbnailPath,
-                                  bool isManaged) {
+                                  bool isManaged, int64_t fileSize,
+                                  int64_t fileMtime) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!db_)
         return -1;
-    return addImageImpl(db_, filePath, thumbnailPath, isManaged, &lastError_);
+    return addImageImpl(db_, filePath, thumbnailPath, isManaged, fileSize,
+                        fileMtime, &lastError_);
 }
 
-int64_t CatalogDatabase::addImageImport(const std::string& filePath,
-                                        const std::string& thumbnailPath,
-                                        bool isManaged) {
-    std::lock_guard<std::mutex> lock(importMutex_);
-    if (!importDb_) {
-        importError_ = "import connection not open";
-        return -1;
+bool CatalogDatabase::setFingerprint(int64_t id, int64_t fileSize,
+                                     int64_t fileMtime) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_ || id <= 0)
+        return false;
+    if (fileSize == 0 && fileMtime == 0)
+        return false;
+    Stmt s(db_,
+           "UPDATE images SET file_size = ?1, file_mtime = ?2 WHERE id = ?3;",
+           &stmtCache_);
+    if (!s.ok()) {
+        lastError_ = sqlite3_errmsg(db_);
+        return false;
     }
-    return addImageImpl(importDb_, filePath, thumbnailPath, isManaged,
-                        &importError_);
+    sqlite3_bind_int64(s.stmt, 1, fileSize);
+    sqlite3_bind_int64(s.stmt, 2, fileMtime);
+    sqlite3_bind_int64(s.stmt, 3, id);
+    if (s.step() != SQLITE_DONE) {
+        lastError_ = sqlite3_errmsg(db_);
+        return false;
+    }
+    return sqlite3_changes(db_) > 0;
+}
+
+std::vector<int64_t> CatalogDatabase::detectModifiedImages(
+    int64_t fileSize, int64_t fileMtime) const {
+    std::vector<int64_t> out;
+    if (!db_)
+        return out;
+    // Rows whose stored fingerprint differs from the caller-provided on-disk
+    // (size, mtime) — the file changed externally / needs re-decode.
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    Stmt s(db_,
+           "SELECT id FROM images "
+           "WHERE file_size != ?1 OR file_mtime != ?2 ORDER BY id;",
+           &stmtCache_);
+    if (!s.ok())
+        return out;
+    sqlite3_bind_int64(s.stmt, 1, fileSize);
+    sqlite3_bind_int64(s.stmt, 2, fileMtime);
+    while (s.step() == SQLITE_ROW)
+        out.push_back(sqlite3_column_int64(s.stmt, 0));
+    return out;
 }
 
 bool CatalogDatabase::setRating(int64_t id, int rating) {
@@ -1070,19 +1728,30 @@ bool CatalogDatabase::storePreviewImpl(sqlite3* db, int64_t imageId,
                                        const std::vector<uint8_t>& data,
                                        int width, int height,
                                        std::string* errOut) {
+    // Externalize the blob (goal 2): the bytes go to a sharded disk file under
+    // the preview root and only its path (relative to the root) is persisted in
+    // the `path` column. The deterministic (image_id, kind) path means a
+    // re-store overwrites the same file.
+    const std::filesystem::path file =
+        previewPathFor(imageId, kind, /*mkdir=*/true);
+    if (!writePreviewFileAtomically(file, data)) {
+        *errOut = "failed to write preview file: " + file.string();
+        return false;
+    }
+    const std::string rel =
+        file.lexically_relative(previewRootDir()).generic_string();
     Stmt s(db,
-           "INSERT INTO previews(image_id, kind, data, width, height) "
+           "INSERT INTO previews(image_id, kind, path, width, height) "
            "VALUES(?1,?2,?3,?4,?5) "
            "ON CONFLICT(image_id, kind) DO UPDATE SET "
-           "data=excluded.data, width=excluded.width, height=excluded.height;");
+           "path=excluded.path, width=excluded.width, height=excluded.height;");
     if (!s.ok()) {
         *errOut = sqlite3_errmsg(db);
         return false;
     }
     sqlite3_bind_int64(s.stmt, 1, imageId);
     sqlite3_bind_int(s.stmt, 2, static_cast<int>(kind));
-    sqlite3_bind_blob(s.stmt, 3, data.empty() ? nullptr : data.data(),
-                      static_cast<int>(data.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(s.stmt, 3, rel.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(s.stmt, 4, width);
     sqlite3_bind_int(s.stmt, 5, height);
     if (s.step() != SQLITE_DONE) {
@@ -1102,24 +1771,12 @@ bool CatalogDatabase::storePreview(int64_t imageId, PreviewKind kind,
                             &lastError_);
 }
 
-bool CatalogDatabase::storePreviewImport(int64_t imageId, PreviewKind kind,
-                                         const std::vector<uint8_t>& data,
-                                         int width, int height) {
-    std::lock_guard<std::mutex> lock(importMutex_);
-    if (!importDb_) {
-        importError_ = "import connection not open";
-        return false;
-    }
-    return storePreviewImpl(importDb_, imageId, kind, data, width, height,
-                            &importError_);
-}
-
-std::optional<std::vector<uint8_t>> CatalogDatabase::loadPreview(
+std::optional<std::filesystem::path> CatalogDatabase::previewFilePath(
     int64_t imageId, PreviewKind kind) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!db_)
         return std::nullopt;
-    Stmt s(db_, "SELECT data FROM previews WHERE image_id=?1 AND kind=?2;",
+    Stmt s(db_, "SELECT path FROM previews WHERE image_id=?1 AND kind=?2;",
            &stmtCache_);
     if (!s.ok())
         return std::nullopt;
@@ -1127,14 +1784,37 @@ std::optional<std::vector<uint8_t>> CatalogDatabase::loadPreview(
     sqlite3_bind_int(s.stmt, 2, static_cast<int>(kind));
     if (s.step() != SQLITE_ROW)
         return std::nullopt;
-    const int bytes = sqlite3_column_bytes(s.stmt, 0);
-    if (bytes == 0)
-        return std::vector<uint8_t>{};
-    const auto* p = static_cast<const uint8_t*>(
-        sqlite3_column_blob(s.stmt, 0));
+    const unsigned char* p = sqlite3_column_text(s.stmt, 0);
     if (!p)
         return std::nullopt;
-    return std::vector<uint8_t>(p, p + bytes);
+    std::filesystem::path rel(reinterpret_cast<const char*>(p));
+    if (rel.is_absolute())
+        return rel;
+    return (previewRootDir() / rel).lexically_normal();
+}
+
+std::optional<std::vector<uint8_t>> CatalogDatabase::loadPreview(
+    int64_t imageId, PreviewKind kind) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return std::nullopt;
+    Stmt s(db_, "SELECT path FROM previews WHERE image_id=?1 AND kind=?2;",
+           &stmtCache_);
+    if (!s.ok())
+        return std::nullopt;
+    sqlite3_bind_int64(s.stmt, 1, imageId);
+    sqlite3_bind_int(s.stmt, 2, static_cast<int>(kind));
+    if (s.step() != SQLITE_ROW)
+        return std::nullopt;
+    const unsigned char* p = sqlite3_column_text(s.stmt, 0);
+    if (!p)
+        return std::nullopt;
+    // Resolve the stored (relative) path against the preview root and stream
+    // the file back — the bytes live on disk, not in the database (goal 2).
+    std::filesystem::path rel(reinterpret_cast<const char*>(p));
+    if (rel.is_relative())
+        rel = previewRootDir() / rel;
+    return readPreviewFile(rel);
 }
 
 std::optional<std::pair<int, int>> CatalogDatabase::previewSize(
@@ -1171,26 +1851,11 @@ bool CatalogDatabase::storeStandardPreview(int64_t imageId,
 
 std::optional<std::shared_ptr<ImageBuffer>>
 CatalogDatabase::getStandardPreview(int64_t imageId) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!db_)
+    // The record is externalized to disk; loadPreview reads the file bytes.
+    auto blob = loadPreview(imageId, PreviewKind::Standard);
+    if (!blob || blob->empty())
         return std::nullopt;
-    Stmt s(db_, "SELECT data FROM previews WHERE image_id=?1 AND kind=?2;",
-           &stmtCache_);
-    if (!s.ok())
-        return std::nullopt;
-    sqlite3_bind_int64(s.stmt, 1, imageId);
-    sqlite3_bind_int(s.stmt, 2, static_cast<int>(PreviewKind::Standard));
-    if (s.step() != SQLITE_ROW)
-        return std::nullopt;
-    const int bytes = sqlite3_column_bytes(s.stmt, 0);
-    if (bytes == 0)
-        return std::nullopt;
-    const auto* p =
-        static_cast<const uint8_t*>(sqlite3_column_blob(s.stmt, 0));
-    if (!p)
-        return std::nullopt;
-    std::vector<uint8_t> blob(p, p + bytes);
-    auto decoded = decodeStandardPreview(blob);
+    auto decoded = decodeStandardPreview(*blob);
     if (!decoded.buf || decoded.buf->empty())
         return std::nullopt;
     return decoded.buf;
@@ -1198,26 +1863,10 @@ CatalogDatabase::getStandardPreview(int64_t imageId) const {
 
 std::optional<CatalogDatabase::DecodedStandardPreviewEntry>
 CatalogDatabase::getStandardPreviewWithMeta(int64_t imageId) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (!db_)
+    auto blob = loadPreview(imageId, PreviewKind::Standard);
+    if (!blob || blob->empty())
         return std::nullopt;
-    Stmt s(db_, "SELECT data FROM previews WHERE image_id=?1 AND kind=?2;",
-           &stmtCache_);
-    if (!s.ok())
-        return std::nullopt;
-    sqlite3_bind_int64(s.stmt, 1, imageId);
-    sqlite3_bind_int(s.stmt, 2, static_cast<int>(PreviewKind::Standard));
-    if (s.step() != SQLITE_ROW)
-        return std::nullopt;
-    const int bytes = sqlite3_column_bytes(s.stmt, 0);
-    if (bytes == 0)
-        return std::nullopt;
-    const auto* p =
-        static_cast<const uint8_t*>(sqlite3_column_blob(s.stmt, 0));
-    if (!p)
-        return std::nullopt;
-    std::vector<uint8_t> blob(p, p + bytes);
-    auto decoded = decodeStandardPreview(blob);
+    auto decoded = decodeStandardPreview(*blob);
     if (!decoded.buf || decoded.buf->empty())
         return std::nullopt;
     return DecodedStandardPreviewEntry{decoded.buf, decoded.nativeWidth,
@@ -1241,13 +1890,40 @@ bool CatalogDatabase::invalidatePreviews(int64_t imageId) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!db_)
         return false;
+    // Collect the externalized preview files first so they are deleted with
+    // the database rows (R-14 keeps a stale cached decode from being reused).
+    std::vector<std::filesystem::path> files;
+    {
+        Stmt q(db_,
+               "SELECT path FROM previews WHERE image_id = ?1;", &stmtCache_);
+        if (!q.ok()) {
+            lastError_ = sqlite3_errmsg(db_);
+            return false;
+        }
+        sqlite3_bind_int64(q.stmt, 1, imageId);
+        while (q.step() == SQLITE_ROW) {
+            if (const unsigned char* p = sqlite3_column_text(q.stmt, 0);
+                p && *p) {
+                std::filesystem::path rel(reinterpret_cast<const char*>(p));
+                if (rel.is_relative())
+                    rel = previewRootDir() / rel;
+                files.push_back(std::move(rel));
+            }
+        }
+    }
     Stmt s(db_, "DELETE FROM previews WHERE image_id = ?1;", &stmtCache_);
     if (!s.ok()) {
         lastError_ = sqlite3_errmsg(db_);
         return false;
     }
     sqlite3_bind_int64(s.stmt, 1, imageId);
-    return s.step() == SQLITE_DONE;
+    const bool ok = s.step() == SQLITE_DONE;
+    // Best-effort file cleanup; a missing/stale file is not fatal.
+    for (const auto& f : files) {
+        std::error_code ec;
+        std::filesystem::remove(f, ec);
+    }
+    return ok;
 }
 
 bool CatalogDatabase::saveAdjustments(int64_t imageId,
@@ -1294,7 +1970,8 @@ bool CatalogDatabase::saveAdjustments(int64_t imageId,
         // file.
         Stmt ins(db_,
                  "INSERT INTO edit_history(image_id, variant_id, "
-                 "adjustment_json, created_at) VALUES(?1, ?2, ?3, ?4);");
+                 "adjustment_json, created_at, kind) "
+                 "VALUES(?1, ?2, ?3, ?4, 'auto');");
         if (!ins.ok()) {
             lastError_ = sqlite3_errmsg(db_);
             ok = false;
@@ -1308,6 +1985,30 @@ bool CatalogDatabase::saveAdjustments(int64_t imageId,
             if (ins.step() != SQLITE_DONE) {
                 lastError_ = sqlite3_errmsg(db_);
                 ok = false;
+            }
+        }
+        // Goal 7: automatic history grows on every commit; retain at most 20
+        // 'auto' rows per image/variant (user chose this cap). Named snapshots
+        // (kind='snapshot') are never pruned. Runs inside the edits+snapshot
+        // transaction so a failure rolls the whole unit back.
+        if (ok) {
+            Stmt prune(db_,
+                       "DELETE FROM edit_history "
+                       "WHERE kind='auto' AND image_id=?1 AND variant_id=?2 "
+                       "  AND id NOT IN (SELECT id FROM edit_history "
+                       "    WHERE kind='auto' AND image_id=?1 AND variant_id=?2 "
+                       "    ORDER BY id DESC LIMIT 20);",
+                       &stmtCache_);
+            if (!prune.ok()) {
+                lastError_ = sqlite3_errmsg(db_);
+                ok = false;
+            } else {
+                sqlite3_bind_int64(prune.stmt, 1, imageId);
+                sqlite3_bind_int(prune.stmt, 2, variantId);
+                if (prune.step() != SQLITE_DONE) {
+                    lastError_ = sqlite3_errmsg(db_);
+                    ok = false;
+                }
             }
         }
     }
@@ -1367,9 +2068,13 @@ int64_t CatalogDatabase::saveEditSnapshot(
     if (!db_)
         return -1;
     const std::string jsonText = ProfileIO::toJson(adjustments).serialize();
+    // Goal 7: a non-empty name marks a user snapshot (kind='snapshot', never
+    // pruned); the empty-name path is automatic undo history (kind='auto'),
+    // retained up to 20 per image/variant.
+    const std::string kind = name.empty() ? "auto" : "snapshot";
     Stmt ins(db_,
              "INSERT INTO edit_history(image_id, variant_id, adjustment_json, "
-             "created_at, name) VALUES(?1, ?2, ?3, ?4, ?5);");
+             "created_at, name, kind) VALUES(?1, ?2, ?3, ?4, ?5, ?6);");
     if (!ins.ok()) {
         lastError_ = sqlite3_errmsg(db_);
         return -1;
@@ -1380,11 +2085,32 @@ int64_t CatalogDatabase::saveEditSnapshot(
     const std::string date = nowIso8601Utc();
     sqlite3_bind_text(ins.stmt, 4, date.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(ins.stmt, 5, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(ins.stmt, 6, kind.c_str(), -1, SQLITE_TRANSIENT);
     if (ins.step() != SQLITE_DONE) {
         lastError_ = sqlite3_errmsg(db_);
         return -1;
     }
-    return sqlite3_last_insert_rowid(db_);
+    const int64_t id = sqlite3_last_insert_rowid(db_);
+    if (kind == "auto") {
+        Stmt prune(db_,
+                   "DELETE FROM edit_history "
+                   "WHERE kind='auto' AND image_id=?1 AND variant_id=?2 "
+                   "  AND id NOT IN (SELECT id FROM edit_history "
+                   "    WHERE kind='auto' AND image_id=?1 AND variant_id=?2 "
+                   "    ORDER BY id DESC LIMIT 20);",
+                   &stmtCache_);
+        if (!prune.ok()) {
+            lastError_ = sqlite3_errmsg(db_);
+            return -1;
+        }
+        sqlite3_bind_int64(prune.stmt, 1, imageId);
+        sqlite3_bind_int(prune.stmt, 2, variantId);
+        if (prune.step() != SQLITE_DONE) {
+            lastError_ = sqlite3_errmsg(db_);
+            return -1;
+        }
+    }
+    return id;
 }
 
 bool CatalogDatabase::renameSnapshot(int64_t imageId, int64_t snapshotId,
@@ -1393,7 +2119,8 @@ bool CatalogDatabase::renameSnapshot(int64_t imageId, int64_t snapshotId,
     if (!db_)
         return false;
     Stmt s(db_,
-           "UPDATE edit_history SET name = ?1 "
+           "UPDATE edit_history SET name = ?1, "
+           "  kind = CASE WHEN ?1 = '' THEN 'auto' ELSE 'snapshot' END "
            "WHERE image_id = ?2 AND variant_id = ?3 AND id = ?4;",
            &stmtCache_);
     if (!s.ok()) {
@@ -2026,9 +2753,68 @@ std::vector<ImageRecord> CatalogDatabase::searchImages(
         return out;
     if (text.empty())
         return out;
+
+    // Goal 6 — prefer the FTS5 index (image title/caption/file_name/keywords,
+    // content-external mode) so keyword/file-name/title search is sub-linear.
+    // Each whitespace-separated term becomes a prefix phrase ("t"*), ANDed by
+    // FTS5's default implicit-AND over the MATCH expression.
+    if (hasModule(db_, "fts5")) {
+        std::string q;
+        std::istringstream terms(text);
+        std::string tok;
+        while (terms >> tok) {
+            std::string esc;
+            esc.reserve(tok.size());
+            for (char c : tok) {
+                if (c == '"' || c == '\'' || c == '*' || c == ':' || c == ')')
+                    continue;  // strip FTS5 metacharacters
+                esc.push_back(c);
+            }
+            if (esc.empty())
+                continue;
+            if (!q.empty())
+                q.push_back(' ');
+            q += "\"" + esc + "\"*";
+        }
+        if (!q.empty()) {
+            std::vector<int64_t> ids;
+            {
+                Stmt s(db_,
+                      "SELECT image_id FROM images_fts WHERE images_fts MATCH ?1 "
+                      "ORDER BY rank LIMIT 1000;");
+                if (s.ok()) {
+                    sqlite3_bind_text(s.stmt, 1, q.c_str(), -1, SQLITE_TRANSIENT);
+                    while (s.step() == SQLITE_ROW)
+                        ids.push_back(sqlite3_column_int64(s.stmt, 0));
+                }
+            }
+            if (!ids.empty()) {
+                std::string sql = std::string("SELECT ") + kImageColumns +
+                                  " FROM images WHERE id IN (";
+                for (size_t i = 0; i < ids.size(); ++i) {
+                    if (i)
+                        sql += ",";
+                    sql += std::to_string(ids[i]);
+                }
+                sql += ") ORDER BY import_date DESC, id DESC;";
+                Stmt s(db_, sql.c_str());
+                if (s.ok()) {
+                    while (s.step() == SQLITE_ROW)
+                        out.push_back(readImageRecord(s.stmt));
+                }
+                if (!out.empty())
+                    return out;  // FTS produced results
+            }
+        }
+        // FTS available but matched nothing / was not tokenizable: fall through
+        // to the LIKE scan below so plain substring input still works.
+    }
+
+    // Baseline LIKE fallback (also the path when FTS5 is not linked).
     const std::string sql =
         std::string("SELECT ") + kImageColumns + " FROM images i "
-        "WHERE i.title LIKE ?1 OR i.caption LIKE ?1 OR EXISTS ("
+        "WHERE i.title LIKE ?1 OR i.caption LIKE ?1 OR i.file_path LIKE ?1 "
+        "OR EXISTS ("
         "  SELECT 1 FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
         "  WHERE pk.image_id = i.id AND k.name LIKE ?1"
         ") ORDER BY i.import_date DESC, i.id DESC;";
@@ -2586,108 +3372,6 @@ bool CatalogDatabase::rollbackTransaction() {
     return ok;
 }
 
-bool CatalogDatabase::openImportConnection() {
-    std::lock_guard<std::mutex> lock(importMutex_);
-    if (importDb_)
-        return true;
-    const int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
-                      SQLITE_OPEN_FULLMUTEX;
-    const int rc = sqlite3_open_v2(path_.string().c_str(), &importDb_, flags,
-                                   nullptr);
-    if (rc != SQLITE_OK) {
-        importError_ = importDb_ ? sqlite3_errmsg(importDb_)
-                                 : "sqlite open failed";
-        if (importDb_)
-            sqlite3_close(importDb_);
-        importDb_ = nullptr;
-        return false;
-    }
-    // Same pragmas as the primary connection: FK cascades, WAL mode (must match
-    // the file's journal mode), synchronous NORMAL and a busy timeout so a
-    // transient lock held by the UI connection does not fail the import.
-    if (!execOn(importDb_, "PRAGMA foreign_keys=ON;", &importError_) ||
-        !execOn(importDb_, "PRAGMA journal_mode=WAL;", &importError_) ||
-        !execOn(importDb_, "PRAGMA synchronous=NORMAL;", &importError_) ||
-        !execOn(importDb_, "PRAGMA busy_timeout=5000;", &importError_)) {
-        sqlite3_close(importDb_);
-        importDb_ = nullptr;
-        return false;
-    }
-    importInTransaction_ = false;
-    return true;
-}
-
-void CatalogDatabase::closeImportConnection() {
-    std::lock_guard<std::mutex> lock(importMutex_);
-    if (importDb_) {
-        // Roll back a dangling transaction so the connection is clean before
-        // it is released.
-        if (importInTransaction_) {
-            (void)execOn(importDb_, "ROLLBACK;", &importError_);
-            importInTransaction_ = false;
-        }
-        sqlite3_close(importDb_);
-        importDb_ = nullptr;
-    }
-}
-
-bool CatalogDatabase::isImportConnectionOpen() const {
-    std::lock_guard<std::mutex> lock(importMutex_);
-    return importDb_ != nullptr;
-}
-
-std::string CatalogDatabase::importLastError() const {
-    std::lock_guard<std::mutex> lock(importMutex_);
-    return importError_;
-}
-
-bool CatalogDatabase::beginImportTransaction() {
-    std::lock_guard<std::mutex> lock(importMutex_);
-    if (!importDb_) {
-        importError_ = "import connection not open";
-        return false;
-    }
-    if (importInTransaction_)
-        return true;
-    if (!execOn(importDb_, "BEGIN IMMEDIATE;", &importError_))
-        return false;
-    importInTransaction_ = true;
-    return true;
-}
-
-bool CatalogDatabase::commitImportTransaction() {
-    std::lock_guard<std::mutex> lock(importMutex_);
-    if (!importDb_) {
-        importError_ = "import connection not open";
-        return false;
-    }
-    if (!importInTransaction_)
-        return true;
-    if (execOn(importDb_, "COMMIT;", &importError_)) {
-        importInTransaction_ = false;
-        return true;
-    }
-    // COMMIT failed (disk full / file locked) and the transaction is still
-    // open; roll it back so the import connection returns to a clean state and
-    // later writes cannot be absorbed into a dangling transaction.
-    (void)execOn(importDb_, "ROLLBACK;", &importError_);
-    importInTransaction_ = false;
-    return false;
-}
-
-bool CatalogDatabase::rollbackImportTransaction() {
-    std::lock_guard<std::mutex> lock(importMutex_);
-    if (!importDb_) {
-        importError_ = "import connection not open";
-        return false;
-    }
-    if (!importInTransaction_)
-        return true;
-    const bool ok = execOn(importDb_, "ROLLBACK;", &importError_);
-    importInTransaction_ = false;
-    return ok;
-}
-
 bool CatalogDatabase::backup(const std::filesystem::path& destPath) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!db_)
@@ -2768,7 +3452,54 @@ bool CatalogDatabase::storePhotoFeatures(int64_t imageId, uint64_t perceptualHas
     } else {
         sqlite3_bind_null(s.stmt, 4);
     }
-    return s.step() == SQLITE_DONE;
+    if (s.step() != SQLITE_DONE)
+        return false;
+    // Goal 6 — keep the derived search indexes in step with the row: the four
+    // 16-bit phash segments (coarse Hamming pre-filter) and the 64-dim vec0
+    // embedding used by ANN search. A failure here is non-fatal: the row stays
+    // correct and rebuildSearchIndexes() can resync later.
+    {
+        Stmt seg(db_,
+                 "REPLACE INTO phash_seg(image_id, seg_idx, seg_val) VALUES "
+                 "(?1,0,?2),(?1,1,?3),(?1,2,?4),(?1,3,?5);");
+        if (seg.ok()) {
+            sqlite3_bind_int64(seg.stmt, 1, imageId);
+            sqlite3_bind_int64(seg.stmt, 2,
+                               static_cast<int64_t>(perceptualHash & 0xFFFF));
+            sqlite3_bind_int64(
+                seg.stmt, 3,
+                static_cast<int64_t>((perceptualHash >> 16) & 0xFFFF));
+            sqlite3_bind_int64(
+                seg.stmt, 4,
+                static_cast<int64_t>((perceptualHash >> 32) & 0xFFFF));
+            sqlite3_bind_int64(
+                seg.stmt, 5,
+                static_cast<int64_t>((perceptualHash >> 48) & 0xFFFF));
+            (void)seg.step();
+        }
+        if (!embedding.empty() && embedding.size() == 64 &&
+            hasModule(db_, "vec0")) {
+            Stmt del(db_, "DELETE FROM images_vec WHERE image_id=?1;");
+            if (del.ok()) {
+                sqlite3_bind_int64(del.stmt, 1, imageId);
+                (void)del.step();
+            }
+            // images_vec is a WITHOUT ROWID vec0 table keyed by image_id (the
+            // explicit INTEGER PRIMARY KEY), so the rowid is written via the
+            // image_id column rather than `rowid`.
+            Stmt vec(db_,
+                     "INSERT INTO images_vec(image_id, embedding) VALUES(?1, ?2);");
+            if (vec.ok()) {
+                sqlite3_bind_int64(vec.stmt, 1, imageId);
+                sqlite3_bind_blob(
+                    vec.stmt, 2, embedding.data(),
+                    static_cast<int>(embedding.size() * sizeof(float)),
+                    SQLITE_TRANSIENT);
+                (void)vec.step();
+            }
+        }
+    }
+    return true;
 }
 
 std::optional<CatalogDatabase::PhotoFeatureRow>
@@ -2831,6 +3562,81 @@ CatalogDatabase::scanPhashCandidates(int maxHamming) const {
         }
     }
     return out;
+}
+
+std::vector<int64_t> CatalogDatabase::annByEmbedding(
+    const std::vector<float>& query, int k) const {
+    std::vector<int64_t> out;
+    if (!db_ || query.empty() || k <= 0)
+        return out;
+    if (query.size() != 64)  // the vec0 index is declared float[64]
+        return out;
+    if (!hasModule(db_, "vec0"))
+        return out;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // sqlite-vec KNN: the `k = ?` constraint bounds the neighbour count, so no
+    // separate LIMIT is allowed (vec0 errors when both are present). The raw
+    // query vector is passed as a float blob. A missing/empty vec index (e.g.
+    // the module not linked) returns empty and callers degrade to phash
+    // screening.
+    const std::string sql =
+        "SELECT image_id FROM images_vec WHERE embedding MATCH ?1 AND k = ?2 "
+        "ORDER BY distance;";
+    Stmt s(db_, sql.c_str());
+    if (!s.ok())
+        return out;
+    sqlite3_bind_blob(s.stmt, 1, query.data(),
+                      static_cast<int>(query.size() * sizeof(float)),
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_int(s.stmt, 2, k);
+    while (s.step() == SQLITE_ROW)
+        out.push_back(sqlite3_column_int64(s.stmt, 0));
+    return out;
+}
+
+bool CatalogDatabase::rebuildSearchIndexes() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return false;
+    // Re-derive the FTS content table from the live image + keyword state; the
+    // FTS shadow index and the phash/vec derived tables are rebuilt too. Run in
+    // a transaction so a partial rebuild never leaves a half-populated index.
+    if (!exec("BEGIN IMMEDIATE;"))
+        return false;
+    const bool searchOk =
+        exec("DELETE FROM images_search;") &&
+        exec("INSERT INTO images_search(image_id, title, caption, file_name) "
+             "SELECT id, title, caption, file_path FROM images;") &&
+        exec("UPDATE images_search SET keywords = COALESCE(("
+             "  SELECT group_concat(k.name, ' / ') FROM photo_keywords pk "
+             "  JOIN keywords k ON k.id = pk.keyword_id "
+             "  WHERE pk.image_id = images_search.image_id), '');");
+    const bool segOk =
+        exec("DELETE FROM phash_seg;") &&
+        exec("REPLACE INTO phash_seg(image_id, seg_idx, seg_val) "
+             "SELECT image_id, 0, (phash & 0xFFFF) FROM photo_features;") &&
+        exec("REPLACE INTO phash_seg(image_id, seg_idx, seg_val) "
+             "SELECT image_id, 1, ((phash >> 16) & 0xFFFF) FROM photo_features;") &&
+        exec("REPLACE INTO phash_seg(image_id, seg_idx, seg_val) "
+             "SELECT image_id, 2, ((phash >> 32) & 0xFFFF) FROM photo_features;") &&
+        exec("REPLACE INTO phash_seg(image_id, seg_idx, seg_val) "
+             "SELECT image_id, 3, ((phash >> 48) & 0xFFFF) FROM photo_features;");
+    bool vecOk = true;
+    if (hasModule(db_, "vec0")) {
+        vecOk = exec("DELETE FROM images_vec;") &&
+                exec("INSERT INTO images_vec(image_id, embedding) "
+                     "SELECT image_id, embedding FROM photo_features "
+                     "WHERE length(embedding) = 256;");  // 64 floats * 4 bytes
+    }
+    // Re-tokenize the FTS index from the content table (external-content mode).
+    if (hasModule(db_, "fts5"))
+        exec("INSERT INTO images_fts(images_fts) VALUES('rebuild');");
+    if (!searchOk || !segOk || !vecOk) {
+        (void)exec("ROLLBACK;");
+        lastError_ = "search index rebuild failed: " + lastError_;
+        return false;
+    }
+    return exec("COMMIT;");
 }
 
 bool CatalogDatabase::setStackId(int64_t imageId, int64_t stackId) {
