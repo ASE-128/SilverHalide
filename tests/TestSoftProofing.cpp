@@ -48,8 +48,8 @@ static fs::path findAnyIccProfile() {
     // third_party/lcms2/.  Finding none is fine — the first test still
     // exercises the "no profile" branch.
     const std::array<fs::path, 3> candidates = {
-        "D:/Desktop/SilverHalide-src/lightroom-clone-cpp/resources",
-        "D:/Desktop/SilverHalide-src/lightroom-clone-cpp/third_party/lcms2",
+        "D:/Desktop/SilverHalide-src/resources",
+        "D:/Desktop/SilverHalide-src/third_party/lcms2",
         fs::temp_directory_path(),
     };
     std::error_code ec;

@@ -74,3 +74,20 @@ Thumbs.db
 .trae/
 .claude/
 .github/
+.vscode/
+*.user
+*.autosave
+
+# ===== 打包输出 / 用户数据（源提升自 lightroom-clone-cpp）=====
+dist/
+*.lrcat
+cache/
+
+# ===== 运行时/配置期依赖 =====
+_build_deps/
+
+# ===== AI 模型（运行时下载，不入版本库）=====
+models/
+!resources/models/
+resources/models/*.onnx
+!resources/models/manifest.json

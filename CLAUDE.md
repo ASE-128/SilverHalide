@@ -16,13 +16,13 @@
 
 ## 构建命令
 
-> 工作区根目录为 D:\Desktop\SilverHalide-src，活跃构建树位于根目录的 build_gui / build_headless。
-> 旧的 lightroom-clone-cpp/build_gui 是历史残留，不应当作为当前打包、调试或自动化入口。
+> 源码根目录 = 工作区根目录 D:\Desktop\SilverHalide-src，活跃构建树位于根目录的 build_gui / build_headless。
+> 旧的 lightroom-clone-cpp/build_gui 是历史残留（源码已上提至根目录后不存在），不应当作为当前打包、调试或自动化入口。
 
 ### GUI 构建
 
 ```bat
-cmake -S lightroom-clone-cpp -B build_gui -G Ninja ^
+cmake -S . -B build_gui -G Ninja ^
       -DCMAKE_PREFIX_PATH=qt/6.8.3/msvc2022_64 ^
       -DCMAKE_BUILD_TYPE=Release
 cmake --build build_gui -j
@@ -37,7 +37,7 @@ cmake --build build_gui -j
 ### 无头构建与测试
 
 ```bat
-cmake -S lightroom-clone-cpp -B build_headless -G Ninja ^
+cmake -S . -B build_headless -G Ninja ^
       -DCMAKE_BUILD_TYPE=Release -DLRC_ENABLE_QT=OFF
 cmake --build build_headless -j
 ctest --test-dir build_headless --output-on-failure

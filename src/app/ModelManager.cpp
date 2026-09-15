@@ -378,7 +378,6 @@ ModelManager::ModelManager(std::filesystem::path manifestPath)
                              : (bundled / "manifest.json"),
             std::filesystem::path(LRC_PROJECT_MANIFEST_DIR) / "resources" / "models" / "manifest.json",
             std::filesystem::current_path() / "resources" / "models" / "manifest.json",
-            std::filesystem::current_path() / "lightroom-clone-cpp" / "resources" / "models" / "manifest.json",
             std::filesystem::current_path().parent_path() / "resources" / "models" / "manifest.json",
         };
         for (const auto& p : tryPaths) {

@@ -75,7 +75,7 @@ NAFNet 和 BiRefNet 模型文件随安装包一起分发，位于 `<安装目录
 ### GUI 构建
 
 ```bat
-cmake -S lightroom-clone-cpp -B build_gui -G Ninja ^
+cmake -S . -B build_gui -G Ninja ^
       -DCMAKE_PREFIX_PATH=qt/6.8.3/msvc2022_64 ^
       -DCMAKE_BUILD_TYPE=Release
 cmake --build build_gui -j
@@ -86,7 +86,7 @@ cmake --build build_gui -j
 ### 无头构建与测试
 
 ```bat
-cmake -S lightroom-clone-cpp -B build_headless -G Ninja ^
+cmake -S . -B build_headless -G Ninja ^
       -DCMAKE_BUILD_TYPE=Release -DLRC_ENABLE_QT=OFF
 cmake --build build_headless -j
 ctest --test-dir build_headless --output-on-failure
@@ -104,8 +104,8 @@ qt\6.8.3\msvc2022_64\bin\windeployqt.exe --release --no-translations --compiler-
 ```powershell
 # 暂存 release 载荷到 build_gui/install_stage/
 # 然后用 Inno Setup 编译 installer.iss
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" lightroom-clone-cpp\packaging\installer.iss
-# 输出：lightroom-clone-cpp\dist\Silver Halide Setup 1.0.0.exe
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
+# 输出：dist\Silver Halide Setup 1.0.0.exe
 ```
 
 ## 架构
@@ -145,21 +145,20 @@ src/
 ├── build_x64.bat              # GUI 一键构建
 ├── build_gui/                 # Ninja GUI 构建树
 ├── build_headless/            # Ninja 无头构建树
-├── lightroom-clone-cpp/       # 源码根
-│   ├── CMakeLists.txt
-│   ├── README.md              # 本文件
-│   ├── CLAUDE.md              # 构建 / 架构 / 编码约定
-│   ├── src/
-│   ├── tests/
-│   ├── resources/
-│   │   ├── icons/app.ico
-│   │   └── models/manifest.json
-│   ├── docs/
-│   └── packaging/
-│       ├── installer.iss      # Inno Setup 脚本（推荐）
-│       ├── installer.nsi      # NSIS 脚本（历史参考）
-│       ├── LICENSE.txt         # MIT 许可证（含中文参考译文）
-│       └── lang/ChineseSimplified.isl
+├── CMakeLists.txt             # 源码根 = 工作区根
+├── README.md                  # 本文件
+├── CLAUDE.md                  # 构建 / 架构 / 编码约定
+├── src/
+├── tests/
+├── resources/
+│   ├── icons/app.ico
+│   └── models/manifest.json
+├── docs/
+├── packaging/
+│   ├── installer.iss          # Inno Setup 脚本（推荐）
+│   ├── installer.nsi          # NSIS 脚本（历史参考）
+│   ├── LICENSE.txt            # MIT 许可证（含中文参考译文）
+│   └── lang/ChineseSimplified.isl
 ├── qt/                        # Qt 6.8.3 安装
 └── onnxruntime/               # ONNX Runtime 安装
 ```

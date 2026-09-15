@@ -49,9 +49,9 @@
 - `src/catalog/CatalogDatabase.cpp` `open()`：新建目录前先 `create_directories(parent)`，目录不存在时自动创建而非报错。
 - `src/ui/ImportWorker.cpp`：改单连接批量事务（`addImage` 带指纹 / `storePreview` / `beginTransaction`）；修复 `fileFingerprint` chrono 模板 `duration` 类型错误（否则 GUI 无法编译）。
 
-**测试**：[TestCatalogDatabase.cpp](file:///d:/Desktop/SilverHalide-src/lightroom-clone-cpp/tests/TestCatalogDatabase.cpp) 新增 3 用例——文件指纹外改检测、重复 phash + 64 维 embedding ANN 索引（goal 6）、自动编辑历史保留 20 条且命名快照不受限。
+**测试**：[TestCatalogDatabase.cpp](file:///d:/Desktop/SilverHalide-src/tests/TestCatalogDatabase.cpp) 新增 3 用例——文件指纹外改检测、重复 phash + 64 维 embedding ANN 索引（goal 6）、自动编辑历史保留 20 条且命名快照不受限。
 
-**打包**：新增 [packaging/installer-nomodels.iss](file:///d:/Desktop/SilverHalide-src/lightroom-clone-cpp/packaging/installer-nomodels.iss)（无模型 Inno Setup 变体：**链接并打包 onnxruntime.dll，仅不含 models/\* 模型权重文件**；保留 lensfun.dll+glib 链与全部 DCP profiles）。补齐 [install_stage](file:///d:/Desktop/SilverHalide-src/lightroom-clone-cpp/build_gui/install_stage) 的 lensfun 运行库链（`lensfun.dll`+`glib-2.0-0.dll`+`iconv-2.dll`+`intl-8.dll`+`pcre2-8.dll`），顺带解决「找不到 lensfun.dll」问题；产物 `dist/Silver Halide Setup 1.0.0 (No Models).exe`（实测静默安装：无 models、有 onnxruntime.dll/lensfun/DCP）。
+**打包**：新增 [packaging/installer-nomodels.iss](file:///d:/Desktop/SilverHalide-src/packaging/installer-nomodels.iss)（无模型 Inno Setup 变体：**链接并打包 onnxruntime.dll，仅不含 models/\* 模型权重文件**；保留 lensfun.dll+glib 链与全部 DCP profiles）。补齐 [install_stage](file:///d:/Desktop/SilverHalide-src/build_gui/install_stage) 的 lensfun 运行库链（`lensfun.dll`+`glib-2.0-0.dll`+`iconv-2.dll`+`intl-8.dll`+`pcre2-8.dll`），顺带解决「找不到 lensfun.dll」问题；产物 `dist/Silver Halide Setup 1.0.0 (No Models).exe`（实测静默安装：无 models、有 onnxruntime.dll/lensfun/DCP）。
 
 **验证**：GUI 编译通过；headless catalog **62 用例 / 2106 断言** 全绿。全量 headless 仅为 `TestRawDecoder.cc` off-by-2 ICC 前置问题及既有 pipeline/颜色路径失败（与本次无关）。
 

@@ -23,28 +23,26 @@
 ## 2. 目录结构速览（哪些是源码、哪些可丢弃）
 
 ```
-lrc仿制/                        ← 工作区根（注意是中文目录名，坑见 §4.6）
+./                            ← 工作区根 = 源码根（源码已从 lightroom-clone-cpp/ 上提至此处）
 ├── build_gui/                  ← 活跃 GUI 构建树（Ninja，可重新生成，不迁移）
 ├── build_headless/             ← 活跃无头构建树（Ninja，可重新生成，不迁移）
 ├── build_headless_m3/          ← 历史残留构建树（不迁移）
 ├── qt/6.8.3/msvc2022_64/       ← Qt 6.8.3 安装（2G，目标设备需重新安装，不迁移）
 ├── *.bat / *.ps1               ← 构建/测试/部署包装脚本（迁移）
-├── lightroom-clone-cpp/        ← ★ 项目根（迁移的核心）
-│   ├── CMakeLists.txt          ← 主构建脚本（迁移）
-│   ├── src/                    ← 全部源码（迁移）
-│   ├── tests/                  ← Catch2 测试（迁移）
-│   ├── docs/                   ← 架构/里程碑/状态文档（迁移；含本次新增经验文档）
-│   ├── third_party/            ← ★ vendored 依赖源码（libraw/lcms2/sqlite/stb/pugixml/Catch2，迁移）
-│   ├── resources/              ← 图标、QSS、app.rc（迁移）
-│   ├── packaging/              ← NSIS 安装脚本（迁移）
-│   ├── build_gui/ build_headless/ build_asan/  ← 仓库内旧 VS 构建树，废弃残留，勿引用
-│   ├── dist/                   ← 打包输出（可重新生成，不迁移）
-│   └── harness/                ← 早期调试工具（保留 Parallel.cpp/main.cpp/build*.bat，产物不迁移）
+├── CMakeLists.txt              ← 主构建脚本（迁移）
+├── src/                        ← 全部源码（迁移）
+├── tests/                      ← Catch2 测试（迁移）
+├── docs/                       ← 架构/里程碑/状态文档（迁移；含本次新增经验文档）
+├── third_party/                ← ★ vendored 依赖源码（libraw/lcms2/sqlite/stb/pugixml/Catch2，迁移）
+├── resources/                  ← 图标、QSS、app.rc（迁移）
+├── packaging/                  ← NSIS 安装脚本（迁移）
+├── dist/                       ← 打包输出（可重新生成，不迁移）
+└── harness/                    ← 早期调试工具（保留 Parallel.cpp/main.cpp/build*.bat，产物不迁移）
 ```
 
-> **重要**：仓库内 `lightroom-clone-cpp/build_gui`（带 `Release/` 层）是 VS 生成器的**废弃旧树**；
-> 活跃构建树是工作区根的 `build_gui`（Ninja，无 Release 层）。打包/调试时切勿指向旧树。
-> `lightroom-clone-cpp.md`（工作区根）是早期规范草稿，含过时内容（如 output_color=0），仅供参考。
+> **重要**：仓库内曾经的 `lightroom-clone-cpp/build_gui`（带 `Release/` 层）是 VS 生成器的**废弃旧树**，源码上提后已不存在；
+> 活跃构建树是工作区根的 `build_gui`（Ninja，无 Release 层）。打包/调试时切勿重建或指向旧树。
+> 早期规范草稿（如 `lightroom-clone-cpp.md`）含过时内容（如 output_color=0），仅供参考。
 
 ### vendored `third_party` 必须保留
 CMake 的依赖策略是「优先 vendored、其次 FetchContent」。虽然 CMake 也能下载依赖，但：
@@ -65,7 +63,7 @@ CMake 的依赖策略是「优先 vendored、其次 FetchContent」。虽然 CMa
 .\_build_gui4.bat
 
 :: ③ 无头构建（仅引擎 + 目录测试，无 Qt）
-cmake -S lightroom-clone-cpp -B build_headless -G Ninja -DCMAKE_BUILD_TYPE=Release -DLRC_ENABLE_QT=OFF
+cmake -S . -B build_headless -G Ninja -DCMAKE_BUILD_TYPE=Release -DLRC_ENABLE_QT=OFF
 cmake --build build_headless -j
 
 :: ④ 跑测试（GUI 层建议直跑 exe，中文路径下 ctest 假卡死，见 §4.7）
@@ -82,7 +80,7 @@ C:\Users\tmlde\Desktop\dev\nsis\makensis.exe packaging\installer.nsi
 
 ### 使用代理（中国网络，仅 FetchContent 需要）
 ```bat
-cmake -S lightroom-clone-cpp -B build_gui -G Ninja -DLRC_PROXY=https://ghfast.top/ ^
+cmake -S . -B build_gui -G Ninja -DLRC_PROXY=https://ghfast.top/ ^
       -DCMAKE_PREFIX_PATH=qt/6.8.3/msvc2022_64 -DCMAKE_BUILD_TYPE=Release
 ```
 
@@ -176,7 +174,7 @@ Ninja 构建用 `-j4`。`-j8` 内存不足会批量失败（GUI 目标含 Qt 链
    **统一编译一次**。分阶段大任务（如 PHASE 系列）在「整个部分完成后再编译」，子代理只做静态自查。
 2. **主代理只分发不写码**：实施阶段主代理只做分发、构建、跑测试、验收、更新文档；所有源码改动由子代理
    （按「一文件一写者」切分）完成。构建失败 → 定位后重新下发对应子代理修复。
-3. **STATUS.md 保持同步**：每完成一个连贯批次就更新 `lightroom-clone-cpp/STATUS.md`（测试数、构建状态、
+3. **STATUS.md 保持同步**：每完成一个连贯批次就更新 `STATUS.md`（测试数、构建状态、
    新特性、验收标准）。文档曾长期滞后于现实，务必避免。
 4. 内存式进度（`docs/Speedup_Mx_STATUS.md`、`docs/PHASE_1_STATUS.md`）是主代理维护的持久化载体，实时更新。
 

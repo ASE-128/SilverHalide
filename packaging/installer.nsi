@@ -8,8 +8,7 @@
 ; staged under build_gui/install_stage before compiling (exe rebuilt with the
 ; WIN32 GUI subsystem, then windeployqt + VC redist copy). The active build tree
 ; is the Ninja layout at the repository's parent directory (../build_gui, no
-; Release layer); the stale VS tree at lightroom-clone-cpp/build_gui/Release is
-; NOT used. See the packaging workflow notes in STATUS.md.
+; Release layer).
 ; ---------------------------------------------------------------------------
 
 Unicode true

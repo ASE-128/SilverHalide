@@ -147,7 +147,7 @@ UI 通过 `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` 下发请求，
 ## 6. 目录结构
 
 ```
-lightroom-clone-cpp/
+./                            # 源码根 = 工作区根
 ├── CMakeLists.txt          # FetchContent + 可选 vcpkg toolchain；MSVC 全局 /EHsc
 ├── vcpkg.json              # vcpkg 依赖清单
 ├── src/
