@@ -1,10 +1,17 @@
 #pragma once
 
-// Right-hand develop panel. Lightroom-style collapsible sections (基本 /
-// 色调曲线 / 细节 / 颜色 / 色调分离 / 效果 / 镜头校正) each holding one row per
-// adjustment (label + slider + spin box). Slider movement is debounced (50 ms)
-// before the pipeline re-renders; a committed signal fires on release so the
-// catalog can persist the stack without hammering the disk during a drag.
+/**
+ * @brief Right-hand develop (editing) panel.
+ *
+ * Lightroom-style collapsible sections (Basic / Tone Curve / Detail / Color /
+ * Split Toning / Effects / Lens Correction), each holding one row per
+ * adjustment (label + slider + spin box). Slider movement is debounced (50 ms)
+ * before the pipeline re-renders; a committed signal fires on release so the
+ * catalog can persist the stack without hammering the disk during a drag.
+ *
+ * Lives on the UI thread like MainWindow; it never touches engine/catalog
+ * state directly, only through signals.
+ */
 
 #include <QDoubleSpinBox>
 #include <QTimer>
@@ -80,7 +87,7 @@ public:
     // Index of the currently selected point-colour target (-1 if none).
     int currentColorTargetIndex() const;
 
-    // --- spot removal (M5) --------------------------------------------------
+    // --- Spot removal --------------------------------------------------------
     // Current spot tool mode / radius (normalized 0.001..0.2 against the longer
     // image edge). Lets MainWindow initialize the viewport's tool state from
     // the panel defaults on startup.
@@ -93,10 +100,12 @@ public:
     // (Must NOT be a signal — moc would generate a duplicate definition.)
     void setColorTargetSamplerChecked(bool active);
 
-    // direction > 0 增大 10%,< 0 减小 10%(相对当前 brush size 乘/除 1.1).
-    // 无蒙版工具激活时 no-op. MainWindow 从快捷键 [ / ] 调用.
+    // direction > 0 increases brush size by 10%, < 0 decreases by 10% (relative
+    // to the current brush size, x/1.1). No-op when no mask tool is armed.
+    // MainWindow calls this from the [ / ] shortcuts.
     void changeMaskBrushSize(int direction);
-    // 曝光微调:deltaEv=+0.33 或 -0.33(0.33 档). MainWindow 从 +/- 快捷键调用.
+    // Exposure fine-tune: deltaEv = +0.33 or -0.33 (1/3-stop). MainWindow calls
+    // this from the +/- shortcuts.
     void adjustExposure(double deltaEv);
 
     // --- colour-range mask panel --------------------------------------------
@@ -106,7 +115,7 @@ public:
     // NOT a signal -- moc would generate a duplicate definition.)
     void setColorRangeReference(const QColor& srgb);
 
-    // --- range sub-mask panel (PHASE_4) --------------------------------------
+    // --- range sub-mask panel ---------------------------------------------------
     // Records the reference colour sampled from the image for the *colour-range
     // sub-mask* of the currently selected geometry mask. `srgb` is the display
     // colour (swatch); `lr/lg/lb` are the linear ProPhoto RGB reference written
@@ -128,23 +137,24 @@ public:
 
 public slots:
     void setSectionMode(int mode);
-    // 公开槽:选中蒙版工具(线性/径向/画笔)或 None 禁用. 语义与面板按钮一致:
-    // 勾选对应按钮、设 activeMaskTool_,并按现有逻辑 emit maskEditRequested.
-    // MainWindow 从快捷键 K/M/Shift+M 及(未来)工具栏调用.
+    // Public slot: selects a mask tool (linear / radial / brush) or None to
+    // disable. Semantics match the panel buttons: check the corresponding
+    // button, set activeMaskTool_, and emit maskEditRequested. MainWindow calls
+    // this from the K/M/Shift+M shortcuts.
     void selectMaskTool(lrc::MaskType tool);
 
-    // --- spot removal (M5) --------------------------------------------------
+    // --- Spot removal --------------------------------------------------------
     // MainWindow mirrors the viewport's current spot radius (normalized
     // 0.001..0.2) back into the panel so the slider tracks keyboard / wheel
     // changes made outside the panel. Never emits spotRadiusChanged.
     void setSpotRadius(float radius);
     // MainWindow mirrors the viewport's current spot count so the panel can
-    // show how many corrections exist (e.g. "污点数: 3").
+    // show how many corrections exist.
     void setCurrentSpotCount(int count);
-    // --- metadata (M8) ------------------------------------------------------
+    // --- metadata ------------------------------------------------------
     // MainWindow populates the panel when switching photos. `keywordNames` are
-    // the photo's keyword full paths ("风光/冰岛"); the panel shows them as
-    // removable chips and echoes them back in metadataEdited.
+    // the photo's keyword full paths; the panel shows them as removable chips
+    // and echoes them back in metadataEdited.
     void setMetadata(const lrc::PhotoMetadata& metadata,
                      const std::vector<std::string>& keywordNames);
 
@@ -206,11 +216,12 @@ signals:
     // setLuminanceSubReference back with the sampled relative luminance).
     void luminanceSamplerRequested(bool active);
 
-    // 用户开始一次滑块拖动手势(压栈起点),结束手势时发出 finished(MainWindow 收栈).
+    // Emitted when the user starts a slider-drag gesture (push undo start); the
+    // matching finished is emitted when the gesture ends.
     void editGestureStarted();
     void editGestureFinished();
 
-    // --- spot removal (M5) --------------------------------------------------
+    // --- Spot removal --------------------------------------------------------
     // The active spot mode changed (Heal/Clone); MainWindow routes it to the
     // viewport for the next click.
     void spotModeChanged(lrc::SpotType type);
@@ -222,7 +233,7 @@ signals:
     void visualizeSpotsToggled(bool active);
     void maskWindowRequested();
 
-    // --- metadata (M8) ------------------------------------------------------
+    // --- Metadata ------------------------------------------------------------
     // The user edited one of the metadata fields or the keyword list; MainWindow
     // persists the values via CatalogDatabase.
     void metadataEdited(const std::string& title, const std::string& caption,
@@ -311,16 +322,16 @@ private:
     void onMaskFeatherChanged(int value);
     void onMaskBrushSizeChanged(int value);
     void onMaskSoftnessChanged(int value);
-    // PHASE_13: appends a new Mask with type=AiMask and the given target,
-    // selects it, and notifies the preview. No drawing step — segmentation
-    // runs inside Pipeline::applyLocalAdjustments when the mask is rendered.
+    // Appends a new Mask with type=AiMask and the given target, selects it, and
+    // notifies the preview. No drawing step -- segmentation runs inside
+    // Pipeline::applyLocalAdjustments when the mask is rendered.
     void addAiMask(lrc::AiMaskTarget target);
     void scheduleDebounce();
     void applyDebounce();
     void applyCoarseDebounce();
-    // M11: coalesces the committed-geometry emission while a mask/brush stroke
-    // is in flight so a stroke does not trigger a DB write + full panel re-sync
-    // per mouse move (see updateMaskGeometry).
+    // Coalesces the committed-geometry emission while a mask/brush stroke is in
+    // flight so a stroke does not trigger a DB write + full panel re-sync per
+    // mouse move (see updateMaskGeometry).
     void scheduleMaskGeometryCommit();
     void flushMaskGeometryCommit();
     void syncRow(const Row& row);
@@ -351,10 +362,10 @@ private:
     void syncColorRangeSection();
     void updateColorRangeSwatch(const QColor& color);
     // True when `m` is a geometry mask (linear / radial / brush) that can carry
-    // the PHASE_4 colour/luminance sub-mask modifiers.
+    // the colour/luminance sub-mask modifiers.
     bool isGeometryMask(const lrc::Mask& m);
 
-    // --- range sub-mask (colour / luminance) (PHASE_4) -----------------------
+    // --- range sub-mask (colour / luminance) ----------------------------------
     void onSubColorEnableToggled(bool checked);
     void onSubColorRangeSlider(int value);
     void onSubColorRangeSpin(double value);
@@ -387,13 +398,13 @@ private:
     void syncColorTargetSliders();
     void updateColorTargetSwatch(const QColor& color);
 
-    // --- spot removal (M5) --------------------------------------------------
+    // --- Spot removal --------------------------------------------------------
     void onSpotModeToggled(lrc::SpotType type, bool checked);
     void onSpotRadiusSliderChanged(int value);
     void onSpotRadiusSpinChanged(double value);
     void onSpotVisualizeToggled(bool active);
     void syncSpotRadius(double radius);
-    // --- metadata (M8) ------------------------------------------------------
+    // --- Metadata ------------------------------------------------------------
     bool eventFilter(QObject* watched, QEvent* event) override;
     void rebuildKeywordChips();
     void addKeyword(const QString& text);
@@ -410,9 +421,9 @@ private:
     lrc::Adjustments current_;
     QTimer debounce_;
     QTimer coarseDebounce_;
-    // M11: leading-edge one-shot timer that bounds adjustmentsCommitted during a
-    // mask/brush stroke to roughly one emit per app::throttle::kMaskGeometryCommitMs
-    // (instead of once per mouse move).
+    // Leading-edge one-shot timer that bounds adjustmentsCommitted during a
+    // mask/brush stroke to roughly one emit per
+    // app::throttle::kMaskGeometryCommitMs (instead of once per mouse move).
     QTimer maskGeometryCommitTimer_;
     bool maskGeometryDirty_ = false;
     bool dragging_ = false;
@@ -423,10 +434,10 @@ private:
     QPushButton* maskLinearBtn_ = nullptr;
     QPushButton* maskRadialBtn_ = nullptr;
     QPushButton* maskBrushBtn_ = nullptr;
-    // PHASE_13: AI subject/sky/background segmentation mask buttons. Toggle
+    // AI subject/sky/background segmentation mask buttons. Toggle
     // on click; selecting one creates a new Mask with type=AiMask and the
     // corresponding target. Pipeline::applyLocalAdjustments runs the bundled
-    // BiRefNet/u²Net model via globalAiEngine() and rasterizes the weight.
+    // BiRefNet/u2net model via globalAiEngine() and rasterizes the weight.
     QPushButton* maskAiSubjectBtn_ = nullptr;
     QPushButton* maskAiSkyBtn_ = nullptr;
     QPushButton* maskAiBackgroundBtn_ = nullptr;
@@ -443,7 +454,7 @@ private:
     QCheckBox* maskInvertCheck_ = nullptr;
     lrc::MaskType activeMaskTool_ = lrc::MaskType::None;
 
-    // PHASE_12: AI Denoise controls (Detail section). enabled+strength map
+    // AI Denoise controls (Detail section). enabled+strength map
     // directly to Adjustments::aiDenoise; Pipeline::applySpatialAdjustments
     // runs the bundled NAFNet model when globalAiEngine() reports it ready.
     QCheckBox* aiDenoiseEnabledCheck_ = nullptr;
@@ -464,7 +475,7 @@ private:
     QLabel* colorRefSwatch_ = nullptr;
     QPushButton* colorSampleBtn_ = nullptr;
 
-    // --- range sub-mask (colour / luminance) UI (PHASE_4) --------------------
+    // --- range sub-mask (colour / luminance) UI ---------------------------------
     QWidget* subRangeRow_ = nullptr;
     QCheckBox* subColorEnableCheck_ = nullptr;
     QLabel* subColorSwatch_ = nullptr;
@@ -494,7 +505,7 @@ private:
     QLabel* colorTargetSwatch_ = nullptr;
     std::vector<ColorTargetRow> colorTargetRows_;
 
-    // --- spot removal (M5) UI -----------------------------------------------
+    // --- Spot removal UI -----------------------------------------------------
     QPushButton* spotHealBtn_ = nullptr;
     QPushButton* spotCloneBtn_ = nullptr;
     QSlider* spotRadiusSlider_ = nullptr;
@@ -507,7 +518,7 @@ private:
     QPushButton* spotVisualizeBtn_ = nullptr;
     lrc::SpotType spotMode_ = lrc::SpotType::Heal;
 
-    // --- metadata (M8) UI ---------------------------------------------------
+    // --- Metadata UI --------------------------------------------------------
     QLineEdit* metaTitleEdit_ = nullptr;
     QPlainTextEdit* metaCaptionEdit_ = nullptr;
     QLineEdit* metaCopyrightEdit_ = nullptr;

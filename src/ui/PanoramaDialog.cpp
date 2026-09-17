@@ -22,7 +22,7 @@
 
 namespace {
 
-// 生成缩略图 (builds a small display thumbnail for the source strip). Sources
+// Builds a small display thumbnail for the source strip. Sources
 // may be linear U16/F32 or display-ready U8; linear formats get a simple sRGB
 // gamma here (the dialog has no ColorManager -- the strip is only a preview and
 // the stitch itself always works in linear ProPhoto inside the engine).
@@ -42,7 +42,7 @@ QImage makeThumbnail(const lrc::ImageBufferPtr& src, int maxEdge = 96) {
 
     QImage out(tw, th, QImage::Format_RGB888);
     if (src->format() == lrc::PixelFormat::U8) {
-        // 已是显示就绪 sRGB 字节 (already display-ready sRGB bytes).
+        // Already display-ready sRGB bytes.
         const lrc::ImageBufferPtr small = src->resize(tw, th);
         if (!small)
             return {};
@@ -55,8 +55,8 @@ QImage makeThumbnail(const lrc::ImageBufferPtr& src, int maxEdge = 96) {
         return out;
     }
 
-    // 线性 U16/F32: 面积平均降采样到 F32 再套 sRGB gamma (linear U16/F32: area
-    // average downscale to F32, then apply the sRGB gamma for display).
+    // Linear U16/F32: area-average downscale to F32, then apply the sRGB gamma for
+    // display.
     const lrc::ImageBufferPtr small = src->resizeToF32(tw, th);
     if (!small)
         return {};
@@ -90,10 +90,10 @@ PanoramaDialog::PanoramaDialog(QWidget* parent) : QDialog(parent) {
 }
 
 PanoramaDialog::~PanoramaDialog() {
-    // 兜底:绝不能让运行中的 QThread 随对话框销毁 (last resort: never destroy a
-    // running QThread with the dialog). Normal flow already stopped the worker
-    // in accept()/reject()/the terminal slots; this guards force-destruction
-    // edge cases. The stitch is monolithic, so the wait may take a while.
+    // Last resort: never destroy a running QThread with the dialog. Normal flow
+    // already stopped the worker in accept()/reject()/the terminal slots; this
+    // guards force-destruction edge cases. The stitch is monolithic, so the wait
+    // may take a while.
     if (thread_ && thread_->isRunning()) {
         if (worker_)
             worker_->requestCancel();
@@ -201,8 +201,7 @@ void PanoramaDialog::setSources(
 }
 
 void PanoramaDialog::rebuildThumbnails() {
-    // 移除旧的缩略图格子,保留末尾伸缩项 (remove old thumbnail cells, keeping
-    // the trailing stretch at the last index).
+    // Remove old thumbnail cells, keeping the trailing stretch at the last index.
     while (thumbLayout_->count() > 1) {
         QLayoutItem* item = thumbLayout_->takeAt(0);
         if (QWidget* w = item->widget())
@@ -233,7 +232,7 @@ void PanoramaDialog::rebuildThumbnails() {
 }
 
 void PanoramaDialog::onProjectionChanged(int /*index*/) {
-    // 焦距仅对圆柱投影有意义 (focal length only matters for cylindrical mode).
+    // Focal length only matters for cylindrical mode.
     focalSpin_->setEnabled(projectionCombo_->currentData().toBool());
 }
 
@@ -256,7 +255,7 @@ void PanoramaDialog::onStartClicked() {
         QMessageBox::information(this, tr("全景合成"), tr("最多支持 20 张照片。"));
         return;
     }
-    // 防御:合成进行中不重复启动 (guard: never start twice while a stitch runs).
+    // Guard: never start twice while a stitch runs.
     if (thread_ && thread_->isRunning())
         return;
     opts_ = currentOptions();
@@ -278,8 +277,8 @@ void PanoramaDialog::onStartClicked() {
 
 void PanoramaDialog::onCancelClicked() {
     if (thread_ && thread_->isRunning()) {
-        // 正在合成:请求取消,等 worker 到安全点后再关 (in-flight: request cancel;
-        // the worker reports cancelled() once the monolithic stitch returns).
+        // In-flight: request cancel; the worker reports cancelled() once the monolithic
+        // stitch returns.
         if (worker_)
             worker_->requestCancel();
         cancelButton_->setEnabled(false);
@@ -291,9 +290,8 @@ void PanoramaDialog::onCancelClicked() {
 
 void PanoramaDialog::reject() {
     if (thread_ && thread_->isRunning()) {
-        // 用户尝试关闭而合成仍在跑:先请求取消,保持打开,等安全点 (user tried to
-        // close while a stitch runs: request cancel, stay open, wait for the
-        // worker's terminal signal to close us).
+        // User tried to close while a stitch runs: request cancel, stay open, wait for
+        // the worker's terminal signal to close us.
         if (worker_)
             worker_->requestCancel();
         cancelButton_->setEnabled(false);
@@ -307,9 +305,8 @@ void PanoramaDialog::reject() {
 void PanoramaDialog::onMergeFinished(const lrc::ImageBufferPtr& result) {
     stopThread();
     setBusy(false);
-    // Wave 3 的槽与对话框同线程,emit 会在 accept() 前同步写完文件入目录 (Wave 3's
-    // slot runs on the same thread, so this emit synchronously finishes the
-    // file write + catalog import before the dialog closes). opts_ holds the
+    // This slot runs on the same thread, so the emit synchronously finishes the
+    // file write + catalog import before the dialog closes. opts_ holds the
     // options that were applied; callers read them via options().
     emit mergedReady(result);
     accept();
@@ -319,24 +316,23 @@ void PanoramaDialog::onMergeFailed(const QString& message) {
     stopThread();
     setBusy(false);
     QMessageBox::warning(this, tr("全景合成失败"), message);
-    // 可重试:选项与「开始合成」重新启用,源图保持不变 (retryable: options and the
-    // start button are re-enabled, the sources stay untouched).
+    // Retryable: options and the start button are re-enabled, the sources stay
+    // untouched.
 }
 
 void PanoramaDialog::onMergeCancelled() {
     stopThread();
     setBusy(false);
     emit cancelled();
-    // 直接调用基类,避免重写后的 reject() 再次发 cancelled (call the base reject
-    // directly to avoid the overridden reject() emitting cancelled() twice).
+    // Call the base reject directly to avoid the overridden reject() emitting
+    // cancelled() twice.
     QDialog::reject();
 }
 
 void PanoramaDialog::onStageTimer() {
-    // 阶段标签只是 UI 侧粗粒度近似 (coarse UI-side approximation).
-    // 引擎的 stitchPanorama 是单一不可分割调用,无进度回调 (single monolithic
-    // call, no progress callback); 先短暂显示"对齐",再切到"合成" (aligning ->
-    // blending).
+    // Coarse UI-side approximation: the engine's stitchPanorama is a single
+    // monolithic call with no progress callback, so briefly show "aligning" and
+    // then switch to "blending".
     stageLabel_->setText(tr("正在合成全景…"));
     stageTimer_->stop();
 }
@@ -373,8 +369,7 @@ void PanoramaDialog::stopThread() {
     }
     thread_->deleteLater();
     thread_ = nullptr;
-    // worker_ 由 QThread::finished -> deleteLater 释放,置空防止悬垂访问 (worker_
-    // is released via QThread::finished -> deleteLater; null it to avoid a
-    // dangling reference).
+    // worker_ is released via QThread::finished -> deleteLater; null it to avoid a
+    // dangling reference.
     worker_ = nullptr;
 }

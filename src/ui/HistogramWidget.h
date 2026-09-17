@@ -1,9 +1,12 @@
 #pragma once
 
-// Self-drawn RGB histogram. Three channels are overlaid as translucent
-// filled curves; a luminance (white) channel is drawn on top. Supports a
-// linear / logarithmic vertical scale toggle. Data source is the 8-bit
-// preview produced by the pipeline.
+/**
+ * @brief Self-drawn RGB histogram.
+ *
+ * Three channels are overlaid as translucent filled curves; a luminance
+ * (white) channel is drawn on top. Supports a linear / logarithmic vertical
+ * scale toggle. Data source is the 8-bit preview produced by the pipeline.
+ */
 
 #include <QImage>
 #include <QWidget>

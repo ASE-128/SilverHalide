@@ -1,8 +1,12 @@
 #pragma once
 
-// Visual hue/saturation picker used by the split-toning panel. Angle selects
-// hue, radius selects saturation (per LR's "可视化颜色调整"). Clicking or
-// dragging updates the colour and emits colorChanged.
+/**
+ * @brief Visual hue/saturation picker used by the split-toning panel.
+ *
+ * Angle selects hue, radius selects saturation (per LR's "Visualize colour
+ * adjustment"). Clicking or dragging updates the colour and emits colorChanged.
+ * A pure paint widget; it holds no interaction state on the engine.
+ */
 
 #include <QWidget>
 

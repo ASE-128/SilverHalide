@@ -67,7 +67,7 @@ enum class MaskType : uint8_t {
     RadialGradient,
     Brush,
     ColorRange,
-    AiMask,                // PHASE_13: AI-generated subject / sky / background
+    AiMask,                // AI-generated subject / sky / background
 };
 
 // Linear gradient mask. The masked region is the infinite strip between the two
@@ -122,7 +122,7 @@ struct ColorRangeMask {
     bool operator==(const ColorRangeMask&) const = default;
 };
 
-// --- AI Mask parameters (PHASE_13) -----------------------------------------
+// --- AI Mask parameters ---------------------------------------------------
 // Attached to a Mask whose `type == AiMask`.  The `target` selects which
 // segmentation model to run; the resulting weight field is refined by the
 // threshold/feather/invert knobs.  `cachedWeightVersion` increments whenever
@@ -156,7 +156,7 @@ struct Mask {
     RadialGradientMask radial;
     std::vector<BrushDab> brush;
     ColorRangeMask color;        // only meaningful when type == ColorRange
-    AiMaskParams ai;             // only meaningful when type == AiMask (PHASE_13)
+    AiMaskParams ai;             // only meaningful when type == AiMask
     bool invert = false;
     double opacity = 1.0; // 0..1
 
@@ -174,7 +174,7 @@ struct Mask {
     double temperature = 0.0; // -100..+100
     double tint = 0.0;        // -100..+100
 
-    // --- Sub-mask: colour range (PHASE_4) ------------------------------------
+    // --- Sub-mask: colour range -------------------------------------------------
     // A pixel-content modifier layered on top of a *geometry* mask (linear /
     // radial / brush). Independent from the standalone MaskType::ColorRange
     // mask above: that type's weight comes solely from `color`, while these
@@ -187,7 +187,7 @@ struct Mask {
     float colorRange = 50.0f;          // 0-100 tolerance (larger = selects more)
     float colorSmoothness = 50.0f;     // 0-100 band-edge softness
 
-    // --- Sub-mask: luminance range (PHASE_4) ---------------------------------
+    // --- Sub-mask: luminance range ---------------------------------------------
     // Relative-luminance modifier layered on top of the geometry mask. The
     // reference is the Rec.709 luma L = 0.2126R + 0.7152G + 0.0722B of a
     // sampled pixel, stored in percent (0-100).
@@ -222,7 +222,7 @@ struct Mask {
     }
 };
 
-// --- Spot removal / healing brush (PHASE_5) -----------------------------------
+// --- Spot removal / healing brush -------------------------------------------
 // A spot copies a circular region from a source point onto a target point:
 //   Clone  -- direct copy of the source pixels (the Lightroom Clone stamp).
 //   Heal   -- source texture scaled so its rim brightness matches the target
@@ -248,7 +248,7 @@ struct SpotRemoval {
     bool operator==(const SpotRemoval&) const = default;
 };
 
-// --- AI Denoise (PHASE_12) ------------------------------------------------
+// --- AI Denoise ------------------------------------------------------------
 // Non-destructive AI denoise parameters.  The actual denoise buffer is NOT
 // stored here — only the "what / how strong" metadata.  Pipeline computes
 // the denoised pixels on demand (cached by `imageId + aiDenoise.version`)
@@ -269,7 +269,7 @@ struct AiDenoise {
     bool hasEffect() const { return enabled && strength > 0.0f; }
 };
 
-// --- AI Mask parameters (PHASE_13) -----------------------------------------
+// --- AI Mask parameters ---------------------------------------------------
 // NOTE: the real definition lives above `struct Mask` — kept here as a
 // navigational anchor only so the Doxygen group for AI features in this file
 // reads consistently top-to-bottom.
@@ -380,7 +380,7 @@ struct Adjustments {
     // the fast path and stays bit-exact).
     std::vector<SpotRemoval> spotRemovals;
 
-    // --- AI Denoise (PHASE_12) ------------------------------------------------
+    // --- AI Denoise ------------------------------------------------------------
     AiDenoise aiDenoise;
 
     bool operator==(const Adjustments& other) const;
@@ -389,7 +389,7 @@ struct Adjustments {
     void reset();
     size_t hash() const;
 
-    // Per-stage hashes for the incremental render cache (PHASE_2). Each covers
+    // Per-stage hashes for the incremental render cache. Each covers
     // exactly the parameters that influence one pipeline stage, so the cache can
     // detect which stage changed without hashing the whole stack:
     //   A: basic tonal (exposure/contrast/highlights/shadows/whites/blacks)

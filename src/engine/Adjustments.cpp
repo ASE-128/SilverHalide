@@ -136,7 +136,7 @@ size_t Mask::hash() const {
     mixDouble(h, saturation);
     mixDouble(h, temperature);
     mixDouble(h, tint);
-    // PHASE_4 sub-mask modifiers (they shape the weight field).
+    // Sub-mask modifiers (they shape the weight field).
     h = hashCombine(h, static_cast<size_t>(useColorRange));
     mixFloat(h, colorRefR);
     mixFloat(h, colorRefG);
@@ -148,7 +148,7 @@ size_t Mask::hash() const {
     mixFloat(h, luminanceRange);
     mixFloat(h, luminanceSmoothness);
     h = hashCombine(h, static_cast<size_t>(maskUnion));
-    // PHASE_13: AI mask target / threshold / feather / invert / model selection
+    // AI mask target / threshold / feather / invert / model selection
     // all shape the weight raster (and thus the final image value via the
     // local-adjustment blend — include them in the full Mask::hash).
     h = hashCombine(h, static_cast<size_t>(ai.target));
@@ -197,7 +197,7 @@ size_t Mask::geometryHash() const {
         mixFloat(h, d.radius);
         mixFloat(h, d.softness);
     }
-    // PHASE_4 sub-mask modifiers shape the weight field, so they belong to the
+    // Sub-mask modifiers shape the weight field, so they belong to the
     // geometry key: a reference / range / smoothness / mode change must
     // invalidate the cached geometry field AND the viewport overlay.
     h = hashCombine(h, static_cast<size_t>(useColorRange));
@@ -211,7 +211,7 @@ size_t Mask::geometryHash() const {
     mixFloat(h, luminanceRange);
     mixFloat(h, luminanceSmoothness);
     h = hashCombine(h, static_cast<size_t>(maskUnion));
-    // PHASE_13: AI mask geometry.  target/threshold/feather/invert and the
+    // AI mask geometry.  target/threshold/feather/invert and the
     // cachedWeightVersion all contribute directly to the per-pixel weight
     // raster that is keyed by geometryHash() in Pipeline::brushWeightField.
     h = hashCombine(h, static_cast<size_t>(ai.target));
@@ -307,7 +307,7 @@ size_t Adjustments::hash() const {
     h = hashCombine(h, colorTargets.size());
     for (const ColorTarget& ct : colorTargets)
         h = hashCombine(h, ct.hash());
-    // Spot removals (PHASE_5). Every field participates so moving/resizing a
+    // Spot removals. Every field participates so moving/resizing a
     // spot or toggling its type/visibility invalidates the LRU cache key.
     h = hashCombine(h, spotRemovals.size());
     for (const SpotRemoval& s : spotRemovals) {
@@ -319,7 +319,7 @@ size_t Adjustments::hash() const {
         mixFloat(h, s.radius);
         h = hashCombine(h, static_cast<size_t>(s.visible));
     }
-    // PHASE_12: AI denoise parameters — global participation in the overall
+    // AI denoise parameters — global participation in the overall
     // cache key (see hashStageE for the stage-specific participation).
     h = hashCombine(h, static_cast<size_t>(aiDenoise.enabled));
     mixFloat(h, aiDenoise.strength);
@@ -403,7 +403,7 @@ size_t Adjustments::hashStageE() const {
     h = hashCombine(h, masks.size());
     for (const Mask& m : masks)
         h = hashCombine(h, m.hash());
-    // Spot removals run in the spatial stage (PHASE_5), so they belong to the
+    // Spot removals run in the spatial stage, so they belong to the
     // stage-E key: adding/moving/resizing a spot restarts the incremental
     // preview render from stage E without recomputing the tonal stages A-D.
     h = hashCombine(h, spotRemovals.size());
@@ -416,7 +416,7 @@ size_t Adjustments::hashStageE() const {
         mixFloat(h, s.radius);
         h = hashCombine(h, static_cast<size_t>(s.visible));
     }
-    // PHASE_12: AI denoise is a spatial-stage operation (it runs after the
+    // AI denoise is a spatial-stage operation (it runs after the
     // manual NR inside the spatial kernel block), so any change in its
     // parameters should trigger a stage-E restart in the incremental cache.
     h = hashCombine(h, static_cast<size_t>(aiDenoise.enabled));

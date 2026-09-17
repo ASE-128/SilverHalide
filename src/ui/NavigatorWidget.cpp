@@ -16,10 +16,10 @@ namespace {
 constexpr int kRoleKind = Qt::UserRole;  // "all" | "folder" | "library" | ...
 constexpr int kRolePath = Qt::UserRole + 1;
 constexpr int kRoleCollectionId = Qt::UserRole + 2;      // int64 collection id
-constexpr int kRoleImageId = Qt::UserRole + 3;           // int64 image id (M6)
-constexpr int kRoleVariantId = Qt::UserRole + 4;         // int variant id (M6)
-constexpr int kRoleKeywordId = Qt::UserRole + 5;         // int64 keyword id (M8)
-constexpr int kRoleSmartCollectionId = Qt::UserRole + 6; // int64 smart id (M9)
+constexpr int kRoleImageId = Qt::UserRole + 3;           // int64 image id
+constexpr int kRoleVariantId = Qt::UserRole + 4;         // int variant id
+constexpr int kRoleKeywordId = Qt::UserRole + 5;         // int64 keyword id
+constexpr int kRoleSmartCollectionId = Qt::UserRole + 6; // int64 smart id
 
 // Recursive search for the rebuilt item matching the remembered selection
 // (kind + path, or collection / variant / keyword / smart-collection id).
@@ -108,7 +108,7 @@ NavigatorWidget::NavigatorWidget(QWidget* parent) : QWidget(parent) {
     tree_->setIndentation(14);
     root->addWidget(tree_, 1);
 
-    // M9: 新建智能收藏夹入口，智能收藏夹分组出现后显示 (shown once the group exists).
+    // New-smart-collection entry, shown once the group exists.
     newSmartButton_ = new QPushButton(tr("＋ 新建智能收藏夹…"), this);
     newSmartButton_->setFlat(true);
     newSmartButton_->hide();
@@ -368,7 +368,8 @@ void NavigatorWidget::setStatistics(int imageCount, int ratedCount) {
 }
 
 void NavigatorWidget::rememberSelection() {
-    // 记录重建前的选中项，仅保留可选中且有意义的 kind (remember selection).
+    // Remember what was selected before the rebuild, keeping only selectable and
+    // meaningful kinds.
     prevKind_.clear();
     prevPath_.clear();
     prevCollectionId_ = -1;
@@ -399,7 +400,8 @@ void NavigatorWidget::rememberSelection() {
 }
 
 void NavigatorWidget::restoreSelection() {
-    // 在重建后的新树上恢复选中，QSignalBlocker 保证不触发信号 (no signal replay).
+    // Restore the previous selection on the rebuilt tree; QSignalBlocker prevents
+    // any signal replay.
     if (prevKind_.isEmpty())
         return;
     for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
@@ -476,7 +478,7 @@ void NavigatorWidget::onItemSelected(QTreeWidgetItem* item, int) {
 }
 
 void NavigatorWidget::contextMenuEvent(QContextMenuEvent* event) {
-    // M9: 在「智能收藏夹」分组上右键可新建 (right-click the group to create).
+    // Right-clicking the smart-collections group creates a new one.
     QTreeWidgetItem* item =
         tree_->itemAt(tree_->viewport()->mapFromGlobal(event->globalPos()));
     QTreeWidgetItem* group = item;

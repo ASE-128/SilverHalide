@@ -129,7 +129,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(sectionTabs_, &QTabBar::currentChanged, this,
             &DevelopPanel::setSectionMode);
 
-    // ---- 基本 ---------------------------------------------------------------
+    // Basic section.
     PanelSection* basic = addSection(tr("基本"));
 
     auto* buttons = new QHBoxLayout;
@@ -172,7 +172,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     makeBasicRow("鲜艳度", -100.0, 100.0, 0, &lrc::Adjustments::vibrance);
     makeBasicRow("饱和度", -100.0, 100.0, 0, &lrc::Adjustments::saturation);
 
-    // ---- 色调曲线 -----------------------------------------------------------
+    // Tone curve section.
     PanelSection* curve = addSection(tr("色调曲线"));
     curveEditor_ = new CurveEditor(this);
     curveEditor_->setFixedHeight(100);
@@ -208,7 +208,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             emit adjustmentsCommitted(current_);
     });
 
-    // ---- 细节 ---------------------------------------------------------------
+    // Detail section.
     PanelSection* detail = addSection(tr("细节"));
     auto makeDetailRow = [&](const char* label, double min, double max,
                              int decimals, double lrc::Adjustments::*field,
@@ -229,7 +229,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     makeDetailRow("细节", 0.0, 100.0, 0, &lrc::Adjustments::sharpnessDetail);
     makeDetailRow("蒙版", 0.0, 100.0, 0, &lrc::Adjustments::sharpnessMasking, VizEdge);
 
-    // Noise-reduction section (降噪), parallel to the sharpening block above.
+    // Noise-reduction section, parallel to the sharpening block above.
     auto* nrLabel = new QLabel(tr("降噪"), this);
     nrLabel->setStyleSheet("color: #c8c8c8; font-weight: 500;");
     detail->addWidget(nrLabel);
@@ -239,8 +239,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     makeDetailRow("颜色",   0.0, 100.0, 0, &lrc::Adjustments::colorNoiseReduction);
     makeDetailRow("平滑",   0.0, 100.0, 0, &lrc::Adjustments::colorNoiseReductionSmoothness);
 
-    // PHASE_12: AI Denoise (NAFNet) row. enabled+strength map to
-    // Adjustments::aiDenoise; Pipeline::applySpatialAdjustments runs the
+    // AI Denoise (NAFNet) row. enabled+strength map to Adjustments::aiDenoise;
+    // Pipeline::applySpatialAdjustments runs the
     // bundled NAFNet model when Pipeline::globalAiEngine() reports it ready.
     // When the model is missing, enabled has no effect (manual NR sliders
     // above remain authoritative) — so the control is always visible.
@@ -301,7 +301,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                 scheduleDebounce();
             });
 
-    // ---- 颜色 (HSL 各通道) ---------------------------------------------------
+    // Colour section (HSL per channel).
     PanelSection* color = addSection(tr("颜色"));
 
     hslTabs_ = new QTabWidget(this);
@@ -350,7 +350,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(samplerButton_, &QPushButton::toggled, this,
             [this](bool active) { emit colorSamplerRequested(active); });
 
-    // ---- 色调分离 -----------------------------------------------------------
+    // Split toning section.
     PanelSection* st = addSection(tr("色调分离"));
     auto addSplitSliderRow = [&](const char* label,
                                  double lrc::SplitTone::*field, double min,
@@ -375,7 +375,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     addSplitSliderRow("饱和度", &lrc::SplitTone::shadowSaturation, 0.0, 100.0, 0);
     addSplitSliderRow("平衡", &lrc::SplitTone::balance, -100.0, 100.0, 0);
 
-    // Visual colour wheels (可视化颜色调整): angle = hue, radius = saturation.
+    // Visual colour wheels: angle = hue, radius = saturation.
     auto* wheelsRow = new QHBoxLayout;
     wheelsRow->setSpacing(8);
     highlightWheel_ = new ColorWheelWidget(this);
@@ -401,7 +401,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                 st.shadowHue = h;
                 st.shadowSaturation = s;
             }
-            // 同步对应的色相/饱和度滑块，避免后续拖动把色轮设定值覆盖掉 (keep wheel in sync)
+            // Keep the hue/saturation sliders in sync so a later drag does not overwrite
+            // the wheel-set value.
             for (const SplitToneRow& row : splitToneRows_) {
                 const bool match = highlight
                     ? (row.field == &lrc::SplitTone::highlightHue ||
@@ -420,7 +421,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(shadowWheel_, &ColorWheelWidget::colorChanged,
             this, wheelChanged(false));
 
-    // ---- 点颜色 -------------------------------------------------------------
+    // Point colour section.
     PanelSection* pc = addSection(tr("点颜色"));
 
     // Target list + add / delete.
@@ -484,7 +485,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     addColorTargetSliderRow("平滑", 0.0, 100.0, 0, &lrc::ColorTarget::smoothness);
     addColorTargetSliderRow("强度", 0.0, 100.0, 0, &lrc::ColorTarget::amount);
 
-    // ---- 效果 ---------------------------------------------------------------
+    // Effects section.
     PanelSection* effects = addSection(tr("效果"));
     auto makeEffectsRow = [&](const char* label, double min, double max,
                               int decimals, double lrc::Adjustments::*field) {
@@ -502,15 +503,15 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     makeEffectsRow("颗粒大小", 0.0, 100.0, 0, &lrc::Adjustments::grainSize);
     makeEffectsRow("粗糙度", 0.0, 100.0, 0, &lrc::Adjustments::grainRoughness);
     // Post-crop vignette: the "晕影" row is the Amount (-100..+100); the shape
-    // rows below follow LR's post-crop vignette panel. (PHASE_3)
+    // rows below follow LR's post-crop vignette panel.
     makeEffectsRow("晕影", -100.0, 100.0, 0, &lrc::Adjustments::vignette);
     makeEffectsRow("中点", 0.0, 100.0, 0, &lrc::Adjustments::vignetteMidpoint);
     makeEffectsRow("圆度", -100.0, 100.0, 0, &lrc::Adjustments::vignetteRoundness);
     makeEffectsRow("羽化", 0.0, 100.0, 0, &lrc::Adjustments::vignetteFeather);
     makeEffectsRow("高光", 0.0, 100.0, 0, &lrc::Adjustments::vignetteHighlights);
 
-    // Style dropdown: only Highlight Priority is implemented (PHASE_3); Paint
-    // Overlay / Color Priority are shown but disabled with a TODO hint.
+    // Style dropdown: only Highlight Priority is implemented; Paint Overlay /
+    // Color Priority are shown but disabled with a TODO hint.
     auto* styleRow = new QHBoxLayout;
     styleRow->setContentsMargins(0, 0, 0, 0);
     styleRow->setSpacing(6);
@@ -541,7 +542,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                     emit adjustmentsCommitted(current_);
             });
 
-    // ---- 镜头校正 -----------------------------------------------------------
+    // Lens correction section.
     PanelSection* lens = addSection(tr("镜头校正"));
     auto makeLensRow = [&](const char* label, double min, double max,
                            int decimals, double lrc::Adjustments::*field) {
@@ -596,7 +597,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                 emit adjustmentsCommitted(current_);
             });
 
-    // ---- 蒙版（局部调整） ---------------------------------------------------
+    // Mask (local adjustments) section.
     PanelSection* maskSec = addSection(tr("蒙版"));
 
         auto* detachMaskBtn = new QPushButton(tr("独立蒙版窗口"), this);
@@ -634,8 +635,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(maskColorBtn_, &QPushButton::toggled, this,
             [this](bool c) { onMaskToolToggled(lrc::MaskType::ColorRange, c); });
 
-    // PHASE_13: AI segmentation mask buttons (subject / sky / background).
-    // Unlike the geometry tools above, these are one-shot click buttons:
+    // AI segmentation mask buttons (subject / sky / background). Unlike the
+    // geometry tools above, these are one-shot click buttons:
     // clicking creates a new Mask with type=AiMask and the chosen target,
     // immediately rasterized by Pipeline::applyLocalAdjustments via the
     // bundled BiRefNet/u²Net model. No interactive drawing step is needed.
@@ -819,8 +820,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     maskSec->addWidget(maskColorRow_);
     maskColorRow_->setVisible(false);
 
-    // --- PHASE_4: range sub-mask rows (colour range + luminance range). These
-    // layer pixel-content modifiers on top of a geometry mask, shown only for
+    // Range sub-mask rows (colour range + luminance range). These layer pixel-content
+    // modifiers on top of a geometry mask, shown only for
     // linear/radial/brush masks (updateMaskSectionVisibility).
     subRangeRow_ = new QWidget(this);
     auto* subRangeLayout = new QVBoxLayout(subRangeRow_);
@@ -1018,7 +1019,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     addMaskSliderRow("黑色", -100.0, 100.0, 0, &lrc::Mask::blacks);
     addMaskSliderRow("去朦胧", -100.0, 100.0, 0, &lrc::Mask::dehaze);
 
-    // ---- 污点去除 (spot removal / healing brush, M5) ------------------------
+    // Spot removal (healing brush) section.
     PanelSection* spotSec = addSection(tr("污点去除"));
 
     // Heal / Clone mode buttons, exclusive (LR: 修复 / 仿制). Heal is default.
@@ -1079,7 +1080,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(spotVisualizeBtn_, &QPushButton::toggled, this,
             &DevelopPanel::onSpotVisualizeToggled);
 
-    // ---- 元数据 (IPTC / metadata, M8) --------------------------------------
+    // Metadata (IPTC) section.
     PanelSection* metaSec = addSection(tr("元数据"));
 
     auto addFieldRow = [&](const char* label, QLineEdit*& edit) {
@@ -1160,16 +1161,16 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(&coarseDebounce_, &QTimer::timeout, this,
             &DevelopPanel::applyCoarseDebounce);
 
-    // M11: mask-stroke geometry commit throttle (leading edge -- started only
-    // when not already armed, so continuous moves coalesce to ~one commit per
-    // interval instead of one per move).
+    // Mask-stroke geometry commit throttle (leading edge -- started only when not
+    // already armed, so continuous moves coalesce to ~one commit per interval
+    // instead of one per move).
     maskGeometryCommitTimer_.setSingleShot(true);
     maskGeometryCommitTimer_.setInterval(lrc::app::throttle::kMaskGeometryCommitMs);
     connect(&maskGeometryCommitTimer_, &QTimer::timeout, this,
             &DevelopPanel::flushMaskGeometryCommit);
 
-    // M8: metadata edits debounce while the user types a caption (line edits
-    // and focus-out commit immediately via emitMetadataEdited).
+    // Metadata edits debounce while the user types a caption (line edits and
+    // focus-out commit immediately via emitMetadataEdited).
     metadataCommit_.setSingleShot(true);
     metadataCommit_.setInterval(lrc::app::throttle::kMetadataCommitMs);
     connect(&metadataCommit_, &QTimer::timeout, this,
@@ -1641,10 +1642,10 @@ void DevelopPanel::updateMaskGeometry(int index, const lrc::Mask& mask) {
     dst.brush = mask.brush;
     dst.invert = mask.invert;
     scheduleDebounce();
-    // M11: coalesce the commit while the stroke is in flight. Every mouse move
-    // reaches here, and emitting adjustmentsCommitted per move made MainWindow
-    // re-sync the whole panel (60+ rows) and write the DB synchronously each
-    // time. The leading-edge timer bounds that to about one commit per
+    // Coalesce the commit while the stroke is in flight. Every mouse move reaches
+    // here, and emitting adjustmentsCommitted per move made MainWindow re-sync
+    // the whole panel (60+ rows) and write the DB synchronously each time. The
+    // leading-edge timer bounds that to about one commit per
     // app::throttle::kMaskGeometryCommitMs; the stroke-end path persists the
     // final state and setAdjustments cancels any still-pending flush, so a
     // late timer can never double-push an undo entry.
@@ -1767,8 +1768,8 @@ void DevelopPanel::updateMaskSectionVisibility() {
                        t == lrc::MaskType::RadialGradient);
         showBrush = (t == lrc::MaskType::Brush);
         showColor = (t == lrc::MaskType::ColorRange);
-        // PHASE_4: the range sub-mask panel layers on top of geometry masks
-        // (linear / radial / brush), not the standalone colour-range mask.
+        // The range sub-mask panel layers on top of geometry masks (linear / radial /
+        // brush), not the standalone colour-range mask.
         showSubRange = has && t != lrc::MaskType::None &&
                        t != lrc::MaskType::ColorRange;
     }
@@ -1885,7 +1886,7 @@ void DevelopPanel::onColorRangeToleranceSpin(double value) {
 
 void DevelopPanel::onColorRangeSampleToggled(bool active) {
     if (active) {
-        // 与范围子蒙版吸管互斥 (mutual exclusion with the sub-mask samplers).
+        // Mutually exclusive with the sub-mask samplers.
         const QSignalBlocker b1(subColorSampleBtn_);
         const QSignalBlocker b2(subLumaSampleBtn_);
         subColorSampleBtn_->setChecked(false);
@@ -1987,7 +1988,7 @@ void DevelopPanel::setColorRangeReference(const QColor& srgb) {
     colorSoftnessSpin_->setEnabled(active);
 }
 
-// --- range sub-mask (colour / luminance) (PHASE_4) ---------------------------
+// Range sub-mask (colour / luminance)
 
 // True when `m` is a geometry mask (linear / radial / brush) that can carry the
 // colour/luminance sub-mask modifiers.
@@ -2095,7 +2096,7 @@ void DevelopPanel::onSubColorSmoothSpin(double value) {
 
 void DevelopPanel::onSubColorSampleToggled(bool active) {
     if (active) {
-        // 与明亮度/独立颜色范围吸管互斥 (mutual exclusion).
+        // Mutually exclusive with the luminance / independent colour-range samplers.
         const QSignalBlocker b1(subLumaSampleBtn_);
         const QSignalBlocker b2(colorSampleBtn_);
         subLumaSampleBtn_->setChecked(false);
@@ -2203,7 +2204,7 @@ void DevelopPanel::onSubLumaSmoothSpin(double value) {
 
 void DevelopPanel::onSubLumaSampleToggled(bool active) {
     if (active) {
-        // 与颜色范围/独立颜色范围吸管互斥 (mutual exclusion).
+        // Mutually exclusive with the colour-range / independent colour-range samplers.
         const QSignalBlocker b1(subColorSampleBtn_);
         const QSignalBlocker b2(colorSampleBtn_);
         subColorSampleBtn_->setChecked(false);
@@ -2718,9 +2719,9 @@ void DevelopPanel::setAdjustments(const lrc::Adjustments& adjustments) {
     // A pending colour-wheel commit belongs to the previous image's gesture;
     // drop it so switching images never pushes a stale undo entry.
     wheelCommit_.stop();
-    // M11: a pending mask-geometry commit belongs to the state being replaced
-    // (stroke end / image switch / undo / preset load). Cancelling it here
-    // prevents a late flush from emitting adjustmentsCommitted for a stale
+    // A pending mask-geometry commit belongs to the state being replaced (stroke
+    // end / image switch / undo / preset load). Cancelling it here prevents a
+    // late flush from emitting adjustmentsCommitted for a stale
     // state -- MainWindow commits the stroke on maskEditFinished, so without
     // this a still-armed timer would double-push an undo entry.
     maskGeometryCommitTimer_.stop();
@@ -2831,7 +2832,7 @@ void DevelopPanel::resetAll() {
     emit adjustmentsCommitted(current_);
 }
 
-// --- spot removal (M5) ------------------------------------------------------
+// --- Spot removal -------------------------------------------------------------
 
 void DevelopPanel::onSpotModeToggled(lrc::SpotType type, bool checked) {
     if (!checked)
@@ -2888,7 +2889,7 @@ void DevelopPanel::setCurrentSpotCount(int count) {
     spotCountLabel_->setText(tr("污点数: %1").arg(count));
 }
 
-// --- metadata (M8) ----------------------------------------------------------
+// --- Metadata ----------------------------------------------------------------
 
 bool DevelopPanel::eventFilter(QObject* watched, QEvent* event) {
     if (watched == metaCaptionEdit_ && event->type() == QEvent::FocusOut)

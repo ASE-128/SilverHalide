@@ -1,11 +1,15 @@
 #pragma once
 
-// P1-5: named-edit-snapshot panel. Wraps the catalog's snapshot API
-// (saveEditSnapshot / listEditHistory / loadEditSnapshot / deleteEditSnapshot /
-// renameSnapshot) with a compact UI: create, apply, rename and delete named
-// snapshots for the current image/variant. Applying emits `applied` with the
-// snapshot's adjustment stack; MainWindow wires that back into the develop
-// pipeline via applyAdjustmentState().
+/**
+ * @brief Named-edit-snapshot panel.
+ *
+ * Wraps the catalog's snapshot API (saveEditSnapshot / listEditHistory /
+ * loadEditSnapshot / deleteEditSnapshot / renameSnapshot) with a compact UI:
+ * create, apply, rename and delete named snapshots for the current
+ * image/variant. Applying emits `applied` with the snapshot's adjustment stack;
+ * MainWindow wires that back into the develop pipeline via
+ * applyAdjustmentState().
+ */
 
 #include <QDialog>
 #include <QString>
@@ -35,7 +39,7 @@ public slots:
     void reload();
 
 signals:
-    // Emitted when the user clicks 应用 for a snapshot. MainWindow applies the
+    // Emitted when the user clicks Apply for a snapshot. MainWindow applies the
     // returned stack (set to the develop pipeline + saved).
     void applied(const lrc::Adjustments& adjustments);
 

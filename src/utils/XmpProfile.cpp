@@ -196,7 +196,7 @@ std::map<std::string, std::string> XmpProfile::toCrsAttrs(
         }
     }
 
-    // --- PHASE_4 range masks ------------------------------------------------
+    // --- Range masks ------------------------------------------------
     // Standalone ColorRange mask (MaskType::ColorRange).  Lightroom does not
     // expose this shape in a public crs attribute, so we use a namespaced
     // project-specific prefix plus the 4 independent mask channels (per-mask
@@ -369,7 +369,7 @@ Adjustments XmpProfile::fromCrsAttrs(
         }
     }
 
-    // --- PHASE_4 range masks ------------------------------------------------
+    // --- Range masks ------------------------------------------------
     // We rebuild the geometric-mask list lazily.  Import scans every key for
     // the known prefixes: SH_ColorRangeMask_* (standalone mask) and
     // SH_MaskN_* (range sub-mask modifiers for geometric mask #N).  For any
@@ -520,7 +520,7 @@ void XmpProfile::toSpotCorrectionXml(
         // never written; import defaults unknown values to Clone.
         x.type = s.type == SpotType::Heal ? "Heal" : "Clone";
         x.source = "Source";      // manual source (no auto source in v1)
-        x.amount = "100";         // opacity fixed at 100% (PHASE_5)
+        x.amount = "100";         // opacity fixed at 100%
         x.active = s.visible ? "true" : "false";
         // Geometry is normalized 0..1 (the engine's SpotRemoval unit):
         // source/target coordinates are relative to the image, radius is

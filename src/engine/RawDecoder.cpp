@@ -75,7 +75,7 @@ bool invert3x3(const double m[3][3], double out[3][3]) {
     return true;
 }
 
-// R-01: re-target libraw's colour pipeline at a DCP ColorMatrix1 instead of its
+// Re-target libraw's colour pipeline at a DCP ColorMatrix1 instead of its
 // built-in camera matrix.
 //
 // libraw applies its camera matrix through the public `imgdata.color.rgb_cam`
@@ -148,13 +148,13 @@ void injectDcpColorMatrix(LibRaw& raw, const DcpProfile& dcp) {
         }
 }
 
-// R-01: applies a DCP tone curve (uniform 16-bit input domain across its
+// Applies a DCP tone curve (uniform 16-bit input domain across its
 // samples) to the working-space linear buffer in place. The curve maps a
 // linear input x in [0, 65535] onto an output curve magnitude; we re-map the
 // working-space values onto that domain and interpolate between neighbouring
 // samples. Kept conservative: out-of-range inputs are clamped to the curve
 // ends. The curve/white-point mapping should be re-verified against a real DCP
-// + reference transform during acceptance (see the review report's R-01).
+// + reference transform during acceptance.
 ImageBufferPtr applyDcpToneCurve(const ImageBufferPtr& src,
                                  const DcpProfile& dcp) {
     if (!src || src->format() != PixelFormat::F32 || dcp.toneCurveSize < 2)
@@ -257,7 +257,7 @@ std::optional<DecodedImage> RawDecoder::decode(
     p.gamm[1] = 1.0;      // keep a perfectly linear response
     p.half_size = params.halfSize ? 1 : 0;
 
-    // R-01: swap libraw's built-in camera matrix for a user-selected DCP colour
+    // Swap libraw's built-in camera matrix for a user-selected DCP colour
     // matrix. Must run after open_file (rgb_cam is computed in identify) and
     // before dcraw_process (whose convert_to_rgb() snapshots rgb_cam). The
     // white balance (pre_mul) is preserved by the helper.
@@ -314,7 +314,7 @@ std::optional<DecodedImage> RawDecoder::decode(
     if (cm_)
         linear = cm_->fromDcrawProPhoto(*linear);
 
-    // R-01: apply the DCP tone curve in the working space. The curve lives on
+    // Apply the DCP tone curve in the working space. The curve lives on
     // the linear working buffer (F32); when no color manager is present the
     // buffer stays U16 and the curve is skipped (headless format tests only).
     // Zero-cost no-op when the profile carries no curve or `linear` is not F32.
@@ -363,7 +363,7 @@ std::optional<DecodedImage> RawDecoder::decodeNonRaw(
 
     // Load the source at native bit depth and with its embedded ICC profile, so
     // a wide-gamut (Adobe RGB / Display P3) or 16-bit file is converted from its
-    // true source space instead of being assumed sRGB at 8-bit (R-08/R-09).
+    // true source space instead of being assumed sRGB at 8-bit.
     auto src = ImageIO::loadSourceImage(path);
     if (!src.pixels || src.pixels->empty())
         return std::nullopt;
@@ -400,7 +400,7 @@ std::optional<DecodedImage> RawDecoder::decodeNonRaw(
     // buffer already sits in ProPhoto, so the identity defaults apply.
 
     // FNV-1a over the embedded source ICC so a catalog preview can record which
-    // colour space produced these pixels (R-10). 0 == untagged sRGB source.
+    // colour space produced these pixels. 0 == untagged sRGB source.
     uint32_t cc = 2166136261u;
     for (uint8_t b : src.icc) {
         cc ^= b;

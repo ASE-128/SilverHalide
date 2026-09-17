@@ -1,11 +1,14 @@
 #pragma once
 
-// Smart-collections (rule-based dynamic collections) management dialog:
-// list / create / edit / delete smart collections with a rule builder
-// (field + operator + value rows and an ALL/ANY match selector). Operates
-// directly on the injected catalog and emits smartCollectionsChanged() after
-// any mutation so MainWindow can refresh its navigator and filmstrip
-// (mirrors CollectionsDialog, PHASE_9).
+/**
+ * @brief Smart-collections (rule-based dynamic collections) management dialog.
+ *
+ * List / create / edit / delete smart collections with a rule builder (field +
+ * operator + value rows and an ALL/ANY match selector). Operates directly on
+ * the injected catalog and emits smartCollectionsChanged() after any mutation
+ * so MainWindow can refresh its navigator and filmstrip (mirrors
+ * CollectionsDialog).
+ */
 
 #include <cstdint>
 #include <vector>

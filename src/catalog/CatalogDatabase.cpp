@@ -140,7 +140,7 @@ const char* kImageColumns =
     "is_managed, fullres_path, title, caption, copyright, creator, date_taken, "
     "camera, lens";
 
-// --- smart-collection predicate evaluation (M9) ----------------------------
+// --- smart-collection predicate evaluation -------------------------------
 
 std::string toLowerCopy(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
@@ -473,8 +473,8 @@ void ensureTableColumnImpl(sqlite3* db, const char* table, const char* column,
 
 // Applies the connection-level PRAGMA set. Every connection (currently a
 // single catalog connection) must run these so foreign-key cascades, WAL
-// journaling, durability and write-lock queuing are identical everywhere
-// (goal 3). Covers foreign_keys, journal_mode=WAL, synchronous=NORMAL and a
+// journaling, durability and write-lock queuing are identical everywhere.
+// Covers foreign_keys, journal_mode=WAL, synchronous=NORMAL and a
 // busy_timeout so a concurrent writer drains before SQLITE_BUSY surfaces.
 bool applyPragmas(sqlite3* db, std::string* errOut) {
     return sqlite3_exec(db, "PRAGMA foreign_keys=ON;"
@@ -553,7 +553,7 @@ extern "C" int sqlite3_vec_init(sqlite3*, char**, void*);
 #endif
 
 // Registers the sqlite-vec extension entry point directly on an already-open
-// connection so the `vec0` virtual table is available (goal 6). When sqlite-vec
+// connection so the `vec0` virtual table is available. When sqlite-vec
 // is not statically linked (LRC_HAS_SQLITE_VEC undefined) this is a no-op and
 // migrateV4's hasModule("vec0") check simply leaves the vec index absent. The
 // third argument is the sqlite3_api_routines* pointer; passing nullptr is safe
@@ -567,7 +567,7 @@ bool registerVecModule(sqlite3* db) {
 #endif
 }
 
-// Parameters used by the versioned schema migrations (goal 1). `kSchemaVersion`
+// Parameters used by the versioned schema migrations. `kSchemaVersion`
 // is the current schema version; each migration numbered 1..kSchemaVersion
 // upgrades a catalog one step and is recorded in `schema_migrations`. All SQL
 // migrations run inside a single transaction and either fully apply or fully
@@ -648,7 +648,7 @@ bool CatalogDatabase::open() {
         return false;
     }
 
-    // Register the sqlite-vec extension (goal 6) so `vec0` virtual tables can
+    // Register the sqlite-vec extension so `vec0` virtual tables can
     // be created/queried on this connection. No-op when sqlite-vec is not
     // linked into the binary (LRC_HAS_SQLITE_VEC undefined).
     (void)registerVecModule(db_);
@@ -772,7 +772,7 @@ bool CatalogDatabase::open() {
 }
 
 // ---------------------------------------------------------------------------
-// Versioned migrations (goal 1). Each migrateV{n} runs inside a single
+// Versioned migrations. Each migrateV{n} runs inside a single
 // transaction opened by applyMigrations(); on success applyMigrations commits,
 // bumps PRAGMA user_version and records the version in schema_migrations.
 // ---------------------------------------------------------------------------
@@ -918,7 +918,7 @@ bool CatalogDatabase::migrateV1(std::string* errOut) {
             "FROM images;"
             "DROP TABLE images;"
             "ALTER TABLE images_new RENAME TO images;"
-            // Case-insensitive uniqueness (goal 3) — Windows file paths collide
+            // Case-insensitive uniqueness — Windows file paths collide
             // only by case, so store them case-insensitively unique.
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_images_path "
             "  ON images(file_path COLLATE NOCASE);"
@@ -937,7 +937,7 @@ bool CatalogDatabase::migrateV1(std::string* errOut) {
 
 bool CatalogDatabase::migrateV2(std::string* errOut) {
     // Rebuild the editing tables as STRICT and give edit_history a `kind` column
-    // (auto history vs. named snapshots, goal 7) plus the lookup index.
+    // (auto history vs. named snapshots) plus the lookup index.
     const bool ok =
         sqlite3_exec(db_,
             "CREATE TABLE edits_new ("
@@ -1000,7 +1000,7 @@ bool CatalogDatabase::migrateV2(std::string* errOut) {
 }
 
 bool CatalogDatabase::migrateV3(std::string* errOut) {
-    // Externalize preview BLOBs (goal 2): the `previews` table drops its `data`
+    // Externalize preview BLOBs: the `previews` table drops its `data`
     // BLOB and keeps only the disk path. Existing rows are moved to
     // `previews_old` here; the actual file export runs outside transactions in
     // finishPreviewExport() (resumable if interrupted).
@@ -1049,7 +1049,7 @@ bool CatalogDatabase::migrateV3(std::string* errOut) {
 bool CatalogDatabase::migrateV4(std::string* errOut) {
     const bool hasFts = hasModule(db_, "fts5");
 
-    // Materialised search table shadowed by the FTS5 index (goal 6). `file_name`
+    // Materialised search table shadowed by the FTS5 index. `file_name`
     // carries the full path so FTS tokenizes the basename tokens too.
     const bool searchCreated =
         sqlite3_exec(db_,
@@ -1150,7 +1150,7 @@ bool CatalogDatabase::migrateV4(std::string* errOut) {
         }
     }
 
-    // phash segments — coarse 16-bit thumbnails over the 64-bit phash (goal 6)
+    // phash segments — coarse 16-bit thumbnails over the 64-bit phash
     // so a Hamming pre-filter never scans the whole photo_features table.
     const bool seg =
         sqlite3_exec(db_,
@@ -1175,7 +1175,7 @@ bool CatalogDatabase::migrateV4(std::string* errOut) {
         return false;
     }
 
-    // Goal 3 — reverse query indexes on the child side of many-to-many links:
+    // Reverse query indexes on the child side of many-to-many links:
     // "which collections/panoramas cite this image", and keyword reverse
     // lookups. The forward (child_id,PARENT...) primary keys cover parent->child
     // scans; these cover the child->parents direction.
@@ -1194,7 +1194,7 @@ bool CatalogDatabase::migrateV4(std::string* errOut) {
     }
 
     if (hasModule(db_, "vec0")) {
-        // 64-dim embedding ANN index (goal 6).
+        // 64-dim embedding ANN index.
         (void)sqlite3_exec(db_,
             "CREATE VIRTUAL TABLE IF NOT EXISTS images_vec USING vec0("
             "  image_id INTEGER PRIMARY KEY, embedding float[64]);",
@@ -1205,8 +1205,8 @@ bool CatalogDatabase::migrateV4(std::string* errOut) {
 
 // Exports remaining legacy preview rows (previews_old) to disk files and clears
 // them. Each row commits independently so an interrupted run only loses one
-// export and is resumed on the next open(). Returns false only on a hard
-// database error. (goal 2, resumable migration)
+// export and is resumed on the next open(); the migration is resumable.
+// Returns false only on a hard database error.
 bool CatalogDatabase::finishPreviewExport() {
     const bool hasOld = tableHasColumn(db_, "previews_old", "kind");
     if (!hasOld)
@@ -1356,7 +1356,7 @@ int64_t CatalogDatabase::addImageImpl(
     bool isManaged, int64_t fileSize, int64_t fileMtime, std::string* errOut) {
     // An existing row keeps its current managed state so re-importing the same
     // file (idempotent import) never flips a copied file to "added". The
-    // on-disk fingerprint (file_size / file_mtime, goal 4) is recorded on
+    // on-disk fingerprint (file_size / file_mtime) is recorded on
     // insert and refreshed on an idempotent re-import hit so stale sizes never
     // linger behind.
     Stmt ins(db,
@@ -1571,7 +1571,8 @@ bool CatalogDatabase::removeImage(int64_t id) {
     // Collect the external on-disk cache files referenced by this row
     // (thumbnail_path / fullres_path) so they are removed with the record.
     // The DB-level dependencies (edits/history/variants/previews) are cleaned by
-    // the FK cascade, but those two files live outside SQLite and are not (R-16).
+    // the FK cascade, but those two files live outside SQLite and are not
+    // covered by it.
     std::vector<std::string> cacheFiles;
     {
         Stmt q(db_,
@@ -1602,7 +1603,7 @@ bool CatalogDatabase::removeImage(int64_t id) {
 
     // Best-effort removal of the referenced cache files. The stored paths may
     // be relative to the working directory; never throw and never fail the
-    // call on a stale/missing file (R-16).
+    // call on a stale/missing file.
     if (ok) {
         for (const std::string& rel : cacheFiles) {
             std::error_code ec;
@@ -1728,7 +1729,7 @@ bool CatalogDatabase::storePreviewImpl(sqlite3* db, int64_t imageId,
                                        const std::vector<uint8_t>& data,
                                        int width, int height,
                                        std::string* errOut) {
-    // Externalize the blob (goal 2): the bytes go to a sharded disk file under
+    // Externalize the blob: the bytes go to a sharded disk file under
     // the preview root and only its path (relative to the root) is persisted in
     // the `path` column. The deterministic (image_id, kind) path means a
     // re-store overwrites the same file.
@@ -1810,7 +1811,7 @@ std::optional<std::vector<uint8_t>> CatalogDatabase::loadPreview(
     if (!p)
         return std::nullopt;
     // Resolve the stored (relative) path against the preview root and stream
-    // the file back — the bytes live on disk, not in the database (goal 2).
+    // the file back — the bytes live on disk, not in the database.
     std::filesystem::path rel(reinterpret_cast<const char*>(p));
     if (rel.is_relative())
         rel = previewRootDir() / rel;
@@ -1890,8 +1891,8 @@ bool CatalogDatabase::invalidatePreviews(int64_t imageId) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!db_)
         return false;
-    // Collect the externalized preview files first so they are deleted with
-    // the database rows (R-14 keeps a stale cached decode from being reused).
+    // Collect the externalized preview files first so they are deleted along with
+    // the database rows; this keeps a stale cached decode from being reused.
     std::vector<std::filesystem::path> files;
     {
         Stmt q(db_,
@@ -1934,7 +1935,7 @@ bool CatalogDatabase::saveAdjustments(int64_t imageId,
         return false;
     const std::string jsonText = ProfileIO::toJson(adjustments).serialize();
 
-    // M2: the edits upsert and the edit_history snapshot are one atomic unit.
+    // The edits upsert and the edit_history snapshot are one atomic unit.
     // Wrap them in a short-lived transaction of their own so a snapshot write
     // failure rolls back the upsert instead of leaving an undo history that
     // disagrees with the live edit. This runs on the primary connection and is
@@ -1987,7 +1988,7 @@ bool CatalogDatabase::saveAdjustments(int64_t imageId,
                 ok = false;
             }
         }
-        // Goal 7: automatic history grows on every commit; retain at most 20
+        // Automatic history grows on every commit; retain at most 20
         // 'auto' rows per image/variant (user chose this cap). Named snapshots
         // (kind='snapshot') are never pruned. Runs inside the edits+snapshot
         // transaction so a failure rolls the whole unit back.
@@ -2068,7 +2069,7 @@ int64_t CatalogDatabase::saveEditSnapshot(
     if (!db_)
         return -1;
     const std::string jsonText = ProfileIO::toJson(adjustments).serialize();
-    // Goal 7: a non-empty name marks a user snapshot (kind='snapshot', never
+    // A non-empty name marks a user snapshot (kind='snapshot', never
     // pruned); the empty-name path is automatic undo history (kind='auto'),
     // retained up to 20 per image/variant.
     const std::string kind = name.empty() ? "auto" : "snapshot";
@@ -2397,7 +2398,7 @@ bool CatalogDatabase::deleteVariant(int64_t imageId, int variantId) {
     if (!db_)
         return false;
     if (variantId == 0) {
-        // PHASE_6: deleting the master is refused while virtual copies exist.
+        // Deleting the master is refused while virtual copies exist.
         Stmt cnt(db_,
                  "SELECT COUNT(*) FROM variants "
                  "WHERE image_id = ?1 AND variant_id != 0;", &stmtCache_);
@@ -2754,7 +2755,7 @@ std::vector<ImageRecord> CatalogDatabase::searchImages(
     if (text.empty())
         return out;
 
-    // Goal 6 — prefer the FTS5 index (image title/caption/file_name/keywords,
+    // Prefer the FTS5 index (image title/caption/file_name/keywords,
     // content-external mode) so keyword/file-name/title search is sub-linear.
     // Each whitespace-separated term becomes a prefix phrase ("t"*), ANDed by
     // FTS5's default implicit-AND over the MATCH expression.
@@ -3421,7 +3422,7 @@ bool CatalogDatabase::optimize() {
     return true;
 }
 
-// --- photo_features (PHASE_14: duplicate detection / stacking) -----------
+// --- photo_features (duplicate detection / stacking) ------------------
 
 bool CatalogDatabase::storePhotoFeatures(int64_t imageId, uint64_t perceptualHash,
                                          const std::vector<float>& embedding,
@@ -3454,7 +3455,7 @@ bool CatalogDatabase::storePhotoFeatures(int64_t imageId, uint64_t perceptualHas
     }
     if (s.step() != SQLITE_DONE)
         return false;
-    // Goal 6 — keep the derived search indexes in step with the row: the four
+    // Keep the derived search indexes in step with the row: the four
     // 16-bit phash segments (coarse Hamming pre-filter) and the 64-dim vec0
     // embedding used by ANN search. A failure here is non-fatal: the row stays
     // correct and rebuildSearchIndexes() can resync later.

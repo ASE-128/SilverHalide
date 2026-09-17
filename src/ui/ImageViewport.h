@@ -1,8 +1,15 @@
 #pragma once
 
-// Central preview area. Renders the current preview QImage with a fit / 1:1 /
-// zoomed mapping, letterboxing with a neutral checkerboard. Mouse wheel zooms
-// around the cursor; dragging pans when zoomed in.
+/**
+ * @brief Central preview area.
+ *
+ * Renders the current preview QImage with a fit / 1:1 / zoomed mapping,
+ * letterboxing with a neutral checkerboard. Mouse wheel zooms around the
+ * cursor; dragging pans when zoomed in. Also hosts the mask/spot editing tools,
+ * the Before/After + reference compare split, and the colour-sampler tools.
+ * Lives on the UI thread; it communicates with the engine and catalog only
+ * through signals.
+ */
 
 #include <cstddef>
 
@@ -23,7 +30,7 @@ class ImageViewport : public QWidget {
 public:
     enum class ZoomMode { Fit, FitWidth, OneToOne };
 
-    // PHASE_7: Before/After + reference view split modes. Off renders the
+    // Before/After + reference view split modes. Off renders the
     // single current image; LeftRight / TopBottom split the widget around a
     // draggable divider; SingleToggle shows before or after in the full widget
     // (\ flips it); Reference shows a read-only reference photo on the left and
@@ -77,25 +84,29 @@ public:
     // MainWindow when it receives colorSampled).
     void setSamplerBase(int rangeIndex, double saturation, double luminance);
 
-    // 点颜色参考色取样：激活后单击图像一次，取出该像素颜色,
-    // 并通过 pointColorSampled 信号发出 (emitted on click).
+    // Point-colour reference sampler: when active, a single click on the image
+    // samples the pixel colour and emits it via pointColorSampled.
     void setPointColorSamplerActive(bool active);
 
-    // 白平衡吸管:激活后单击图像一次,把该像素颜色 (sRGB 显示色) 经 whiteBalanceSampled
-    // 信号发出 (MainWindow 收到后转线性并做白平衡估计).
+    // White-balance eyedropper: when active, a single click samples the pixel
+    // colour (sRGB display colour) and emits it via whiteBalanceSampled
+    // (MainWindow converts it to linear and runs white-balance estimation).
     void setWhiteBalanceSamplerActive(bool active);
     bool whiteBalanceSamplerActive() const { return whiteBalanceActive_; }
 
-    // 颜色范围取样器:激活后单击图像一次,把像素显示色 (sRGB) 经 colorRangeSampled
-    // 信号发出 (MainWindow 收到后生成颜色范围蒙版权重).
+    // Colour-range sampler: when active, a single click samples the pixel's
+    // display colour (sRGB) and emits it via colorRangeSampled (MainWindow
+    // derives the colour-range mask weights from it).
     void setColorRangeSamplerActive(bool active);
-    // 设置当前蒙版的参考色 (sRGB 显示色),供叠加层计算颜色范围权重.
+    // Sets the current mask's reference colour (sRGB display colour) so the
+    // overlay can compute colour-range weights.
     void setMaskColorReference(const QColor& srgb);
     bool colorRangeSamplerActive() const { return colorRangeActive_; }
 
-    // 明亮度范围取样器 (PHASE_4):激活后单击图像一次,计算该像素的相对亮度
-    // L = 0.2126R + 0.7152G + 0.0722B (线性空间),经 luminanceSampled 信号发出
-    // (以 0-100 百分比为单位,MainWindow 收到后写入当前蒙版的 luminanceRef).
+    // Luminance-range sampler: when active, a single click computes the
+    // pixel's relative luma L = 0.2126R + 0.7152G + 0.0722B (linear space) and
+    // emits it via luminanceSampled (0-100 percent; MainWindow writes it into
+    // the current mask's luminanceRef).
     void setLuminanceSamplerActive(bool active);
     bool luminanceSamplerActive() const { return luminanceActive_; }
 
@@ -112,11 +123,12 @@ public:
     void setMaskBrushSoftness(double softness);
     double maskBrushSoftness() const { return maskBrushSoftness_; }
 
-    // 控制红色权重叠加层是否绘制 (快捷键 O 切换). 默认 true.
+    // Controls whether the red weight overlay is drawn (shortcut O toggles).
+    // Defaults to true.
     void setMaskOverlayVisible(bool visible);
     bool maskOverlayVisible() const { return maskOverlayVisible_; }
 
-    // --- Spot removal / healing brush (PHASE_5) ----------------------------
+    // --- Spot removal / healing brush --------------------------------------
     // Arms the spot tool (mutually exclusive with the mask tool and the
     // eyedroppers): the cursor becomes a crosshair, a click creates a target
     // circle, Alt+click places / drags the source circle, Delete or right-click
@@ -142,7 +154,7 @@ public:
     void setSpotVisualizeVisible(bool visible);
     bool spotVisualizeVisible() const { return spotVisualize_; }
 
-    // --- Before/After + reference view (PHASE_7) ---------------------------
+    // --- Before/After + reference view --------------------------------------
     // Supplies the two renderings for Before/After comparison. `before` is the
     // zero-adjustment render, `after` the current render (usually the same
     // QImage the viewport already holds via setImage). Neither is modified.
@@ -179,33 +191,34 @@ signals:
     void colorAdjusted(int colorRangeIndex, double saturation, double luminance);
     // Emitted on release (persist the change).
     void colorAdjustedFinished();
-    // 点颜色参考色取样：单击图像后发出取到的像素颜色 (sampled colour).
+    // Point-colour reference sampler (sampled colour emitted on click).
     void pointColorSampled(const QColor& color);
-    // 白平衡取样:单击时发出像素显示色 (sRGB QColor).
+    // White-balance sample: the pixel's display colour (sRGB QColor).
     void whiteBalanceSampled(const QColor& color);
-    // 颜色范围取样:单击时发出像素显示色 (sRGB QColor).
+    // Colour-range sample: the pixel's display colour (sRGB QColor).
     void colorRangeSampled(const QColor& color);
-    // 明亮度范围取样:单击时发出像素相对亮度 (0-100 百分比, 线性 Rec.709 luma).
+    // Luminance-range sample: the pixel's relative luma (0-100 percent, linear
+    // Rec.709 luma).
     void luminanceSampled(double luma);
     // The user edited the geometry of the current mask draft (live while
     // dragging/painting).
     void maskGeometryChanged(const lrc::Mask& mask);
     // The user released the drag / ended the brush stroke.
     void maskEditFinished();
-    // PHASE_2: the logical render resolution the viewport currently needs for
-    // its image (widget size x devicePixelRatio, in device pixels). Emitted on
-    // resize and on zoom-mode changes; PreviewWorker subscribes (via MainWindow,
-    // which the coordinator wires) and re-renders the Fit/<=1:1 preview at this
-    // resolution instead of the fixed 1920px pipeline.
+    // The logical render resolution the viewport currently needs for its image
+    // (widget size x devicePixelRatio, in device pixels). Emitted on resize and
+    // on zoom-mode changes; PreviewWorker subscribes (via MainWindow, which the
+    // coordinator wires) and re-renders the Fit/<=1:1 preview at this resolution
+    // instead of the fixed 1920px pipeline.
     void viewportResolutionChanged(const QSize& size);
 
-    // PHASE_5: the user created / moved / deleted a spot. Emitted live while a
-    // circle is dragged and once more on release; carries the full updated
-    // list. MainWindow applies it to the Adjustments and re-renders.
+    // The user created / moved / deleted a spot. Emitted live while a circle is
+    // dragged and once more on release; carries the full updated list. MainWindow
+    // applies it to the Adjustments and re-renders.
     void spotRemovalsEdited(const std::vector<lrc::SpotRemoval>& spots);
-    // PHASE_5: the spot tool armed/disarmed state (cursor + overlay toggles).
+    // The spot tool armed/disarmed state (cursor + overlay toggles).
     void spotToolActiveChanged(bool active);
-    // PHASE_7: the Before/After / reference split mode changed (toolbar sync).
+    // The Before/After / reference split mode changed (toolbar sync).
     void compareModeChanged(CompareMode mode);
 
 protected:
@@ -235,20 +248,23 @@ private:
     // Deduplicated fullResRequested emitter.
     void setFullResRequested(bool needed);
     void setZoom(double factor);
-    // PHASE_2: the logical render size (widget size x devicePixelRatio).
+    // The logical render size (widget size x devicePixelRatio).
     QSize logicalRenderSize() const;
     // Deduplicated viewportResolutionChanged emitter.
     void emitViewportResolutionChanged();
     QPointF widgetToImage(const QPointF& pos) const;
     void sampleAt(const QPointF& pos);
-    // 点颜色参考色取样：在 widgetPos 处取像素颜色并发出 pointColorSampled.
+    // Point-colour reference sample: samples the pixel at widgetPos and emits
+    // pointColorSampled.
     void samplePointColor(const QPointF& widgetPos);
-    // 白平衡取样:在 widgetPos 处取像素颜色并发出 whiteBalanceSampled.
+    // White-balance sample: samples the pixel at widgetPos and emits
+    // whiteBalanceSampled.
     void sampleWhiteBalance(const QPointF& widgetPos);
-    // 颜色范围取样:在 widgetPos 处取像素颜色并发出 colorRangeSampled.
+    // Colour-range sample: samples the pixel at widgetPos and emits
+    // colorRangeSampled.
     void sampleColorRange(const QPointF& widgetPos);
-    // 明亮度范围取样:在 widgetPos 处取像素颜色,计算线性相对亮度并发出
-    // luminanceSampled (0-100 百分比).
+    // Luminance-range sample: samples the pixel at widgetPos, computes the
+    // linear relative luma and emits luminanceSampled (0-100 percent).
     void sampleLuminance(const QPointF& widgetPos);
     // Normalized image coordinates (nx, ny in [0,1]) -> widget coordinates.
     QPointF normToWidget(const QPointF& n) const;
@@ -259,7 +275,7 @@ private:
     void endMaskGesture();
     void emitMaskGeometry();
 
-    // --- spot removal / healing brush (PHASE_5) ----------------------------
+    // --- Spot removal / healing brush --------------------------------------
     // Widget coordinates -> normalized image coords ([0,1], clamped).
     QPointF widgetToNorm(const QPointF& pos) const;
     // Screen radius of a spot's circle = radius x longest image edge x scale.
@@ -278,7 +294,7 @@ private:
     // Restores the cursor after a pan/drag release based on the active tool.
     void applyToolCursor();
 
-    // --- before/after + reference view (PHASE_7) ---------------------------
+    // --- Before/After + reference view --------------------------------------
     void paintCompare(QPainter& painter);
     void drawDivider(QPainter& painter);
     // The shared target rect used for Before/After split rendering (falls back
@@ -293,7 +309,7 @@ private:
     QImage image_;
     QImage overlay_;  // LR Alt-key diagnostic overlay (drawn in place of the image)
     QSize nativeSize_;      // native full-res size of the current image
-    QSize lastViewportResolution_;  // PHASE_2: dedup for viewportResolutionChanged()
+    QSize lastViewportResolution_;  // dedup for viewportResolutionChanged()
     bool fullResRequested_ = false;  // dedup for fullResRequested()
     ZoomMode zoomMode_ = ZoomMode::Fit;
     ZoomMode lastFitMode_ = ZoomMode::Fit;  // fit mode before entering 1:1
@@ -312,24 +328,24 @@ private:
     double samplerBaseLum_ = 0.0;
 
     bool pointColorActive_ = false;
-    QPointF pointColorMark_;   // 固定取样点标记（不随鼠标移动）
+    QPointF pointColorMark_;   // fixed sample-point marker (does not follow mouse)
     bool hasPointColorMark_ = false;
 
-    bool whiteBalanceActive_ = false;   // 白平衡吸管激活标志 (W key).
+    bool whiteBalanceActive_ = false;   // white-balance eyedropper active (W key).
 
-    bool colorRangeActive_ = false;   // 颜色范围取样器激活标志.
-    QColor colorRangeSrgbRef_;        // 当前参考色 sRGB (供叠加层用).
-    QPointF colorRangeMark_;          // 取样标记位置 (widget pos).
-    bool hasColorRangeMark_ = false;  // 是否已有取样标记.
+    bool colorRangeActive_ = false;   // colour-range sampler active.
+    QColor colorRangeSrgbRef_;        // current reference colour sRGB (for overlay).
+    QPointF colorRangeMark_;          // sample marker position (widget pos).
+    bool hasColorRangeMark_ = false;  // whether a sample marker exists.
 
-    bool luminanceActive_ = false;    // 明亮度范围取样器激活标志 (PHASE_4).
-    QPointF luminanceMark_;           // 取样标记位置 (widget pos).
-    bool hasLuminanceMark_ = false;   // 是否已有取样标记.
+    bool luminanceActive_ = false;    // luminance-range sampler active.
+    QPointF luminanceMark_;           // sample marker position (widget pos).
+    bool hasLuminanceMark_ = false;   // whether a sample marker exists.
 
     lrc::MaskType maskTool_ = lrc::MaskType::None;
     lrc::Mask maskDraft_;
     QImage maskOverlay_;     // red weight overlay (downscaled, <=480 px edge)
-    bool maskOverlayVisible_ = true;   // 红色权重叠加是否绘制 (快捷键 O 切换).
+    bool maskOverlayVisible_ = true;   // whether the red weight overlay is drawn (shortcut O).
     bool maskDragging_ = false;
     QPointF maskPress_;      // widget pos at gesture start
     QPointF maskLastDab_;    // last brush dab (widget pos)
@@ -338,7 +354,7 @@ private:
     double maskBrushSoftness_ = 0.5;  // brush dab softness (0..1)
     size_t lastOverlayHash_ = 0;      // geometry hash of the built mask overlay
 
-    // --- spot removal / healing brush (PHASE_5) ----------------------------
+    // --- Spot removal / healing brush --------------------------------------
     bool spotToolActive_ = false;
     lrc::SpotType spotType_ = lrc::SpotType::Heal;
     double spotRadius_ = 0.02;        // normalized against the longer edge
@@ -351,7 +367,7 @@ private:
     QImage spotViz_;                  // cached visualization image
     bool spotVizValid_ = false;       // spotViz_ matches the current image_
 
-    // --- before/after + reference view (PHASE_7) ---------------------------
+    // --- Before/After + reference view --------------------------------------
     QImage beforeImage_;              // zero-adjustment render
     QImage afterImage_;               // current render (falls back to image_)
     QImage referenceImage_;           // read-only reference photo

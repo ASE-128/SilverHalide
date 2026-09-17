@@ -160,9 +160,9 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
         mo["saturation"] = m.saturation;
         mo["temperature"] = m.temperature;
         mo["tint"] = m.tint;
-        // PHASE_4 sub-mask modifiers (colour / luminance range + combination
-        // mode). Serialized unconditionally so a round-trip is lossless even
-        // for geometry masks that do not use them.
+        // Sub-mask modifiers (colour / luminance range + combination mode).
+        // Serialized unconditionally so a round-trip is lossless even for
+        // geometry masks that do not use them.
         mo["useColorRange"] = m.useColorRange;
         mo["colorRefR"] = m.colorRefR;
         mo["colorRefG"] = m.colorRefG;
@@ -230,8 +230,8 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
     }
     root["colorTargets"] = std::move(targets);
 
-    // Spot removal / healing brush corrections (PHASE_5). Serialized
-    // unconditionally so a round-trip is lossless even for an empty list.
+    // Spot removal / healing brush corrections. Serialized unconditionally so
+    // a round-trip is lossless even for an empty list.
     json::Value spots = json::Value::array();
     for (const SpotRemoval& s : a.spotRemovals) {
         json::Value so = json::Value::object();
@@ -246,8 +246,8 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
     }
     root["spotRemovals"] = std::move(spots);
 
-    // AI Denoise (PHASE_12). Serialized unconditionally so a round-trip is
-    // lossless even when denoise is disabled.
+    // AI Denoise. Serialized unconditionally so a round-trip is lossless even
+    // when denoise is disabled.
     json::Value aiDenoiseObj = json::Value::object();
     aiDenoiseObj["enabled"] = a.aiDenoise.enabled;
     aiDenoiseObj["strength"] = a.aiDenoise.strength;
@@ -255,8 +255,8 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
     aiDenoiseObj["modelVersion"] = a.aiDenoise.modelVersion;
     root["aiDenoise"] = std::move(aiDenoiseObj);
 
-    // AI Mask parameters (PHASE_13). Serialized only when the adjustments
-    // contain at least one AiMask so a legacy preset loads unchanged.
+    // AI Mask parameters. Serialized only when the adjustments contain at least
+    // one AiMask so a legacy preset loads unchanged.
     bool hasAiMask = false;
     for (const Mask& m : a.masks) {
         if (m.type == MaskType::AiMask) {
@@ -386,9 +386,9 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
             if (!mo.isObject())
                 continue;
             Mask m;
-            // PHASE_13: cap at MaskType::AiMask (not ColorRange) so an AI mask
-            // type survives the round-trip; a lower cap silently downgraded it
-            // to a colour-range mask and lost the ai params (R-12).
+            // Cap at MaskType::AiMask (not ColorRange) so an AI mask type
+            // survives the round-trip; a lower cap silently downgraded it to a
+            // colour-range mask and lost the ai params.
             m.type = static_cast<MaskType>(
                 std::clamp(mo["type"].asNumber(0.0), 0.0,
                            static_cast<double>(MaskType::AiMask)));
@@ -406,8 +406,8 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
             m.saturation = mo["saturation"].asNumber(0.0);
             m.temperature = mo["temperature"].asNumber(0.0);
             m.tint = mo["tint"].asNumber(0.0);
-            // PHASE_4 sub-mask modifiers. Missing keys keep their defaults, so
-            // pre-PHASE_4 presets load unchanged.
+            // Sub-mask modifiers. Missing keys keep their defaults, so older presets
+            // load unchanged.
             m.useColorRange = mo["useColorRange"].asBool(false);
             m.colorRefR = static_cast<float>(mo["colorRefR"].asNumber(0.0));
             m.colorRefG = static_cast<float>(mo["colorRefG"].asNumber(0.0));
@@ -482,8 +482,8 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
         }
     }
 
-    // Spot removal / healing brush corrections (PHASE_5). Missing key or a
-    // malformed element keeps the default (empty list / per-field defaults).
+    // Spot removal / healing brush corrections. A missing key or a malformed
+    // element keeps the default (empty list / per-field defaults).
     if (v.contains("spotRemovals") && v["spotRemovals"].isArray()) {
         for (const json::Value& so : v["spotRemovals"].items()) {
             if (!so.isObject())
@@ -501,7 +501,7 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
         }
     }
 
-    // AI Denoise (PHASE_12). Missing keys keep per-field defaults.
+    // AI Denoise. Missing keys keep per-field defaults.
     if (v.contains("aiDenoise") && v["aiDenoise"].isObject()) {
         const auto& ad = v["aiDenoise"];
         a.aiDenoise.enabled = ad["enabled"].asBool(false);
@@ -511,8 +511,8 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
         a.aiDenoise.modelVersion = ad["modelVersion"].asInt(0);
     }
 
-    // AI Mask parameters (PHASE_13). Only applies when the adjustments list
-    // contains masks of type AiMask; other masks are left untouched.
+    // AI Mask parameters. Only applies when the adjustments list contains masks
+    // of type AiMask; other masks are left untouched.
     if (v.contains("aiMasks") && v["aiMasks"].isArray()) {
         for (size_t i = 0; i < v["aiMasks"].size(); ++i) {
             const json::Value& ao = v["aiMasks"][i];
@@ -525,7 +525,7 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
             for (size_t j = 0; j < a.masks.size(); ++j) {
                 if (a.masks[j].type == MaskType::AiMask) {
                     if (targetIdx == i) {
-                        // Populate the AiMask params.
+                        // Fill the AiMask params.
                         a.masks[j].ai.target = static_cast<AiMaskTarget>(
                             std::clamp(ao["aiTarget"].asInt(0), 0, 2));
                         a.masks[j].ai.threshold = ao["aiThreshold"].asNumber(0.5);

@@ -1,24 +1,25 @@
 #pragma once
 
-// PHASE_14: Duplicate-results modal.
-//
-// The dialog renders the output of DuplicateDetector (a vector of groups,
-// each group being a vector of photo IDs + mean similarity) as a two-pane
-// view:
-//   * left:  group list (group index + member count + mean similarity)
-//   * right: the member images of the selected group, side-by-side, with
-//            each row showing photo id, file path (looked up via the
-//            CatalogDatabase), and similarity info
-//
-// Below the images is an action bar:
-//   * Stack into single stack (uses CatalogDatabase::setStackId / nextStackId
-//     to create a new stack for the selected group)
-//   * Focus members in the filmstrip/grid
-//   * Dismiss without modifying the catalog
-//
-// The caller is responsible for ensuring DuplicateResultsDialog is destroyed
-// before the CatalogDatabase it references (this matches the existing
-// ownership: MainWindow owns both).
+/**
+ * @brief Duplicate-results modal.
+ *
+ * Renders the output of DuplicateDetector (a vector of groups, each group
+ * being a vector of photo IDs + mean similarity) as a two-pane view:
+ *   * left:  group list (group index + member count + mean similarity)
+ *   * right: the member images of the selected group, side-by-side, with each
+ *            row showing photo id, file path (looked up via the
+ *            CatalogDatabase), and similarity info
+ *
+ * Below the images is an action bar:
+ *   * Stack into single stack (uses CatalogDatabase::setStackId / nextStackId
+ *     to create a new stack for the selected group)
+ *   * Focus members in the filmstrip/grid
+ *   * Dismiss without modifying the catalog
+ *
+ * The caller is responsible for ensuring DuplicateResultsDialog is destroyed
+ * before the CatalogDatabase it references (this matches the existing
+ * ownership: MainWindow owns both).
+ */
 
 #include <QDialog>
 #include <QVector>

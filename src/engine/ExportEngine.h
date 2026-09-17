@@ -20,8 +20,8 @@ class Pipeline;
 
 class ExportEngine {
 public:
-    // S16: unified export parameters carried by every per-format method. The
-    // P1-2 ICC preset and the P1-4 watermark are optional; leaving them at their
+    // Unified export parameters carried by every per-format method. The
+    // ICC preset and the watermark are optional; leaving them at their
     // defaults keeps the historical byte-identical output.
     struct ExportSpec {
         enum class Format { Jpeg, Png, Tiff8, Tiff16, Dng };
@@ -29,14 +29,14 @@ public:
         int quality = 90;   // JPEG only
         int maxDim = 0;     // >0 resizes the longest edge before encoding
 
-        // P1-2: ICC preset to embed in the exported file. None keeps the
+        // ICC preset to embed in the exported file. None keeps the
         // historical byte-identical output (no profile). Applied to the
         // colour-managed raster formats (JPEG / PNG / TIFF-8 / TIFF-16).
         enum class IccChoice : int { None = 0, SRGB, AdobeRGB, DisplayP3 };
         IccChoice icc = IccChoice::None;
         std::filesystem::path iccCustomPath;  // optional user-supplied profile
 
-        // P1-4: optional watermark overlay. `rgba` holds straight-alpha RGBA
+        // Optional watermark overlay. `rgba` holds straight-alpha RGBA
         // pixels of size overlayW x overlayH. When `enabled`, the overlay is
         // composited over the U8 display output (JPEG / PNG / TIFF-8) at
         // `scale` (overlay long edge / output long edge), at `position` with
@@ -59,14 +59,14 @@ public:
     // Renders `linear` through `adjustments` at full resolution and writes a
     // 8-bit sRGB JPEG. quality is 0..100. Returns false on I/O or encode
     // errors (message is reported via lastError()). `spec` carries the
-    // optional ICC profile and watermark for the P1-2 / P1-4 export options.
+    // optional ICC profile and watermark for the export options.
     bool exportJpeg(const std::filesystem::path& outPath, uint64_t imageId,
                     const ImageBuffer& linear,
                     const Adjustments& adjustments, int quality,
                     const ExportSpec& spec = ExportSpec{});
 
     // Renders and writes an 8-bit sRGB PNG (lossless). `spec` carries the
-    // optional ICC profile and watermark (P1-2 / P1-4).
+    // optional ICC profile and watermark.
     bool exportPng(const std::filesystem::path& outPath, uint64_t imageId,
                    const ImageBuffer& linear,
                    const Adjustments& adjustments,
@@ -89,10 +89,10 @@ public:
                    const Adjustments& adjustments,
                    const ExportSpec& spec = ExportSpec{});
 
-    // S16: unified encode-and-write entry point. Dispatches on spec.format and
+    // Unified encode-and-write entry point. Dispatches on spec.format and
     // quality/maxDim. Returns false on any render / I/O / encode error. This is
-    // the single call site that callers (e.g. PreviewWorker::batchExport in
-    // S17-18) should use when they need a generic export path.
+    // the single call site that callers (e.g. PreviewWorker::batchExport)
+    // should use when they need a generic export path.
     bool encodeAndWrite(const std::filesystem::path& outPath, uint64_t imageId,
                         const ImageBuffer& linear,
                         const Adjustments& adjustments,
@@ -110,7 +110,7 @@ private:
     Pipeline& pipeline_;
     std::string lastError_;
 
-    // S16: parallel strip-wise F32 -> U16 quantization. Slices the source F32
+    // Parallel strip-wise F32 -> U16 quantization. Slices the source F32
     // image into row-strips of `rowsPerStrip` rows and quantizes each strip
     // independently on the thread pool, writing directly into the matching
     // region of `u16`. `convert` optionally maps linear ProPhoto -> display

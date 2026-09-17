@@ -26,8 +26,8 @@ uint64_t fnv1a64(const std::string& s) {
     return h;
 }
 
-// Version marker appended to cache-key inputs (M5-2). Bumping it invalidates
-// every previously-cached disk entry -- pre-M8 .ppm thumbnails and pre-v2
+// Version marker appended to cache-key inputs. Bumping it invalidates
+// every previously-cached disk entry -- legacy .ppm thumbnails and pre-v2
 // fullres JPEGs alike -- so stale files are never matched on lookup and are
 // only reclaimed later by the LRU disk-cap pass.
 constexpr const char* kCacheKeyVersion = "@v2";
@@ -233,7 +233,7 @@ std::optional<ThumbnailCache::RenderedJpeg> ThumbnailCache::renderFullResJpeg(
 std::optional<ThumbnailCache::RenderedStandardPreview>
 ThumbnailCache::renderStandardPreviewBlob(
     const std::filesystem::path& rawPath) {
-    // S5: one-call wrapper around buildStandardPreview2 + encodeStandardPreview
+    // One-call wrapper around buildStandardPreview2 + encodeStandardPreview
     // (v2 header). Lets ImportWorker's batch loop produce the catalog blob
     // without pulling in StandardPreview.h or wiring a decoder/pipeline.
     const auto built =

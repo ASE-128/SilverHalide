@@ -149,7 +149,7 @@ std::vector<uint8_t> encodeStandardPreview(const ImageBuffer& buf,
                                            uint32_t sourceColor) {
     // Preferred v3 encoder: records native dimensions and the source colour
     // hash so a later policy change invalidates the cache and never reuses
-    // wrong-coloured pixels (R-10).
+    // wrong-coloured pixels.
     std::vector<uint8_t> out;
     if (buf.empty() || buf.format() != PixelFormat::F32 ||
         buf.channels() != 3)
@@ -187,9 +187,9 @@ DecodedStandardPreview decodeStandardPreview(
         !readU32(blob, 36, colorVersion))
         return {};
     // Only the current v3 blob is accepted. An obsolete v1/v2 blob was produced
-    // before ICC-aware conversion (R-08/R-09); returning {} here makes the
+    // before ICC-aware conversion; returning {} here makes the
     // caller regenerate it under the current colour policy instead of reusing
-    // potentially wrong-coloured pixels (R-10).
+    // potentially wrong-coloured pixels.
     if (version != 3 || w == 0 || h == 0 || channels != 3 || format != 2)
         return {};
     // A standard preview never exceeds kStandardPreviewMaxDim; reject absurd

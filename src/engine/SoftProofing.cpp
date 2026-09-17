@@ -1,4 +1,4 @@
-// PHASE_15: SoftProofing implementation.
+// SoftProofing implementation.
 //
 // lcms2 documentation references:
 //     cmsCreateProofingTransform()        — main proof pipeline

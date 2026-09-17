@@ -13,13 +13,26 @@
 
 namespace lrc {
 
-// Case-insensitive lower-case extensions (leading dot) decoded by libraw.
+/**
+ * @brief Lower-case extensions (with leading dot) decoded by libraw.
+ * @return Reference to the shared list; do not modify.
+ */
 const std::vector<std::string>& rawExtensions();
 
-// All importable extensions: rawExtensions() plus JPEG/PNG/TIFF.
+/**
+ * @brief All importable extensions: rawExtensions() plus JPEG/PNG/TIFF.
+ * @return Reference to the shared list; do not modify.
+ */
 const std::vector<std::string>& importExtensions();
 
+/**
+ * @brief Tests whether a path's extension is a raw format decoded by libraw.
+ */
 bool isRawPath(const std::filesystem::path& path);
+
+/**
+ * @brief Tests whether a path's extension is importable by the app.
+ */
 bool isImportablePath(const std::filesystem::path& path);
 
 } // namespace lrc

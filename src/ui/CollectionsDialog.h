@@ -1,9 +1,13 @@
 #pragma once
 
-// Collections management dialog: create / rename / delete manual collections
-// and manage their member photos. Operates directly on the injected catalog
-// (data driven); MainWindow instantiates it from a menu and refreshes its
-// navigator whenever collectionsChanged() fires.
+/**
+ * @brief Collections management dialog.
+ *
+ * Create / rename / delete manual collections and manage their member photos.
+ * Operates directly on the injected catalog (data driven); MainWindow
+ * instantiates it from a menu and refreshes its navigator whenever
+ * collectionsChanged() fires.
+ */
 
 #include <cstdint>
 

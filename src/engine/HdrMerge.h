@@ -23,6 +23,13 @@ namespace lrc {
 
 class HdrMerge {
 public:
+    /**
+     * @brief Result of an HDR merge.
+     *
+     * `linear` is null when the merge failed; `ok()` is the success test.
+     * `evOffsets` holds the exposure offsets actually used (one per frame, in
+     * stops, relative to the reference frame).
+     */
     struct Result {
         ImageBufferPtr linear;            // merged linear ProPhoto F32 buffer
         std::vector<double> evOffsets;    // offsets used (stops, frame vs ref)
@@ -30,18 +37,38 @@ public:
         bool ok() const { return linear && !linear->empty(); }
     };
 
-    // Merges bracketed frames. If `evOffsets` is empty (or a different size),
-    // offsets are estimated from the luminance of each frame. `deghost` enables
-    // the robust blend for hand-held / moving-subject shots. `bandRows` bounds
-    // the row-band height used for streaming the merge (memory bound); the
-    // result is bit-identical regardless of its value.
+    /**
+     * @brief Merges exposure-bracketed frames into one linear buffer.
+     *
+     * Merging is strictly per-pixel and streams in row bands, so peak memory
+     * is bounded by @p bandRows regardless of frame count.
+     *
+     * @param frames Input linear ProPhoto frames (any of U8/U16/F32), all the
+     *        same dimensions and at least two.
+     * @param evOffsets Per-frame exposure offset in stops relative to frame 0.
+     *        If empty or a different size, offsets are estimated from the
+     *        luminance of each frame.
+     * @param deghost Enables the robust (median-biased) blend for hand-held /
+     *        moving-subject shots.
+     * @param bandRows Row-band height used for streaming the merge (memory
+     *        bound). The result is bit-identical regardless of its value.
+     * @return The merged linear ProPhoto F32 buffer, or a Result whose `ok()`
+     *         is false (with `error` set) on invalid input.
+     */
     static Result merge(const std::vector<ImageBufferPtr>& frames,
                         const std::vector<double>& evOffsets, bool deghost,
                         int bandRows = 128);
 
-    // Estimates the exposure offset in stops of `other` relative to `ref`
-    // (positive means `other` is brighter) from the median log-luminance ratio
-    // on a downscaled luminance image.
+    /**
+     * @brief Estimates the exposure offset of `other` relative to `ref`.
+     *
+     * A positive result means `other` is brighter. Computed as the median
+     * log-luminance ratio on a downscaled luma image.
+     *
+     * @param ref Reference frame.
+     * @param other Frame whose offset is estimated.
+     * @return Estimated exposure offset in stops; 0 when no usable pixels.
+     */
     static double estimateEv(const ImageBuffer& ref, const ImageBuffer& other);
 
 private:

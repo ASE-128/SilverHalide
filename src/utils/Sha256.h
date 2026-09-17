@@ -12,12 +12,26 @@
 
 namespace lrc {
 
-// SHA-256 of a byte buffer, returned as 64 lowercase hex chars.
+/**
+ * @brief SHA-256 of a byte buffer.
+ *
+ * @param data Input bytes.
+ * @param len  Number of bytes to hash; 0 (or a null `data`) hashes the empty
+ *             message.
+ * @return 64 lowercase hex chars.
+ */
 std::string sha256Buffer(const uint8_t* data, size_t len);
 
-// SHA-256 of a file at `path`, returned as 64 lowercase hex chars.
-// Returns an empty string if the file cannot be opened. Disk-based
-// (16 KB chunks) so multi-hundred-MB model files don't load into memory.
+/**
+ * @brief SHA-256 of the file at `path`.
+ *
+ * Reads the file in 16 KB chunks so multi-hundred-MB model files are never
+ * loaded fully into memory.
+ *
+ * @param path File to hash.
+ * @return 64 lowercase hex chars, or an empty string if the file cannot be
+ *         opened.
+ */
 std::string sha256File(const std::filesystem::path& path);
 
 }  // namespace lrc

@@ -7,7 +7,7 @@
 //     white balance -> HSL (per-channel) -> split toning
 //
 // The final step converts the result to display-ready 8-bit sRGB through the
-// color manager. The input buffer is never modified.
+// colorManager. The input buffer is never modified.
 //
 // Previews are rendered at a bounded resolution and cached with an LRU keyed
 // by (image id, adjustment hash, target size).
@@ -25,7 +25,7 @@
 namespace lrc {
 
 class ColorManager;
-class AiInferenceEngine;  // ONNX Runtime inference wrapper (PHASE_12/13 wiring)
+class AiInferenceEngine;  // ONNX Runtime inference wrapper
 
 // Engine-side render target size for preview-resolution rendering. Pure C++ so
 // the engine stays Qt-free; the UI layer converts from QSize.
@@ -58,7 +58,7 @@ public:
     ImageBufferPtr renderFullDisplay(uint64_t imageId, const ImageBuffer& linear,
                                      const Adjustments& adjustments);
 
-    // Preview-resolution render with per-stage incremental caching (PHASE_2).
+    // Preview-resolution render with per-stage incremental caching.
     // `source` is a linear ProPhoto buffer (F32 preferred; U16/U8 are converted);
     // it is downscaled (area-average, never upscaled) to fit `targetSize`.
     // `fullLongEdge` is the native full-resolution long edge used to scale the
@@ -72,7 +72,7 @@ public:
                                  int fullLongEdge = 0,
                                  uint64_t imageId = 0);
 
-    // --- Incremental render-state controls (PHASE_2) ------------------------
+    // --- Incremental render-state controls ----------------------------------
     void clearIncrementalCache();
     void setIncrementalCacheCapacity(size_t capacityBytes);
     size_t incrementalCacheCapacity() const;
@@ -92,7 +92,7 @@ public:
     // outside [0..4] or stages that are not currently retained.
     void dropIncrementalStageForTest(int stage);
 
-    // --- Preview-resolution kernel scaling (PHASE_2) ------------------------
+    // --- Preview-resolution kernel scaling ----------------------------------
     // sigma-scale factor for a preview whose working long edge is
     // `workingLongEdge` and whose native full-res long edge is `fullLongEdge`.
     // 0 / negative edges (unknown) -> 1.0 (no scaling); never exceeds 1.0.
@@ -100,7 +100,7 @@ public:
 
     // Effective spatial-kernel sizes (px) for a working buffer of w*h at the
     // given sigma scale. Single source of truth for applySpatialAdjustments and
-    // its scaled (preview) variant, exposed so tests can verify the PHASE_2
+    // its scaled (preview) variant, exposed so tests can verify the
     // preview/full-resolution scaling rule.
     struct SpatialKernels {
         float textureSigma = 0.0f;     // local-contrast radius (scaled)
@@ -117,7 +117,7 @@ public:
     void clearCache();
     void setCacheCapacity(size_t capacityBytes);
 
-    // --- AI inference injection (PHASE_12/13 wiring) ------------------------
+    // --- AI inference injection --------------------------------------------
     // Engine-wide ONNX inference handle. Set once at app startup (by
     // MainWindow) after ModelManager has verified/loaded bundled models from
     // <applicationDirPath>/models. When null (headless tests, LRC_ENABLE_AI=
@@ -155,7 +155,7 @@ public:
     static void applyLocalAdjustments(const Adjustments& adjustments,
                                       float* pixels, int width, int height);
 
-    // Applies spot removal / healing brush corrections (PHASE_5) to an F32 RGB
+    // Applies spot removal / healing brush corrections to an F32 RGB
     // buffer in place, on the linear ProPhoto working buffer. Must run after
     // the spatial stages (applySpatialAdjustments) and before the sRGB
     // conversion; the normalized spot coordinates are mapped to pixels using
@@ -184,7 +184,7 @@ public:
     // 1 at the corners). It depends only on midpoint/roundness/feather/style and
     // the buffer size -- NOT on amount/highlights -- so a pure amount change
     // reuses the cached field. Results are cached globally, keyed by those
-    // parameters and w/h (PHASE_3). Returns null only for non-positive
+    // parameters and w/h. Returns null only for non-positive
     // dimensions.
     static std::shared_ptr<const std::vector<float>>
     postCropVignetteWeightField(const Adjustments& adjustments, int width,
@@ -195,7 +195,7 @@ public:
     static float colorRangeWeight(const ColorRangeMask& mask, float r, float g,
                                   float b);
 
-    // --- Sub-mask weight helpers (PHASE_4) -----------------------------------
+    // --- Sub-mask weight helpers ---------------------------------------------
     // Per-pixel weight [0,1] of a geometry mask's colour-range modifier. The
     // distance is the max of normalized hue/sat/luma distances to the sampled
     // reference; `colorRange` sets the band width and `colorSmoothness` its
@@ -214,7 +214,7 @@ public:
     // the geometry weight (invert folded in) combined with the enabled
     // colour/luminance sub-mask weights -- product for the default intersection
     // mode, max for union. With no sub-mask enabled this is exactly maskWeight,
-    // so the pre-PHASE_4 rendering behaviour is preserved. Exposed for tests
+    // so the pre-min/max combination behaviour is preserved. Exposed for tests
     // and the viewport's combined weight overlay.
     static float combinedMaskWeight(const Mask& mask, int width, int height,
                                     float nx, float ny, float r, float g,
@@ -289,7 +289,7 @@ private:
     bool lookupCache(const CacheKey& key, ImageBufferPtr& out);
     void insertCache(const CacheKey& key, const ImageBufferPtr& buffer);
 
-    // --- Incremental render state (PHASE_2) ---------------------------------
+    // --- Incremental render state -----------------------------------------
     // Stage outputs A..D (F32 linear) + F (U8 sRGB) are retained. Stage E
     // (spatial) is deliberately NOT retained: nothing downstream reads it (F is
     // the final conversion and always recomputes after E), so caching it would
@@ -329,7 +329,7 @@ private:
     int lastReuseStartStage_ = -1;
     mutable std::mutex renderStateMutex_;
 
-    // PHASE_12/13: non-owning pointer to the shared ONNX inference engine.
+    // Non-owning pointer to the shared ONNX inference engine.
     // Defaults to null; set via setGlobalAiEngine at app startup. When null,
     // AI denoise/mask code paths degrade to their pure-C++ fallbacks.
     static AiInferenceEngine* aiEngine_;

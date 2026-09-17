@@ -26,8 +26,8 @@ namespace json = lrc::json;
 
 namespace {
 
-// Rule builder metadata (PHASE_9). `id` is the JSON field name; `label` is the
-// Chinese display text shown in the field dropdown.
+// Rule builder metadata. `id` is the JSON field name; `label` is the Chinese
+// display text shown in the field dropdown.
 const struct { const char* id; const char* label; } kRuleFields[] = {
     {"rating", "评分"},
     {"label", "色标"},

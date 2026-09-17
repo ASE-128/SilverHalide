@@ -6,9 +6,8 @@
 PanoramaWorker::PanoramaWorker(const std::vector<lrc::ImageBufferPtr>& sources,
                                const lrc::PanoramaOptions& opts, QObject* parent)
     : QObject(parent), sources_(sources), opts_(opts) {
-    // opts_ 仅供引擎调用,不跨信号传递 (opts_ is used only for the engine call; the
-    // dialog keeps its own copy for the caller, so no metatype registration for
-    // PanoramaOptions is needed).
+    // opts_ is used only for the engine call; the dialog keeps its own copy for the
+    // caller, so no metatype registration for PanoramaOptions is needed.
 }
 
 void PanoramaWorker::run() {
@@ -23,8 +22,8 @@ void PanoramaWorker::run() {
     try {
         result = lrc::stitchPanorama(sources_, opts_);
     } catch (const std::runtime_error& e) {
-        // 无可靠重叠 (no reliable overlap) -- the engine message carries the
-        // NCC score and the failing image index.
+        // No reliable overlap; the engine message carries the NCC score and the failing
+        // image index.
         error = tr("所选照片无可靠重叠，请重新选择或调整顺序 (%1)")
                     .arg(QString::fromStdString(e.what()));
     } catch (const std::invalid_argument& e) {

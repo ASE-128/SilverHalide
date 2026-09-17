@@ -13,7 +13,7 @@
 #include "utils/Parallel.h"
 #include "app/Constants.h"
 
-// PHASE_12/13: AI inference wiring. These headers are intentionally guarded by
+// AI inference wiring. These headers are intentionally guarded by
 // LRC_ENABLE_AI in CMake — when AI is disabled, the fallback bilateral NR /
 // heuristic mask paths run instead (see AiDenoiseProcessor / AiMaskGenerator
 // for the contract). When AI is enabled but Pipeline::globalAiEngine() is null
@@ -820,7 +820,7 @@ inline void mixVignetteKey(size_t& h, double v) {
 // centre follows a future crop automatically with no extra state. roundness
 // interpolates the distance between a rectangle (-100) and a circle (+100);
 // midpoint places the falloff centre and feather sets its width. Only the
-// Highlight-Priority shape is implemented (styles 0/1 are TODO, PHASE_3).
+// Highlight-Priority shape is implemented (styles 0/1 are TODO).
 float postCropVignetteWeight(const Adjustments& a, int w, int h, int x, int y) {
     const float cx = (w > 1) ? static_cast<float>(w - 1) * 0.5f : 0.0f;
     const float cy = (h > 1) ? static_cast<float>(h - 1) * 0.5f : 0.0f;
@@ -849,8 +849,7 @@ float postCropVignetteWeight(const Adjustments& a, int w, int h, int x, int y) {
 
 // Global FIFO cache for post-crop vignette weight fields. Keyed by
 // (midpoint, roundness, feather, style, w, h) -- deliberately excluding amount
-// and highlights, so dragging only the amount slider reuses the cached field
-// (PHASE_3 implementation hint 2).
+// and highlights, so dragging only the amount slider reuses the cached field.
 std::mutex g_vignetteMutex;
 struct VignetteEntry {
     size_t hash;
@@ -891,7 +890,7 @@ std::vector<float> computeVignetteWeightField(const Adjustments& a, int w,
 }
 
 // Combines the enabled colour-range / luminance-range sub-mask weight fields
-// (PHASE_4) over a w*h base image into a single [0,1] field. Each per-pixel
+// over a w*h base image into a single [0,1] field. Each per-pixel
 // band weight comes from Pipeline::colorSubMaskWeight / luminanceSubMaskWeight;
 // when the modifier's smoothness is non-zero the field is softened with a
 // spatial Gaussian (sigma grows with the slider). Enabled modifiers multiply
@@ -951,9 +950,9 @@ std::vector<float> computeSubMaskField(const Mask& m, const float* base, int w,
     return out;
 }
 
-// --- Per-pixel stage passes (PHASE_2) ---------------------------------------
+// --- Per-pixel stage passes -------------------------------------------------
 //
-// The non-destructive stack is split into the PHASE_2 stages so the incremental
+// The non-destructive stack is split into stages so the incremental
 // render state can recompute only the stages affected by a parameter change.
 // Each pass mutates the F32 buffer in place and is bit-identical to the
 // corresponding section of the original single-loop applyAdjustments, so
@@ -1458,7 +1457,7 @@ void applyStageD(const Adjustments& a, float* p, size_t pixelCount,
 // Applies the spatial stages (texture, clarity, sharpening, lens distortion,
 // noise reduction, grain, vignette, masked local adjustments) to an F32 RGB
 // buffer in place. `sigmaScale` scales the absolute-pixel kernels (texture,
-// sharpening, NR, grain) by the PHASE_2 preview/full-resolution rule; the
+// sharpening, NR, grain) by the preview/full-resolution rule; the
 // buffer-relative kernels (clarity radius) are unaffected.
 void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
                                    float sigmaScale) {
@@ -1468,7 +1467,7 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
     const Pipeline::SpatialKernels kernels =
         Pipeline::spatialKernels(a, w, h, sigmaScale);
 
-    // --- AI Denoise (PHASE_12 wiring) ---------------------------------------
+    // --- AI Denoise -------------------------------------------------------------
     // Runs BEFORE the manual NR path: the user's manual luma/color NR
     // sliders continue to operate on the AI-denoised buffer, so they can
     // fine-tune residual noise / texture. aiDenoise.strength (0..100) is
@@ -1852,7 +1851,7 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
         const auto weightField = Pipeline::postCropVignetteWeightField(a, w, h);
         // Highlight Priority (style 2) protects bright pixels from the
         // darkening (an optical-vignette behaviour). Paint Overlay / Colour
-        // Priority are TODO (PHASE_3); they share the geometric weight but
+        // Priority are TODO; they share the geometric weight but
         // skip the highlight interaction.
         const bool highlightPriority = (a.vignetteStyle == 2);
         const float hiNorm = std::clamp(
@@ -1887,7 +1886,7 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
     if (!a.masks.empty())
         Pipeline::applyLocalAdjustments(a, p, w, h);
 
-    // --- Spot removal / healing brush (PHASE_5) ------------------------------
+    // --- Spot removal / healing brush -------------------------------------------
     // Runs after every spatial stage, on the linear ProPhoto F32 working buffer
     // and before the final sRGB conversion. A no-op when the adjustment carries
     // no spots, so the neutral parameter stack is untouched (bit-exact).
@@ -2102,7 +2101,7 @@ float Pipeline::colorRangeWeight(const ColorRangeMask& m, float r, float g,
     return hw * sw * lw * satFloor;
 }
 
-// --- Sub-mask weight helpers (PHASE_4) --------------------------------------
+// --- Sub-mask weight helpers ------------------------------------------------
 
 float Pipeline::colorSubMaskWeight(const Mask& m, float r, float g, float b) {
     if (!m.useColorRange)
@@ -2141,7 +2140,7 @@ float Pipeline::combinedMaskWeight(const Mask& m, int w, int h, float nx,
                                    float ny, float r, float g, float b) {
     const float geo = Pipeline::maskWeight(m, w, h, nx, ny);  // invert folded.
     if (!m.useColorRange && !m.useLuminance)
-        return std::clamp(geo, 0.0f, 1.0f);  // pre-PHASE_4 behaviour.
+        return std::clamp(geo, 0.0f, 1.0f);  // no sub-mask: geometry weight only.
     if (m.maskUnion) {
         float best = geo;
         if (m.useColorRange)
@@ -2234,7 +2233,7 @@ void Pipeline::applyLocalAdjustments(const Adjustments& a, float* p, int w,
         //     field via brushWeightField (bit-identical to maskWeight per pixel).
         //   • Colour-range masks: HSL distance evaluated per pixel in the blend
         //     loop below (no field needed).
-        //   • AiMask (PHASE_13 wiring): semantic segmentation requires pixel
+        //   • AiMask : semantic segmentation requires pixel
         //     content, so the field is generated here from the current buffer.
         //     NOT cached globally — the result depends on image pixels and
         //     caching would thrash on every preview frame, evicting geometry
@@ -2275,7 +2274,7 @@ void Pipeline::applyLocalAdjustments(const Adjustments& a, float* p, int w,
             if (!field) continue;  // defensive only: never null for valid w/h
         }
 
-        // PHASE_4: a geometry mask with colour/luminance sub-mask modifiers
+        // A geometry mask with colour/luminance sub-mask modifiers
         // builds a combined sub-mask weight field against the base snapshot
         // (the image content decides the pixel selection), then combines it
         // with the cached geometry field per pixel below.
@@ -2439,7 +2438,7 @@ void Pipeline::applyAdjustments(const Adjustments& a, float* p,
         a.splitTone.shadowSaturation < 0.5)
         return;
 
-    // The per-pixel stack (PHASE_2 stages A-D). Splitting the original single
+    // The per-pixel stack (stages A-D). Splitting the original single
     // loop into per-stage passes keeps the incremental render path bit-identical
     // to the original output: each pass reproduces exactly the arithmetic of the
     // corresponding section, and stage D clamps once at the end as the original
@@ -2659,7 +2658,7 @@ void Pipeline::applySpotRemoval(const Adjustments& a, float* p, int w, int h) {
 Pipeline::SpatialKernels Pipeline::spatialKernels(const Adjustments& a, int w,
                                                   int h, float sigmaScale) {
     SpatialKernels k;
-    // Absolute-pixel kernels are scaled by the PHASE_2 preview/full-resolution
+    // Absolute-pixel kernels are scaled by the preview/full-resolution
     // factor so a preview keeps the same *image-space* radius as the export.
     k.textureSigma = 2.5f * sigmaScale;
     k.sharpnessSigma =
@@ -3399,7 +3398,7 @@ ImageBufferPtr Pipeline::renderFullDisplay(uint64_t imageId,
     return cm_->toDisplaySRGB(*f32);
 }
 
-// --- PHASE_12/13: AI inference injection -------------------------------------
+// --- AI inference injection --------------------------------------------------
 // Static engine pointer (definition). Initialized to null at static-storage
 // init time; set once at app startup by MainWindow after the bundled models
 // have been loaded. See Pipeline.h for the threading / lifetime contract.

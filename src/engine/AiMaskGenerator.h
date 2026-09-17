@@ -1,7 +1,7 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// PHASE_13: AiMaskGenerator
+// AiMaskGenerator
 //
 // Produces per-pixel weight masks (float32, [0,1]) from an input image using
 // a pretrained segmentation model.  Three targets are supported:

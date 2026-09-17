@@ -42,7 +42,7 @@ void HistogramWidget::setImage(const QImage& image) {
         clear();
         return;
     }
-    // 非 RGB888 输入先转一次，避免直方图莫名空白 (normalize common formats).
+    // Normalize common formats so the histogram is not unexpectedly blank.
     const QImage rgb =
         image.format() == QImage::Format_RGB888
             ? image

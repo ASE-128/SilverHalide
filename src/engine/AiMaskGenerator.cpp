@@ -1,4 +1,4 @@
-// PHASE_13: AiMaskGenerator implementation.
+// AiMaskGenerator implementation.
 
 #include "engine/AiMaskGenerator.h"
 

@@ -1,9 +1,13 @@
 #pragma once
 
-// SQLite-backed catalog (a `.lrcat`-style single file). Pure C++ — no Qt.
-// Thread-safe: every public method takes a lock, so background import workers
-// can write while the UI reads. WAL journal mode keeps readers and writers
-// from blocking each other.
+/**
+ * @brief SQLite-backed catalog storing the whole image library in a single
+ *        `.lrcat`-style file. Pure C++ — no Qt.
+ *
+ * Thread-safe: every public method acquires an internal recursive mutex, so
+ * background import workers can write while the UI reads. Fallback to WAL
+ * journaling keeps readers and writers from blocking each other.
+ */
 
 #include <cstddef>
 #include <cstdint>
@@ -43,7 +47,7 @@ struct ImageRecord {
     std::string importDate; // ISO-8601 UTC
     bool isManaged = false; // true when the file lives in the managed library
 
-    // --- IPTC / metadata (M8) -------------------------------------------
+    // --- IPTC / metadata ------------------------------------------------
     std::string title;     // IPTC title
     std::string caption;   // IPTC description / caption
     std::string copyright; // IPTC rights
@@ -66,7 +70,7 @@ struct EditSnapshot {
     int64_t id = 0;
     int64_t imageId = 0;
     std::string createdAt; // ISO-8601 UTC
-    // P1-5: user-facing snapshot label. Empty for ordinary (unlabelled) undo
+    // User-facing snapshot label. Empty for ordinary (unlabelled) undo
     // history entries produced automatically by saveAdjustments(); set for a
     // named snapshot created via the snapshot panel.
     std::string name;
@@ -74,7 +78,7 @@ struct EditSnapshot {
 
 // A virtual copy / edit variant of a photo. variantId 0 is the master copy
 // that shares the physical file; higher ids are independent edit stacks that
-// share the same thumbnail and previews (PHASE_6).
+// share the same thumbnail and previews.
 struct EditVariant {
     int64_t variantId = 0;
     std::string name;
@@ -108,11 +112,21 @@ struct SmartCollection {
     std::string matchType; // "ALL" or "ANY"
 };
 
-// Evaluates a parsed smart-collection predicate against one image.
-// `predicate` follows {"match":"all"|"any","rules":[{field,op,value}]}.
-// `keywords` holds the image's keyword full paths; `hasAdjustments` reports
-// whether the image carries non-default develop edits. Pure function, kept
-// free so it can be unit-tested without a database (PHASE_9).
+/**
+ * @brief Evaluates a parsed smart-collection predicate against one image.
+ *
+ * The predicate follows {"match":"all"|"any","rules":[{field,op,value}]}.
+ * `keywords` holds the image's keyword full paths; `hasAdjustments` reports
+ * whether the image carries non-default develop edits. Pure function, kept
+ * free so it can be unit-tested without a database.
+ *
+ * @param predicate  The parsed `{"match", "rules"}` rule document.
+ * @param img        The image to test.
+ * @param keywords   The image's keyword full paths (may be empty).
+ * @param hasAdjustments Whether the image carries non-default develop edits.
+ * @return true when the predicate matches; an empty/invalid rule set never
+ *         matches.
+ */
 bool evaluatePredicate(const json::Value& predicate, const ImageRecord& img,
                        const std::vector<std::string>& keywords,
                        bool hasAdjustments);
@@ -133,18 +147,20 @@ enum class PreviewKind : int { Thumbnail = 1, FullRes = 2, Standard = 3 };
 
 class CatalogDatabase {
 public:
-    // @brief Opens a catalog stored at `dbPath` (the SQLite database file), with
-    //        externalized preview blobs kept under `previewDir`.
-    //
-    // The catalog has been a single `.lrcat` file historically; UI callers now
-    // point at a catalog *folder* and resolve the database file + a
-    // `previews.shcat/` data directory from it (Lightroom-style layout). When a
-    // caller that still holds only a `.lrcat` path opens the database, an
-    // adjacent `<stem> Previews.shcat/` directory is derived automatically.
-    //
-    // @param dbPath    Path to the SQLite catalog file.
-    // @param previewDir Directory holding externalized preview files (created
-    //                   on first use). Defaults to a sibling of dbPath.
+    /**
+     * @brief Opens a catalog stored at `dbPath` (the SQLite database file),
+     *        with externalized preview blobs kept under `previewDir`.
+     *
+     * Historically the catalog was a single `.lrcat` file; UI callers now point
+     * at a catalog *folder* and resolve the database file plus a
+     * `previews.shcat/` data directory from it (Lightroom-style layout). When a
+     * caller still holds only a `.lrcat` path, an adjacent
+     * `<stem> Previews.shcat/` directory is derived automatically.
+     *
+     * @param dbPath     Path to the SQLite catalog file.
+     * @param previewDir Directory holding externalized preview files (created
+     *                   on first use). Defaults to a sibling of dbPath.
+     */
     explicit CatalogDatabase(std::filesystem::path dbPath,
                              std::filesystem::path previewDir = {});
     ~CatalogDatabase();
@@ -152,8 +168,18 @@ public:
     CatalogDatabase(const CatalogDatabase&) = delete;
     CatalogDatabase& operator=(const CatalogDatabase&) = delete;
 
-    bool open();  // creates the schema when the file is new
-    void close();
+    /**
+     * @brief Opens the catalog connection and prepares the schema.
+     *
+     * Creates the schema and runs any pending versioned migrations when the
+     * file is new or from an older build, then finishes deferred preview
+     * externalization. Any failure closes the connection and leaves the
+     * catalog unusable so a partially migrated file is never used.
+     *
+     * @return true on success; false leaves lastError() populated.
+     */
+    bool open();
+    void close();  ///< Closes the connection and releases all cached statements.
     bool isOpen() const { return db_ != nullptr; }
     std::string lastError() const { return lastError_; }
     // Number of prepared statements currently held in the reuse cache.
@@ -162,12 +188,17 @@ public:
     size_t stmtCacheSize() const { return stmtCache_.size(); }
 
     // --- images ----------------------------------------------------------
-    // Inserts a new image. If the path already exists, the existing row id is
-    // returned instead (imports are idempotent). `fileSize` / `fileMtime` are
-    // the on-disk fingerprint (bytes and unix-last-write-time) used to detect
-    // later external modification; 0 means "unknown / keep current". On an
-    // idempotent hit the fingerprint is refreshed so re-imports never leave
-    // stale sizes behind (goal 4).
+    /**
+     * @brief Inserts a new image, or returns the existing row on a re-import.
+     *
+     * Imports are idempotent: when `filePath` already exists the existing row
+     * id is returned. `fileSize` / `fileMtime` are the on-disk fingerprint
+     * (bytes and unix-last-write-time) used to detect later external
+     * modification; 0 means "unknown / keep current". On an idempotent hit the
+     * fingerprint is refreshed so re-imports never leave stale sizes behind.
+     *
+     * @return The image row id, or -1 on failure.
+     */
     int64_t addImage(const std::string& filePath,
                      const std::string& thumbnailPath,
                      bool isManaged = false,
@@ -196,12 +227,16 @@ public:
      *  Returns false when `newFilePath` already belongs to another row (would
      *  violate the UNIQUE(file_path) constraint) or the image is absent. */
     bool updateImagePath(int64_t id, const std::string& newFilePath);
-    // Stores an embedded preview (thumbnail / full-res / standard) as an
-    // externalized file under the catalog preview directory, replacing any
-    // previous value. The API keeps the byte-vector form so existing UI callers
-    // (MainWindow / PreviewWorker) need no changes; the bytes are written to
-    // disk under `previews.shcat/<hex>/<imageId>_<kind>.shcat` and only the
-    // path column is persisted in the database (externalized BLOBs, goal 2).
+    /**
+     * @brief Stores an embedded preview (thumbnail / full-res / standard).
+     *
+     * The API keeps a byte-vector form so existing UI callers
+     * (MainWindow / PreviewWorker) need no changes; the bytes are written to
+     * disk under `previews.shcat/<hex>/<imageId>_<kind>.shcat` and only the
+     * path column is persisted in the database (externalized BLOBs).
+     *
+     * @return false when the database is closed or the write fails.
+     */
     bool storePreview(int64_t imageId, PreviewKind kind,
                       const std::vector<uint8_t>& data,
                       int width = 0, int height = 0);
@@ -220,20 +255,31 @@ public:
         int64_t imageId, PreviewKind kind) const;
 
     // --- standard preview --------------------------------------------------
-    // Stores a standard preview (linear ProPhoto RGB F32, 2048px longest
-    // edge) inside the catalog previews table, replacing any previous value.
-    // Returns false when the buffer is empty / not F32 or the write fails.
+    /**
+     * @brief Stores a standard preview.
+     *
+     * A standard preview is linear ProPhoto RGB F32 at a 2048px longest edge
+     * inside the catalog previews table, replacing any previous value.
+     *
+     * @return false when the buffer is empty / not F32 or the write fails.
+     */
     bool storeStandardPreview(int64_t imageId, const ImageBuffer& buf);
-    // Returns the stored standard preview as a linear ProPhoto RGB F32 buffer,
-    // or nullopt when absent (old catalogs simply have no Standard record) or
-    // when the stored blob is malformed. Never crashes on a corrupt record.
+    /**
+     * @brief Returns the stored standard preview as a linear ProPhoto RGB F32
+     *        buffer.
+     *
+     * @return nullopt when absent (old catalogs simply have no Standard
+     *         record) or when the stored blob is malformed. Never crashes on a
+     *         corrupt record.
+     */
     std::optional<std::shared_ptr<ImageBuffer>> getStandardPreview(
         int64_t imageId) const;
 
-    // S8b: same as getStandardPreview but also returns the native full-res
-    // dimensions carried in the v2 blob header (0 for v1 blobs). The preview
-    // pipeline uses these to scale spatial kernels correctly; the UI uses them
-    // to report the photo's native size without a RAW decode.
+    /** @brief Like getStandardPreview but also returns the native full-res
+     *         dimensions carried in the v2 blob header (0 for v1 blobs).
+     *
+     *  The preview pipeline uses these to scale spatial kernels correctly; the
+     *  UI uses them to report the photo's native size without a RAW decode. */
     struct DecodedStandardPreviewEntry {
         ImageBufferPtr buf;
         int nativeWidth = 0;
@@ -247,7 +293,7 @@ public:
     bool hasStandardPreview(int64_t imageId) const;
 
     // Removes every preview row (embedded thumb/full-res and standard) for the
-    // image. Called when the source file is modified in place (R-14) so a stale
+    // image. Called when the source file is modified in place so a stale
     // cached decode is not reused; the pixels are re-decoded on next load.
     bool invalidatePreviews(int64_t imageId);
 
@@ -262,15 +308,23 @@ public:
     std::optional<std::string> getSetting(const std::string& key) const;
 
     // --- edits (non-destructive parameter stack) -------------------------
-    // Saves the current parameter stack and records an edit-history snapshot.
-    // `variantId` selects which virtual copy's stack to write (0 = master).
+    /**
+     * @brief Saves the current parameter stack and records an edit-history
+     *        snapshot.
+     *
+     * The upsert of the live edit and the history snapshot are one atomic unit,
+     * wrapped in their own transaction so a snapshot write failure rolls back
+     * the upsert instead of leaving conflicting undo state.
+     *
+     * @param variantId Selects which virtual copy's stack to write (0 = master).
+     */
     bool saveAdjustments(int64_t imageId, const Adjustments& adjustments,
                          int variantId = 0);
     std::optional<Adjustments> loadAdjustments(int64_t imageId,
                                                int variantId = 0) const;
 
     // --- edit history (undo snapshots, newest last) -----------------------
-    // P1-5: `name` labels a snapshot. Empty names produce ordinary unlabelled
+    // `name` labels a snapshot. Empty names produce ordinary unlabelled
     // undo-history entries (the automatic saveAdjustments() path); non-empty
     // names mark user-created snapshots shown by the snapshot panel.
     int64_t saveEditSnapshot(int64_t imageId, const Adjustments& adjustments,
@@ -287,17 +341,23 @@ public:
     bool renameSnapshot(int64_t imageId, int64_t snapshotId,
                         const std::string& name, int variantId = 0);
 
-    // --- virtual copies (M6) ---------------------------------------------
-    // Creates a virtual copy of `imageId`, copying the master (variant 0)
-    // edits and edit history into a fresh variant id. Returns the new variant
-    // id, or -1 on failure.
+    // --- virtual copies ---------------------------------------------------
+    /**
+     * @brief Creates a virtual copy of `imageId`.
+     *
+     * Copies the master (variant 0) edits and edit history into a fresh
+     * variant id. All variants of one image share the same physical file and
+     * previews; only the edit stacks / history are independent.
+     *
+     * @return The new variant id, or -1 on failure.
+     */
     int createVirtualCopy(int64_t imageId);
     // Lists the virtual copies (including the master) registered for an image.
     std::vector<EditVariant> listVariants(int64_t imageId) const;
     bool renameVariant(int64_t imageId, int variantId,
                        const std::string& name);
     // Deletes a virtual copy (its edits/history/variant row). Deleting the
-    // master is refused while virtual copies exist (PHASE_6 policy).
+    // master is refused while virtual copies exist.
     bool deleteVariant(int64_t imageId, int variantId);
 
     // --- folders ---------------------------------------------------------
@@ -321,7 +381,7 @@ public:
     std::unordered_map<int64_t, std::vector<int64_t>>
     listCollectionMemberships() const;
 
-    // --- keywords & metadata (M8) -----------------------------------------
+    // --- keywords & metadata -----------------------------------------------
     // Ensures a keyword hierarchy exists for `path` ("风光/冰岛/瀑布"),
     // creating missing segments top-down. Returns the leaf keyword id.
     int64_t ensureKeyword(const std::string& path);
@@ -341,7 +401,7 @@ public:
     // LIKE search over title / caption / keyword names for the search box.
     std::vector<ImageRecord> searchImages(const std::string& text) const;
 
-    // --- smart collections (M9) -------------------------------------------
+    // --- smart collections ---------------------------------------------------
     // Creates a rule-based collection. `matchType` is "ALL" or "ANY"; the
     // matching mode is also injected into `predicateJson` so the evaluator is
     // self-contained. The member set is refreshed immediately. Returns the new
@@ -360,14 +420,14 @@ public:
     int refreshSmartCollection(int64_t id);
     std::vector<int64_t> listImagesInSmartCollection(int64_t id) const;
 
-    // --- panorama sources (M10) -------------------------------------------
+    // --- panorama sources ----------------------------------------------------
     // Records (replacing) the source images that produced a panorama. Calling
     // twice with the same set is a no-op.
     bool recordPanoramaSources(int64_t panoramaImageId,
                                const std::vector<int64_t>& sourceImageIds);
     std::vector<int64_t> listPanoramaSources(int64_t panoramaImageId) const;
 
-    // --- photo_features (PHASE_14: duplicate detection / stacking) ---------
+    // --- photo_features (duplicate detection / stacking) --------------------
     // pHash (64-bit perceptual), 64-dim embedding (raw BLOB), and an
     // automatically-bumped model_version so the deep-embedding stage can be
     // re-run when the model is updated. Duplicate scanning compares phash
@@ -399,7 +459,7 @@ public:
     std::vector<PhashCandidatePair> scanPhashCandidates(
         int maxHamming = 8) const;
     // Approximate nearest neighbours in the 64-dim embedding space via the
-    // sqlite-vec vec0 virtual table (goal 6). Returns the k closest image ids
+    // sqlite-vec vec0 virtual table. Returns the k closest image ids
     // ordered by ascending distance, or empty when the vec index is
     // unavailable (sqlite-vec not linked) or has no data.
     std::vector<int64_t> annByEmbedding(const std::vector<float>& query,
@@ -418,8 +478,8 @@ public:
 
     // --- transactions -------------------------------------------------------
     // Wrap a batch of writes on the single catalog connection. The import
-    // worker drives its batch through these (goal 5: single connection + a
-    // busy_timeout, replacing the historical dual-connection design) so a
+    // worker drives its batch through these (single connection + a
+    // busy_timeout replaces the historical dual-connection design) so a
     // cancelled import's rollback can never undo an edit the user saved while
     // the import ran concurrently.
     bool beginTransaction();
@@ -427,7 +487,7 @@ public:
     bool rollbackTransaction();
 
 private:
-    // --- versioned schema migrations (goal 1) ------------------------------
+    // --- versioned schema migrations -----------------------------------------
     // Runs every migration 1..kSchemaVersion whose ledger is not yet recorded,
     // each inside its own transaction (see migrateSqlVersion). Returns false,
     // leaving the connection unusable, when any step fails so a half-applied
@@ -447,8 +507,8 @@ private:
     void migrateEnsureColumn(const char* column, const char* decl);
     void migrateEnsureColumnOn(const char* table, const char* column,
                                const char* decl);
-    // Resumable export of legacy `previews` BLOBs to externalized files (goal
-    // 2). Idempotent: rows already exported (path column populated / _bak row
+    // Resumable export of legacy `previews` BLOBs to externalized files.
+    // Idempotent: rows already exported (path column populated / `_bak` row
     // dropped) are skipped, so an interrupted migration continues cleanly.
     bool finishPreviewExport();
 
@@ -470,8 +530,8 @@ private:
                          int64_t fileSize, int64_t fileMtime,
                          std::string* errOut);
     // Shared insert/upsert body for storePreview on a specific connection.
-    // Writes the bytes to an externalized file (goal 2) and records only the
-    // path column. `errOut` selects the error slot.
+    // Writes the bytes to an externalized file and records only the path
+    // column. `errOut` selects the error slot.
     bool storePreviewImpl(sqlite3* db, int64_t imageId, PreviewKind kind,
                           const std::vector<uint8_t>& data, int width, int height,
                           std::string* errOut);

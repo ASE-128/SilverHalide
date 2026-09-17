@@ -65,7 +65,7 @@
 #include "engine/RawDecoder.h"
 #include "engine/Xmp.h"
 #include "engine/XmpSidecar.h"
-// PHASE_12/13: AI inference wiring. ModelManager reads the bundled manifest
+// AI inference wiring. ModelManager reads the bundled manifest
 // and probes <applicationDirPath>/models (read-only, ships with the installer)
 // before the per-user cache, so an installed copy finds its bundled models
 // without a re-download. AiInferenceEngine wraps ONNX Runtime sessions
@@ -95,14 +95,14 @@
 
 namespace {
 
-// M3-3: filmstrip lazy-thumbnail requests not yet dispatched. When the queue
-// hits this bound the oldest pending request is dropped, so a huge filmstrip
-// cannot build an unbounded decode backlog.
+// Filmstrip lazy-thumbnail requests not yet dispatched. When the queue hits
+// this bound the oldest pending request is dropped, so a huge filmstrip cannot
+// build an unbounded decode backlog.
 constexpr int kMaxPendingThumbnails = 64;
-// S1: close-time worker shutdown. abort() + quit() is requested first, then
+// Close-time worker shutdown. abort() + quit() is requested first, then
 // this poll interval nudges the still-running threads until every one is gone.
 constexpr int kWorkerStopPollMs = 100;
-// S1: after requesting abort, wait this long for the workers to finish before
+// After requesting abort, wait this long for the workers to finish before
 // falling back to a blocking join (the only safe last resort -- a worker that
 // is still inside a slot holds references into MainWindow-owned members).
 constexpr int kWorkerStopWaitMs = 20000;
@@ -142,9 +142,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     decoder_.setColorManager(colorManager_);
     pipeline_ = std::make_unique<lrc::Pipeline>(colorManager_);
 
-    // PHASE_12/13: AI engine + model manager. The bundled installer ships
-    // models at <applicationDirPath>/models; ModelManager probes that
-    // directory via readPathFor() before the per-user cache, so an installed
+    // AI engine + model manager. The bundled installer ships models at
+    // <applicationDirPath>/models; ModelManager probes that directory via
+    // readPathFor() before the per-user cache, so an installed
     // copy finds its models without triggering a re-download. Each ready
     // model is registered with the engine (per-thread ONNX sessions). The
     // engine is then exposed process-wide via Pipeline::setGlobalAiEngine
@@ -162,9 +162,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     if (catalogPath.isEmpty())
         catalogPath = Application::defaultCatalogPath();
     catalogPath_ = catalogPath;
-    // 目录即库: the stored catalog location may be a folder (new layout) or a
-    // lone legacy .lrcat file. Resolve the SQLite library file and preview
-    // side-directory from it; CatalogDatabase externalizes previews to disk.
+    // The stored catalog location may be a folder (new layout) or a lone legacy
+    // .lrcat file. Resolve the SQLite library file and preview side-directory
+    // from it; CatalogDatabase externalizes previews to disk.
     catalog_ = std::make_unique<lrc::CatalogDatabase>(
         toStdPath(Application::catalogDbFile(catalogPath)),
         toStdPath(Application::catalogPreviewDir(catalogPath)));
@@ -187,9 +187,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     if (storedRoot && !storedRoot->empty()) {
         libraryRoot_ = QString::fromStdString(*storedRoot);
     } else {
-        // 目录即库: for a folder-as-library catalog the managed library lives
-        // *inside* the catalog folder; for a lone legacy .lrcat it sits next to
-        // the file (its containing directory).
+        // For a folder-as-library catalog the managed library lives *inside* the
+        // catalog folder; for a lone legacy .lrcat it sits next to the file (its
+        // containing directory).
         const QString container = QFileInfo(catalogPath).isDir()
                                       ? catalogPath
                                       : QFileInfo(catalogPath).absolutePath();
@@ -214,9 +214,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     folderTimer_->setInterval(2000);
     connect(folderTimer_, &QTimer::timeout, this, &MainWindow::watchFolderPoll);
 
-    // M2-1: histogram/status-bar updates coalesce to
-    // app::throttle::kHistogramThrottleMs. The one-shot timer guarantees the
-    // last coarse frame of a throttle window still lands. Children of `this`,
+    // Histogram/status-bar updates coalesce to app::throttle::kHistogramThrottleMs.
+    // The one-shot timer guarantees the last coarse frame of a throttle window
+    // still lands. Children of `this`,
     // so they are destroyed with the window.
     histogramThrottle_ = new QTimer(this);
     histogramThrottle_->setSingleShot(true);
@@ -226,7 +226,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     histogramClock_.start();
     lastHistogramMs_ = -10000;  // force the first update through immediately
 
-    // M2-4: adjustment persistence leaves the hot path and coalesces on
+    // Adjustment persistence leaves the hot path and coalesces on
     // app::throttle::kAdjustmentSaveDebounceMs; the timer always writes the
     // latest value (flushPendingSave is idempotent).
     saveDebounceTimer_ = new QTimer(this);
@@ -235,9 +235,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(saveDebounceTimer_, &QTimer::timeout, this,
             &MainWindow::onSaveDebounceTimeout);
 
-    // M5: a spot gesture emits spotRemovalsEdited live while a circle is dragged
-    // and once more on release, but has no separate "gesture finished" signal.
-    // A short idle debounce turns the trailing emissions into one undo entry.
+    // A spot gesture emits spotRemovalsEdited live while a circle is dragged and
+    // once more on release, but has no separate "gesture finished" signal. A
+    // short idle debounce turns the trailing emissions into one undo entry.
     spotCommitTimer_ = new QTimer(this);
     spotCommitTimer_->setSingleShot(true);
     spotCommitTimer_->setInterval(lrc::app::throttle::kSpotCommitDebounceMs);
@@ -245,28 +245,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             &MainWindow::onSpotCommitTimeout);
 
     refreshFilmstrip();
-    // Application-level key filter implements the bare-key shortcuts (M1).
+    // Application-level key filter implements the bare-key shortcuts.
     qApp->installEventFilter(this);
     statusBar()->showMessage(tr("就绪"));
 }
 
 MainWindow::~MainWindow() {
-    // M10: the backup/optimize thread must finish before catalog_ (a member) is
+    // The backup/optimize thread must finish before catalog_ (a member) is
     // destroyed -- joining here is the last chance to avoid a use-after-free.
     joinDbOpThread();
     stopWorkers();
-    // M2-4: safety net -- a debounced edit that was never flushed (e.g. the
-    // window was destroyed without a closeEvent) must still be persisted.
+    // Safety net -- a debounced edit that was never flushed (e.g. the window was
+    // destroyed without a closeEvent) must still be persisted.
     flushPendingSave();
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    // M2-4: persist any debounced adjustment before the window disappears so a
-    // 500ms-window edit is never lost on close.
+    // Persist any debounced adjustment before the window disappears so a 500ms-window
+    // edit is never lost on close.
     flushPendingSave();
-    // S1: if a background worker is still running (e.g. a long mergeHdr / big
-    // decode / import copy), defer the close until it has stopped. ~QThread
-    // aborts a still-running thread, which would tear the worker down while it
+    // If a background worker is still running (e.g. a long mergeHdr / big decode /
+    // import copy), defer the close until it has stopped. ~QThread aborts a
+    // still-running thread, which would tear the worker down while it
     // holds references into MainWindow-owned members -- a crash on exit. The
     // repeating poll timer re-issues close() once every worker has finished.
     if (!allWorkersStopped()) {
@@ -335,9 +335,9 @@ void MainWindow::buildUi() {
 
     connect(filmstrip_, &FilmstripWidget::selectionChanged, this,
             &MainWindow::onImageSelected);
-    // M6: virtual-copy rows also fire selectionChanged; onImageSelected ignores
-    // variant rows (it checks currentVariantId_) so this signal is the
-    // authoritative load for copies (variantId != 0).
+    // Virtual-copy rows also fire selectionChanged; onImageSelected ignores variant
+    // rows (it checks currentVariantId_) so this signal is the authoritative load
+    // for copies (variantId != 0).
     connect(filmstrip_, &FilmstripWidget::imageVariantSelected, this,
             &MainWindow::onImageVariantSelected);
     connect(filmstrip_, &FilmstripWidget::ratingRequested, this,
@@ -350,8 +350,8 @@ void MainWindow::buildUi() {
             &MainWindow::onCollectionToggle);
     connect(filmstrip_, &FilmstripWidget::removeRequested, this,
             &MainWindow::onRemoveImage);
-    // M3-3: the filmstrip asks for a thumbnail only when a visible row has none
-    // yet; decode it on the background thumb loader thread, never on the UI
+    // The filmstrip asks for a thumbnail only when a visible row has none yet;
+    // decode it on the background thumb loader thread, never on the UI
     // thread (writer-D contract: FilmstripWidget::thumbnailRequested(int)).
     connect(filmstrip_, &FilmstripWidget::thumbnailRequested, this,
             &MainWindow::onThumbnailRequested);
@@ -363,8 +363,8 @@ void MainWindow::buildUi() {
             &MainWindow::onAdjustmentsCommitted);
         connect(developPanel_, &DevelopPanel::maskWindowRequested, this,
             &MainWindow::openMaskWindow);
-    // M3 reserve: slider-drag gesture begin/end (currently just a flag; future
-    // work will coalesce one drag into a single undo entry).
+    // Slider-drag gesture begin/end (currently just a flag; future work will
+    // coalesce one drag into a single undo entry).
     connect(developPanel_, &DevelopPanel::editGestureStarted, this,
             &MainWindow::onEditGestureStarted);
     connect(developPanel_, &DevelopPanel::editGestureFinished, this,
@@ -391,7 +391,7 @@ void MainWindow::buildUi() {
             &MainWindow::onWhiteBalanceSampled);
     connect(viewport_, &ImageViewport::colorRangeSampled, this,
             &MainWindow::onColorRangeSampled);
-    // PHASE_4: range sub-mask samplers (colour + luminance sub-masks).
+    // Range sub-mask samplers (colour + luminance sub-masks).
     connect(developPanel_, &DevelopPanel::colorRangeSubSamplerRequested,
             viewport_, &ImageViewport::setColorRangeSamplerActive);
     connect(viewport_, &ImageViewport::colorRangeSampled, this,
@@ -408,7 +408,7 @@ void MainWindow::buildUi() {
     connect(viewport_, &ImageViewport::luminanceSampled, developPanel_,
             &DevelopPanel::setLuminanceSubReference);
 
-    // --- M5: spot removal -----------------------------------------------------
+    // --- Spot removal -------------------------------------------------------------
     // Panel tool options -> viewport (mode / radius / visualization).
     connect(developPanel_, &DevelopPanel::spotModeChanged, viewport_,
             &ImageViewport::setSpotType);
@@ -421,7 +421,7 @@ void MainWindow::buildUi() {
             &MainWindow::onSpotRemovalsEdited);
     connect(viewport_, &ImageViewport::spotToolActiveChanged, this,
             &MainWindow::onSpotToolActiveChanged);
-    // M8: metadata edits (title/caption/copyright/creator/keywords) persist.
+    // Metadata edits (title/caption/copyright/creator/keywords) persist.
     connect(developPanel_, &DevelopPanel::metadataEdited, this,
             &MainWindow::onMetadataEdited);
     // The viewport disarms the spot tool internally when a sampler takes over
@@ -460,8 +460,8 @@ void MainWindow::buildUi() {
             &MainWindow::onMaskEditFinished);
     connect(developPanel_, &DevelopPanel::maskBrushSizeChanged, viewport_,
             &ImageViewport::setMaskBrushSize);
-    // M3: brush softness follows the panel slider; also re-sent on tool arm /
-    // mask selection so the viewport matches the panel value (0..1).
+    // Brush softness follows the panel slider; also re-sent on tool arm / mask
+    // selection so the viewport matches the panel value (0..1).
     connect(developPanel_, &DevelopPanel::maskSoftnessChanged, viewport_,
             &ImageViewport::setMaskBrushSoftness);
 
@@ -489,7 +489,7 @@ void MainWindow::buildUi() {
             &MainWindow::onCollectionSelected);
     connect(navigator_, &NavigatorWidget::filtersChanged, this,
             &MainWindow::onFiltersChanged);
-    // M6/M8/M9: navigator-driven selection signals.
+    // Navigator-driven selection signals.
     connect(navigator_, &NavigatorWidget::virtualCopySelected, this,
             &MainWindow::onVirtualCopySelected);
     connect(navigator_, &NavigatorWidget::keywordSelected, this,
@@ -620,8 +620,8 @@ void MainWindow::buildMenus() {
                      QString::fromLatin1(lrc::app::kAppVersion)));
     });
 
-    // --- M1 edit/navigation shortcuts (modifier combos; bare keys live in
-    // eventFilter) ---------------------------------------------------------
+    // --- Edit/navigation shortcuts (modifier combos; bare keys live in eventFilter)
+    // -----------------------------------------------------------------------------
     auto* undoShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Z), this);
     connect(undoShortcut, &QShortcut::activated, this,
             &MainWindow::undoAdjustment);
@@ -643,10 +643,10 @@ void MainWindow::buildMenus() {
             [this]() { developPanel_->resetAll(); });
 }
 
-// --- M4: top toolbar ---------------------------------------------------------
+// --- Top toolbar -------------------------------------------------------------
 
 void MainWindow::buildToolbar() {
-    // Top toolbar (M4). Two independent exclusive button groups mirror the
+    // Top toolbar. Two independent exclusive button groups mirror the
     // viewport zoom mode and the develop panel's active mask tool. The
     // viewport/panel are the source of truth; the toolbar is a mirror that
     // stays in sync via zoomModeChanged / maskToolActivated (see the two
@@ -726,7 +726,7 @@ void MainWindow::buildToolbar() {
     connect(developPanel_, &DevelopPanel::maskToolActivated, this,
             &MainWindow::onMaskToolActivated);
 
-    // --- spot removal tool (M5) ----------------------------------------------
+    // --- Spot removal tool --------------------------------------------------------
     toolBar->addSeparator();
     spotToolAction_ = toolBar->addAction(tr("污点"));
     spotToolAction_->setCheckable(true);
@@ -742,7 +742,7 @@ void MainWindow::buildToolbar() {
         }
     });
 
-    // --- before/after compare mode group (M7) ---------------------------------
+    // --- Before/after compare mode group ------------------------------------------
     toolBar->addSeparator();
     compareButtonGroup_ = new QButtonGroup(this);
     compareButtonGroup_->setExclusive(true);
@@ -772,7 +772,7 @@ void MainWindow::buildToolbar() {
     connect(viewport_, &ImageViewport::compareModeChanged, this,
             &MainWindow::onCompareModeChanged);
 
-    // --- library search box (M8) ----------------------------------------------
+    // --- Library search box -------------------------------------------------------
     toolBar->addSeparator();
     searchEdit_ = new QLineEdit(toolBar);
     searchEdit_->setPlaceholderText(tr("搜索照片…"));
@@ -832,9 +832,9 @@ void MainWindow::onMaskToolActivated(lrc::MaskType tool) {
 }
 
 void MainWindow::newCatalog() {
-    // 目录即库: the user picks a *folder*; the SQLite library file
-    // (<folder>/<folderName>.shcat) and preview side-dir are created there on
-    // the next launch. A "catalog" is now a directory, not a lone .lrcat file.
+    // The user picks a *folder*; the SQLite library file (<folder>/<folderName>.shcat)
+    // and preview side-dir are created there on the next launch. A "catalog" is
+    // now a directory, not a lone .lrcat file.
     const QString dir = Application::defaultCatalogPath();
     const QString path = QFileDialog::getExistingDirectory(
         this, tr("新建目录"), dir);
@@ -848,9 +848,9 @@ void MainWindow::newCatalog() {
 }
 
 void MainWindow::openCatalog() {
-    // 目录即库: select a catalog *folder*. A legacy lone .lrcat file is still
-    // openable — the file dialog's filter accepts both so existing users can
-    // migrate their old single-file catalogs in place.
+    // Select a catalog *folder*. A legacy lone .lrcat file is still openable — the
+    // file dialog's filter accepts both so existing users can migrate their old
+    // single-file catalogs in place.
     const QString dir = Application::defaultCatalogPath();
     const QString path = QFileDialog::getOpenFileName(
         this, tr("打开目录"), dir,
@@ -876,7 +876,7 @@ void MainWindow::backupCatalog() {
     }
     dbOpRunning_ = true;
     statusBar()->showMessage(tr("正在备份目录…"));
-    // M10: sqlite3_backup_step copies the whole catalog synchronously; on a large
+    // sqlite3_backup_step copies the whole catalog synchronously; on a large
     // library it freezes the UI for seconds. Run it on a std::thread and hop back
     // to the UI thread with the result (queued, so a closing window simply
     // discards the update).
@@ -912,8 +912,8 @@ void MainWindow::optimizeCatalog() {
     }
     dbOpRunning_ = true;
     statusBar()->showMessage(tr("正在优化目录…"));
-    // M10: VACUUM rebuilds the catalog file and can take seconds on a large
-    // library; run it off the UI thread (same pattern as backup).
+    // VACUUM rebuilds the catalog file and can take seconds on a large library;
+    // run it off the UI thread (same pattern as backup).
     dbOpThread_ = std::thread([this]() {
         const bool ok = catalog_->optimize();
         const QString error =
@@ -962,8 +962,8 @@ void MainWindow::startWorkers() {
             &MainWindow::onPreviewReadyCoarse);
     connect(previewWorker_, &PreviewWorker::fullResReady, this,
             &MainWindow::onFullResReady);
-    // M6: 1:1 coarse intermediate frame (fast low-res feedback while a slider is
-    // dragged in 1:1). Delivered ahead of fullResReady on the same channel shape.
+    // 1:1 coarse intermediate frame (fast low-res feedback while a slider is dragged
+    // in 1:1). Delivered ahead of fullResReady on the same channel shape.
     connect(previewWorker_, &PreviewWorker::fullResReadyCoarse, this,
             &MainWindow::onFullResReadyCoarse);
     connect(previewWorker_, &PreviewWorker::imageMeta, this,
@@ -974,8 +974,8 @@ void MainWindow::startWorkers() {
             &MainWindow::onDcpProfileSelected);
     connect(viewport_, &ImageViewport::fullResRequested, this,
             &MainWindow::onFullResRequested);
-    // PHASE_2: preview-resolution rendering. The viewport reports its logical
-    // render size; the worker switches to standard-preview rendering and the
+    // Preview-resolution rendering. The viewport reports its logical render size;
+    // the worker switches to standard-preview rendering and the
     // current image is re-rendered at the new resolution when it changes.
     connect(viewport_, &ImageViewport::viewportResolutionChanged, previewWorker_,
             &PreviewWorker::setPreviewTargetSize, Qt::QueuedConnection);
@@ -990,7 +990,7 @@ void MainWindow::startWorkers() {
             });
     connect(previewWorker_, &PreviewWorker::exportFinished, this,
             &MainWindow::onExportFinished);
-    // P1-3: batch-export status (master + virtual copies, rename template).
+    // Batch-export status (master + virtual copies, rename template).
     connect(previewWorker_, &PreviewWorker::batchExportProgress, this,
             [this](int done, int total) {
                 statusBar()->showMessage(
@@ -1015,7 +1015,7 @@ void MainWindow::startWorkers() {
             &MainWindow::onHdrFinished);
     connect(previewWorker_, &PreviewWorker::convertFinished, this,
             &MainWindow::onConvertFinished);
-    // M7: before/after + reference renders.
+    // Before/after + reference renders.
     connect(previewWorker_, &PreviewWorker::beforeAfterReady, this,
             &MainWindow::onBeforeAfterReady);
     connect(previewWorker_, &PreviewWorker::referenceReady, this,
@@ -1041,8 +1041,8 @@ void MainWindow::startWorkers() {
             &MainWindow::onImportWarning);
     importThread_->start();
 
-    // M3-3: a tiny dedicated thread for lazy filmstrip-thumbnail decode. The
-    // hub QObject lives in this thread; the queued connection below runs the
+    // A tiny dedicated thread for lazy filmstrip-thumbnail decode. The hub QObject
+    // lives in this thread; the queued connection below runs the
     // decode lambda there and ships the QImage back to the UI thread via
     // invokeMethod (queued). One job is in flight at a time, so this thread
     // never competes with ImportWorker / PreviewWorker for CPU time.
@@ -1134,11 +1134,9 @@ void MainWindow::stopWorkers() {
         if (thumbLoaderThread_ && thumbLoaderThread_->isRunning())
             thumbLoaderThread_->wait(kWorkerStopPollMs);
     }
-    // 兜底:仍有 worker 未停(如 mergeHdr 等无取消点槽). 绝不能销毁运行中的 QThread
-    // 或让 worker 解引用已释放的成员 -- 阻塞直到线程自然结束是引用 MainWindow
-    // 成员的 worker 唯一安全兜底 (blocking join is the only safe last resort for
-    // reference-holding workers; detaching would leave dangling references into
-    // MainWindow-owned members).
+    // Blocking join is the only safe last resort for reference-holding workers;
+    // detaching would leave dangling references into MainWindow-owned members.
+    // Never destroy a running QThread or let a worker dereference freed members.
     if (!allWorkersStopped()) {
         qWarning("MainWindow: worker thread(s) still busy; blocking until they "
                  "finish.");
@@ -1246,13 +1244,13 @@ void MainWindow::exportImage() {
         return;
     }
     const QString baseName = QFileInfo(currentFilePath_).baseName();
-    // 导出默认落在当前照片所在目录 (default export path follows the source photo).
+    // Default export path follows the source photo's directory.
     const QString suggested =
         QFileInfo(currentFilePath_).absolutePath() + "/" +
         ExportDialog::defaultFileName(baseName, 0);
     ExportDialog dlg(suggested, this);
-    // M6: let the user export the master or any virtual copy. The selector
-    // defaults to the master; track explicit picks via variantChosen so the
+    // Let the user export the master or any virtual copy. The selector defaults to
+    // the master; track explicit picks via variantChosen so the
     // export uses what the user actually sees when they leave it alone.
     dlg.setVariants(catalog_->listVariants(currentImageId_));
     currentExportVariantId_ = currentVariantId_;
@@ -1279,8 +1277,8 @@ void MainWindow::exportImage() {
     statusBar()->showMessage(tr("正在导出（全尺寸渲染）…"));
     const ExportWatermark wm = dlg.watermark();
 
-    // P1-3: batch export of the master + every virtual copy whose outputs are
-    // named from the rename template (instead of the single-variant legacy
+    // Batch export of the master + every virtual copy whose outputs are named from
+    // the rename template (instead of the single-variant legacy
     // export). The chosen folder is the output path's parent directory; each
     // rendered filename gets a numeric suffix if the on-disk name is taken.
     if (dlg.renameEnabled()) {
@@ -1400,8 +1398,8 @@ void MainWindow::onImageSelected(int imageId) {
 }
 
 void MainWindow::loadImageState(int imageId, int variantId) {
-    // M2-4: the user is leaving the current image -- persist any debounced edit
-    // that is still inside the 500ms save window so it is never lost.
+    // The user is leaving the current image -- persist any debounced edit that is
+    // still inside the 500ms save window so it is never lost.
     flushPendingSave();
     auto it = records_.constFind(imageId);
     QString filePath;
@@ -1424,8 +1422,8 @@ void MainWindow::loadImageState(int imageId, int variantId) {
     currentFilePath_ = filePath;
     currentDcpProfilePath_.clear();
     developPanel_->setDcpProfiles({}, {});
-    // R-01: reset the worker's DCP selection on image switch so a profile chosen
-    // for the previous camera never leaks into a new photo.
+    // Reset the worker's DCP selection on image switch so a profile chosen for the
+    // previous camera never leaks into a new photo.
     const QString noDcp;
     QMetaObject::invokeMethod(previewWorker_, "setDcpProfile",
                               Qt::QueuedConnection,
@@ -1439,7 +1437,7 @@ void MainWindow::loadImageState(int imageId, int variantId) {
     undoStack_.clear();
     undoStack_.push(currentAdjustments_);
     maskStrokeActive_ = false;  // a stale stroke from the previous image must not leak
-    // M5: a stale spot gesture must not leak into the new image.
+    // A stale spot gesture must not leak into the new image.
     spotStrokeActive_ = false;
     if (spotCommitTimer_)
         spotCommitTimer_->stop();
@@ -1450,20 +1448,20 @@ void MainWindow::loadImageState(int imageId, int variantId) {
     viewport_->setSamplerActive(false);
     viewport_->setDiagnosticOverlay(QImage());
     developPanel_->setSamplerChecked(false);
-    // 换图时同样关闭点颜色吸管 (reset on image change)
+    // Reset the point-colour sampler on image change.
     viewport_->setPointColorSamplerActive(false);
     developPanel_->setColorTargetSamplerChecked(false);
-    // 换图释放全尺寸缓冲 (release full-res buffer on image switch; the worker's
-    // loadImage also releases defensively — double safety).
+    // Release the full-res buffer on image switch (the worker's loadImage also
+    // releases defensively — double safety).
     clearFullRes();
     fullResActive_ = false;
     viewport_->setNativeImageSize(QSize());
-    // M5: the loaded spot list + count feed the viewport/panel; the tool type and
-    // radius start from the panel's current values.
+    // The loaded spot list + count feed the viewport/panel; the tool type and radius
+    // start from the panel's current values.
     syncSpotStateFromAdjustments();
     viewport_->setSpotType(developPanel_->spotMode());
     viewport_->setSpotRadius(developPanel_->spotRadius());
-    // M8: populate the metadata panel + keyword chips.
+    // Populate the metadata panel + keyword chips.
     developPanel_->setMetadata(catalog_->getPhotoMetadata(imageId),
                                keywordFullPathsForImage(imageId));
     statusBar()->showMessage(
@@ -1511,8 +1509,8 @@ void MainWindow::refreshLensfunProfile(const QString& cameraMake,
     }
     const auto& profile = profiles.front();
     // Only geometric distortion is actually applied by the pipeline stage.
-    // Lensfun's physiological vignetting and chromatic aberration are NOT
-    // rendered, so the UI must not advertise them as supported (R-05).
+    // Lensfun's physiological vignetting and chromatic aberration are NOT rendered,
+    // so the UI must not advertise them as supported.
     const QString status = tr("已匹配：%1 @ %2mm f/%3（畸变 %4）")
         .arg(QString::fromStdString(profile.lensModel))
         .arg(QString::number(focalLengthMm, 'f', 1))
@@ -1569,8 +1567,8 @@ void MainWindow::refreshDcpProfiles(const QString& cameraModel) {
 
 void MainWindow::onDcpProfileSelected(const QString& path) {
     currentDcpProfilePath_ = path;
-    // R-01: forward the selection to the worker thread so the next RAW decode
-    // injects the profile's colour matrix / tone curve. The selection is stored
+    // Forward the selection to the worker thread so the next RAW decode injects the
+    // profile's colour matrix / tone curve. The selection is stored
     // on the worker; any adjustment commit up to this point is harmless because
     // the DCP only takes effect at decode time.
     QMetaObject::invokeMethod(previewWorker_, "setDcpProfile",
@@ -1586,8 +1584,8 @@ void MainWindow::onDcpProfileSelected(const QString& path) {
             developPanel_->setDcpProfileStatus(tr("已应用相机配置"));
         }
     }
-    // R-01: a DCP change requires a full re-decode (the matrix/curve is baked at
-    // decode time and the standard-preview cache is bypassed while a profile is
+    // A DCP change requires a full re-decode (the matrix/curve is baked at decode
+    // time and the standard-preview cache is bypassed while a profile is
     // active), so re-issue the preview load rather than a re-render.
     if (currentImageId_ >= 0 && !currentFilePath_.isEmpty())
         requestPreview(currentFilePath_, currentAdjustments_);
@@ -1619,8 +1617,8 @@ void MainWindow::onAdjustmentsChangedCoarse(
     if (currentImageId_ < 0)
         return;
     requestAdjustCoarse(adjustments);
-    // M6: while a slider is dragged in 1:1, feed the retained full-res buffer
-    // through the coarse path too so the full-res view gets immediate low-res
+    // While a slider is dragged in 1:1, feed the retained full-res buffer through
+    // the coarse path too so the full-res view gets immediate low-res
     // feedback; the refine path (onAdjustmentsChanged) still renders the final
     // full-res frame on pause/release via requestAdjustFullRes.
     if (fullResActive_)
@@ -1633,8 +1631,8 @@ void MainWindow::onAdjustmentsCommitted(const lrc::Adjustments& adjustments) {
     if (maskStrokeActive_) {
         // Mid-stroke geometry updates: re-render but do NOT push an undo entry.
         // The whole stroke is committed as a single step at maskEditFinished
-        // (one stroke = one undo). M11: the DB write is coalesced into the 500ms
-        // save debounce (pendingSave_ + saveDebounceTimer_) instead of being done
+        // (one stroke = one undo). The DB write is coalesced into the 500ms save
+        // debounce (pendingSave_ + saveDebounceTimer_) instead of being done
         // synchronously on every throttled commit; the stroke-end path
         // (onMaskEditFinished -> commitAdjustments) persists the final state.
         currentAdjustments_ = adjustments;
@@ -1669,13 +1667,13 @@ void MainWindow::onAutoAdjustReady(const lrc::Adjustments& adjustments) {
     statusBar()->showMessage(tr("已应用自动调整"), 2500);
 }
 
-// --- M1: undo / redo ---------------------------------------------------------
+// --- Undo / redo -------------------------------------------------------------
 
 void MainWindow::commitAdjustments(const lrc::Adjustments& adjustments) {
     // A user edit: record it, sync the panel (suppressSignals_ prevents a
     // feedback loop), request a preview, keep the 1:1 view warm. The DB write
-    // (JSON serialize + 2 sqlite statements) is debounced to 500ms (M2-4): UI +
-    // undo stay immediate, the persistence leaves the hot path. The latest
+    // (JSON serialize + 2 sqlite statements) is debounced to 500ms: UI + undo stay
+    // immediate, the persistence leaves the hot path. The latest
     // value is kept in pendingSave_ and flushed on timeout / image switch /
     // close via flushPendingSave().
     currentAdjustments_ = adjustments;
@@ -1705,15 +1703,15 @@ void MainWindow::applyAdjustmentState(const lrc::Adjustments& adjustments) {
     requestAdjust(adjustments);
     if (fullResActive_)
         requestAdjustFullRes();
-    // M2-4: undo/redo persists immediately (not debounced), so the restored
-    // state reaches the DB right away. M6: write to the active variant's stack.
+    // Undo/redo persists immediately (not debounced), so the restored state reaches
+    // the DB right away. Write to the active variant's stack.
     if (catalog_->saveAdjustments(currentImageId_, adjustments,
                                   currentVariantId_))
         statusBar()->showMessage(tr("编辑已保存"), 2500);
 }
 
 void MainWindow::flushPendingSave() {
-    // M2-4: persist the latest debounced adjustment immediately. Called from the
+    // Persist the latest debounced adjustment immediately. Called from the
     // save-debounce timeout, onImageSelected (image switch), closeEvent and the
     // destructor. Idempotent -- a no-op when nothing is pending.
     if (saveDebounceTimer_)
@@ -1726,16 +1724,16 @@ void MainWindow::flushPendingSave() {
     pendingSave_.reset();
     pendingSaveImageId_ = -1;
     pendingSaveVariantId_ = 0;
-    // M6: the pending edit belongs to the variant that was active when it was
-    // scheduled (a master or a virtual copy).
+    // The pending edit belongs to the variant that was active when it was scheduled
+    // (a master or a virtual copy).
     if (imageId >= 0 &&
         catalog_->saveAdjustments(imageId, adjustments, variantId))
         statusBar()->showMessage(tr("编辑已保存"), 2500);
 }
 
 void MainWindow::cancelPendingSave() {
-    // M2-4: discard a queued debounced save. Used by undo/redo, which persist
-    // the restored state immediately via applyAdjustmentState.
+    // Discard a queued debounced save. Used by undo/redo, which persist the
+    // restored state immediately via applyAdjustmentState.
     if (saveDebounceTimer_)
         saveDebounceTimer_->stop();
     pendingSave_.reset();
@@ -1744,15 +1742,15 @@ void MainWindow::cancelPendingSave() {
 }
 
 void MainWindow::onSaveDebounceTimeout() {
-    // M2-4: the 500ms debounce window elapsed -- persist the latest value.
+    // The 500ms debounce window elapsed -- persist the latest value.
     flushPendingSave();
 }
 
 void MainWindow::undoAdjustment() {
     if (!undoStack_.canUndo())
         return;
-    // M2-4: an undo discards the in-flight debounced save; applyAdjustmentState
-    // below persists the restored state immediately, so the DB cannot end up
+    // An undo discards the in-flight debounced save; applyAdjustmentState below
+    // persists the restored state immediately, so the DB cannot end up
     // holding an edit the user just reverted.
     cancelPendingSave();
     undoStack_.undo();
@@ -1767,13 +1765,13 @@ void MainWindow::undoAdjustment() {
 void MainWindow::redoAdjustment() {
     if (!undoStack_.canRedo())
         return;
-    // M2-4: same as undo -- the redone state is persisted immediately below.
+    // Same as undo -- the redone state is persisted immediately below.
     cancelPendingSave();
     undoStack_.redo();
     applyAdjustmentState(undoStack_.top());
 }
 
-// --- M1: masked stroke undo (one stroke = one undo step) ---------------------
+// --- Masked stroke undo (one stroke = one undo step) -------------------------
 
 void MainWindow::onMaskGeometryChanged(const lrc::Mask& mask) {
     // First geometry change of a stroke/gesture: snapshot the pre-stroke state
@@ -1792,7 +1790,7 @@ void MainWindow::onMaskEditFinished() {
         commitAdjustments(currentAdjustments_);
 }
 
-// --- M1: white-balance eyedropper (W) ----------------------------------------
+// --- White-balance eyedropper (W) --------------------------------------------
 
 void MainWindow::onWhiteBalanceSampled(const QColor& color) {
     if (currentImageId_ < 0)
@@ -1807,7 +1805,7 @@ void MainWindow::onWhiteBalanceSampled(const QColor& color) {
         std::clamp(adj.temperature + est.temperature, -100.0, 100.0);
     adj.tint = std::clamp(adj.tint + est.tint, -100.0, 100.0);
     commitAdjustments(adj);
-    // 吸管保持激活,可连续取多个点 (the eyedropper stays armed for repeated samples).
+    // The eyedropper stays armed for repeated samples.
     statusBar()->showMessage(
         tr("白平衡取样: 色温 %1, 色调 %2")
             .arg(adj.temperature, 0, 'f', 1)
@@ -1815,7 +1813,7 @@ void MainWindow::onWhiteBalanceSampled(const QColor& color) {
         4000);
 }
 
-// --- M3: colour-range mask eyedropper (C) ------------------------------------
+// --- Colour-range mask eyedropper (C) ----------------------------------------
 
 void MainWindow::onColorRangeSampled(const QColor& color) {
     if (currentImageId_ < 0)
@@ -1846,24 +1844,24 @@ void MainWindow::onColorRangeSampled(const QColor& color) {
         4000);
 }
 
-// --- M1: slider-drag gesture (M3 reserve) ------------------------------------
+// --- Slider-drag gesture --------------------------------------------------
 
 void MainWindow::onEditGestureStarted() {
-    // M3 placeholder: a slider-drag gesture started. Reserved for coalescing a
-    // whole drag into one undo entry; commitAdjustments already fires once on
+    // A slider-drag gesture started. Reserved for coalescing a whole drag into one
+    // undo entry; commitAdjustments already fires once on
     // release, so there is no behaviour change yet.
     gestureActive_ = true;
 }
 
 void MainWindow::onEditGestureFinished() { gestureActive_ = false; }
 
-// --- M1: navigation + side-panel helpers -------------------------------------
+// --- Navigation + side-panel helpers ----------------------------------------
 
 void MainWindow::navigateImages(int delta) {
     if (entries_.isEmpty())
         return;
-    // M6: locate the exact current row (a master and its virtual copies share
-    // the imageId, so match on the variant too).
+    // Locate the exact current row (a master and its virtual copies share the
+    // imageId, so match on the variant too).
     int index = -1;
     for (int i = 0; i < entries_.size(); ++i) {
         if (entries_[i].imageId == currentImageId_ &&
@@ -1896,7 +1894,7 @@ void MainWindow::setSidePanelsVisible(bool visible) {
         developScroll_->setVisible(visible);
 }
 
-// PHASE_12/13: AI engine bootstrap. The body is #ifdef-guarded so a
+// AI engine bootstrap. The body is #ifdef-guarded so a
 // LRC_ENABLE_AI=OFF GUI build links cleanly (no ONNX Runtime symbols). When
 // AI is enabled but the bundled manifest is missing (dev build without the
 // installer stage), this logs a single warning and leaves aiEngine_ null;
@@ -1962,7 +1960,7 @@ void MainWindow::initializeAiEngine() {
 #endif
 }
 
-// --- M1: global bare-key shortcuts -------------------------------------------
+// --- Global bare-key shortcuts ------------------------------------------------
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     if (event->type() == QEvent::KeyPress) {
@@ -2062,7 +2060,7 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
                 developPanel_->selectMaskTool(lrc::MaskType::RadialGradient);
             return true;
         case Qt::Key_Backslash:
-            // M7: Lightroom's '\' toggles the before/after single-view.
+            // Lightroom's '\' toggles the before/after single-view.
             viewport_->toggleBeforeAfter();
             return true;
         case Qt::Key_O:
@@ -2071,7 +2069,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         case Qt::Key_W:
             viewport_->setWhiteBalanceSamplerActive(
                 !viewport_->whiteBalanceSamplerActive());
-            // W 激活白平衡吸管时关闭面板上的其他吸管勾选 (keep panel checkboxes in sync)
+            // When W activates the white-balance sampler, uncheck the panel's other
+            // sampler checkboxes.
             if (viewport_->whiteBalanceSamplerActive())
                 disarmSpotToolButton();
             developPanel_->setSamplerChecked(false);
@@ -2080,7 +2079,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         case Qt::Key_C:
             viewport_->setColorRangeSamplerActive(
                 !viewport_->colorRangeSamplerActive());
-            // 与其它吸管互斥: 开启颜色范围吸管时关闭白平衡/点选/点颜色 (mutual exclusion)
+            // Mutual exclusion: turning on the colour-range sampler disables white balance,
+            // point-colour and HSL samplers.
             if (viewport_->colorRangeSamplerActive())
                 disarmSpotToolButton();
             viewport_->setWhiteBalanceSamplerActive(false);
@@ -2104,7 +2104,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 
 void MainWindow::onColorSamplerRequested(bool active) {
     viewport_->setSamplerActive(active);
-    // 与点颜色吸管互斥：开启 HSL 点选吸管时关闭点颜色吸管 (mutual exclusion)
+    // Mutual exclusion: arming the HSL point sampler disables the point-colour
+    // sampler.
     viewport_->setPointColorSamplerActive(false);
     developPanel_->setColorTargetSamplerChecked(false);
     if (active)
@@ -2119,7 +2120,8 @@ void MainWindow::onColorSamplerRequested(bool active) {
 
 void MainWindow::onColorTargetSamplerRequested(bool active) {
     if (active) {
-        // 与现有 HSL 点选吸管互斥：先关闭 HSL 吸管 (arm point-colour sampler)
+        // When the point-colour sampler takes over an existing HSL pick, disarm the
+        // HSL sampler first.
         viewport_->setSamplerActive(false);
         developPanel_->setSamplerChecked(false);
     }
@@ -2287,8 +2289,8 @@ void MainWindow::onFullResReady(qint64 imageId,
                                 const lrc::ImageBufferPtr& rgbU8) {
     if (imageId != currentImageId_)
         return;
-    // 已退出 1:1：丢弃在途的全尺寸结果 (drop stale full-res if 1:1 was exited
-    // while the decode was in flight).
+    // Drop a stale full-res result if 1:1 was exited while the decode was in
+    // flight.
     if (!fullResActive_)
         return;
     if (!rgbU8 || rgbU8->format() != lrc::PixelFormat::U8 || rgbU8->empty())
@@ -2296,12 +2298,13 @@ void MainWindow::onFullResReady(qint64 imageId,
     const QImage image = toQImage(rgbU8);
     if (image.isNull())
         return;
-    // 兜底：imageMeta 未到/缺失时用全尺寸缓冲自身尺寸 (fallback native size).
+    // Fallback: when the imageMeta has not arrived, use the full-res buffer's own
+    // size as the native size.
     if (viewport_->nativeSize().isEmpty())
         viewport_->setNativeImageSize(image.size());
     viewport_->setImageKeepView(image);
-    // M2-1: full-res is a final frame -- histogram/status refresh immediately
-    // (not throttled).
+    // Full-res is a final frame -- histogram/status refresh immediately (not
+    // throttled).
     updateHistogramNow(image);
 }
 
@@ -2350,7 +2353,7 @@ void MainWindow::onPreviewReadyCoarse(qint64 imageId,
     // so it stays live even in 1:1 (fullResActive_) for immediate drag
     // feedback. setImageKeepView swaps it in without resetting the zoom/anchor.
     // The viewport update is immediate (never throttled); only the histogram
-    // and status bar coalesce to ~150ms (M2-1).
+    // and status bar coalesce to ~150ms.
     viewport_->setImageKeepView(image);
     requestHistogramUpdate(image);
 }
@@ -2367,8 +2370,8 @@ void MainWindow::updateHistogramAndStatus(const QImage& image) {
 }
 
 void MainWindow::updateHistogramNow(const QImage& image) {
-    // M2-1: immediate histogram + status-bar refresh (final/refine frames).
-    // Cancels any queued throttled update so a stale flush cannot double-run
+    // Immediate histogram + status-bar refresh (final/refine frames). Cancels any
+    // queued throttled update so a stale flush cannot double-run
     // right after a final frame.
     if (histogramThrottle_)
         histogramThrottle_->stop();
@@ -2378,8 +2381,8 @@ void MainWindow::updateHistogramNow(const QImage& image) {
 }
 
 void MainWindow::requestHistogramUpdate(const QImage& image) {
-    // M2-1: coarse frames (up to ~33Hz) coalesce to ~150ms for the histogram
-    // and status bar. The viewport update is NOT throttled -- the caller
+    // Coarse frames (up to ~33Hz) coalesce to ~150ms for the histogram and status
+    // bar. The viewport update is NOT throttled -- the caller
     // already applied it. A one-shot timer guarantees the last frame of a
     // throttle window still gets its histogram/status update.
     pendingHistogramImage_ = image;
@@ -2395,8 +2398,8 @@ void MainWindow::requestHistogramUpdate(const QImage& image) {
 }
 
 void MainWindow::flushHistogramThrottle() {
-    // M2-1: trailing edge of a throttle window -- the last queued coarse frame
-    // lands here, so the UI never freezes on stale histogram data.
+    // Trailing edge of a throttle window -- the last queued coarse frame lands
+    // here, so the UI never freezes on stale histogram data.
     if (!histogramPending_ || pendingHistogramImage_.isNull())
         return;
     histogramPending_ = false;
@@ -2405,8 +2408,8 @@ void MainWindow::flushHistogramThrottle() {
 }
 
 void MainWindow::onThumbReadyImage(int imageId, const QImage& thumb) {
-    // M2-3: the thumbnail was decoded on the import worker thread; just apply
-    // it. No synchronous disk decode on the main thread.
+    // The thumbnail was decoded on the import worker thread; just apply it. No
+    // synchronous disk decode on the main thread.
     if (records_.contains(imageId))
         records_[imageId].thumbnailPath.clear();
     if (!thumb.isNull())
@@ -2436,8 +2439,8 @@ void MainWindow::onThumbReady(int imageId, const QString& thumbnailPath) {
 }
 
 void MainWindow::onThumbnailRequested(int imageId) {
-    // M3-3: the filmstrip scrolled a row into view that has no thumbnail yet.
-    // Enqueue a background decode; dedupe so the same image is never requested
+    // The filmstrip scrolled a row into view that has no thumbnail yet. Enqueue a
+    // background decode; dedupe so the same image is never requested
     // twice while queued or in flight.
     if (queuedThumbnails_.contains(imageId))
         return;
@@ -2452,8 +2455,8 @@ void MainWindow::onThumbnailRequested(int imageId) {
 }
 
 void MainWindow::maybeDispatchThumbDecode() {
-    // M3-3: at most one decode is in flight on the thumb loader thread. Read
-    // the thumbnail path from records_ here (main thread) so the worker never
+    // At most one decode is in flight on the thumb loader thread. Read the
+    // thumbnail path from records_ here (main thread) so the worker never
     // touches UI-owned state.
     if (thumbDecodeBusy_ || pendingThumbnails_.isEmpty())
         return;
@@ -2467,8 +2470,8 @@ void MainWindow::maybeDispatchThumbDecode() {
 }
 
 void MainWindow::onThumbnailDecoded(int imageId) {
-    // M3-3: the background decode finished (success or failure); the image is
-    // no longer queued, so a later re-request may enqueue it again.
+    // The background decode finished (success or failure); the image is no longer
+    // queued, so a later re-request may enqueue it again.
     queuedThumbnails_.remove(imageId);
     thumbDecodeBusy_ = false;
     maybeDispatchThumbDecode();
@@ -2722,8 +2725,8 @@ void MainWindow::onSetLabelColor(int imageId, int color) {
         }
     }
     filmstrip_->setLabelColor(imageId, color);
-    // M3-2: a label change only updates this tile; no full filmstrip rebuild.
-    // 0 = 清除 (clear), 1..7 = colour labels.
+    // A label change only updates this tile; no full filmstrip rebuild. 0 = 清除
+    // (clear), 1..7 = colour labels.
     static const char* kLabelNames[8] = {"清除", "红", "橙", "黄",
                                          "绿", "青", "蓝", "紫"};
     const int ci = (color >= 0 && color <= 7) ? color : 0;
@@ -2736,8 +2739,8 @@ void MainWindow::onCollectionToggle(int imageId, int collectionId, bool add) {
                         : catalog_->removeFromCollection(collectionId, imageId);
     if (!ok)
         return;
-    // M3-2: incremental membership update -- only re-badge this tile instead of
-    // a full filmstrip rebuild. records_ has no collection field, so keep the
+    // Incremental membership update -- only re-badge this tile instead of a full
+    // filmstrip rebuild. records_ has no collection field, so keep the
     // membership list in the matching entry in sync for the badge source.
     bool inCollection = false;
     for (auto& e : entries_) {
@@ -2793,8 +2796,8 @@ void MainWindow::onRemoveImage(int imageId) {
                             : tr("从目录移除「%1」？").arg(name);
     if (QMessageBox::question(this, tr("移除"), msg) != QMessageBox::Yes)
         return;
-    // M12: capture the adjacent photo (prefer the next, else the previous) from
-    // the visible filmstrip list BEFORE the removal rebuilds entries_/records_.
+    // Capture the adjacent photo (prefer the next, else the previous) from the
+    // visible filmstrip list BEFORE the removal rebuilds entries_/records_.
     int neighborId = -1;
     for (int i = 0; i < entries_.size(); ++i) {
         if (entries_[i].imageId != imageId)
@@ -2813,8 +2816,8 @@ void MainWindow::onRemoveImage(int imageId) {
         viewport_->setImage(QImage());
     }
     refreshFilmstrip();
-    // M12: after removing the current image, select the adjacent one so the view
-    // never falls blank. refreshFilmstrip's re-select logic only restores the
+    // After removing the current image, select the adjacent one so the view never
+    // falls blank. refreshFilmstrip's re-select logic only restores the
     // highlight for a surviving current image, so we drive the load here.
     if (removingCurrent && neighborId >= 0 && records_.contains(neighborId)) {
         const QSignalBlocker blocker(filmstrip_);
@@ -2873,8 +2876,8 @@ void MainWindow::refreshFilmstrip() {
             collectionMembers.insert(static_cast<int>(rec.id));
     }
 
-    // M8/M9: keyword / smart-collection / search filters (each replaces the
-    // others via clearImageFilters() in the selection handlers, but they can
+    // Keyword / smart-collection / search filters (each replaces the others via
+    // clearImageFilters() in the selection handlers, but they can
     // stack with the rating/flag/label combos and the folder filter below).
     QSet<int> keywordMembers;
     if (filterKeywordId_ >= 0) {
@@ -2931,8 +2934,8 @@ void MainWindow::refreshFilmstrip() {
             !searchMembers.contains(static_cast<int>(rec.id)))
             continue;
         records_.insert(static_cast<int>(rec.id), rec);
-        // M3-3: the thumbnail is left empty on purpose -- the filmstrip stores
-        // metadata and emits thumbnailRequested for visible rows, and the
+        // The thumbnail is left empty on purpose -- the filmstrip stores metadata and
+        // emits thumbnailRequested for visible rows, and the
         // background thumb loader decodes and fills the tiles asynchronously.
         FilmstripWidget::Entry entry{
             static_cast<int>(rec.id), filePath,
@@ -2942,8 +2945,8 @@ void MainWindow::refreshFilmstrip() {
         entries_.append(entry);
         if (rec.rating > 0)
             ++rated;
-        // M6: append one row per virtual copy right after its master. The copy
-        // inherits the master's metadata/thumbnail/collections and only differs
+        // Append one row per virtual copy right after its master. The copy inherits
+        // the master's metadata/thumbnail/collections and only differs
         // by variantId + variantName (independent edit stack).
         for (const auto& variant : catalog_->listVariants(rec.id)) {
             if (variant.isMaster)
@@ -2957,11 +2960,11 @@ void MainWindow::refreshFilmstrip() {
     filmstrip_->setImages(entries_);
     navigator_->setStatistics(entries_.size(), rated);
     navigator_->setFolders(toQStringList(catalog_->listFolders()));
-    // M8/M9: keep the navigator keyword counts and smart-collection list fresh.
+    // Keep the navigator keyword counts and smart-collection list fresh.
     navigator_->setKeywords(catalog_->listKeywords());
     navigator_->setSmartCollections(catalog_->listSmartCollections());
-    // M6: rebuild the navigator virtual-copies group only when the library's
-    // image set changed (import/remove) or after an explicit invalidation, so
+    // Rebuild the navigator virtual-copies group only when the library's image set
+    // changed (import/remove) or after an explicit invalidation, so
     // per-refresh N+1 variant queries stay bounded.
     if (!virtualCopiesBuilt_ ||
         static_cast<int>(images.size()) != lastVcImageCount_) {
@@ -2973,8 +2976,8 @@ void MainWindow::refreshFilmstrip() {
     // Re-select the current image. When it survived the refresh we only restore
     // the visual highlight — the viewport/panel/undo state already reflect it,
     // so letting selectionChanged replay through onImageSelected would clear the
-    // undo history and force a full RAW decode for no benefit. M6: restore the
-    // exact variant row (a master and its copies share the imageId).
+    // undo history and force a full RAW decode for no benefit. Restore the exact
+    // variant row (a master and its copies share the imageId).
     if (currentImageId_ >= 0 && records_.contains(currentImageId_)) {
         const QSignalBlocker blocker(filmstrip_);
         if (currentVariantId_ != 0)
@@ -2993,7 +2996,7 @@ void MainWindow::refreshFilmstrip() {
         currentFilePath_.clear();
         viewport_->setImage(QImage());
         developPanel_->setAdjustments(lrc::Adjustments::defaults());
-        // M8: clear the metadata/keyword panel so no stale photo's info lingers.
+        // Clear the metadata/keyword panel so no stale photo's info lingers.
         developPanel_->setMetadata(lrc::PhotoMetadata{},
                                    std::vector<std::string>{});
         undoStack_.clear();
@@ -3037,7 +3040,7 @@ void MainWindow::setFilterFolder(const QString& folder) {
     filterFolder_ = folder;
 }
 
-// --- M5-10 integration implementation ---------------------------------------
+// --- Integration implementation ------------------------------------------------
 
 void MainWindow::disarmSpotToolButton() {
     if (spotToolAction_) {

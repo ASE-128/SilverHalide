@@ -1,8 +1,10 @@
 #pragma once
 
-// Qt meta-type declarations for the engine types passed across queued
-// signal/slot connections (worker threads -> UI thread). Register them in
-// main() with qRegisterMetaType.
+/**
+ * @brief Qt meta-type declarations for the engine types passed across queued
+ *        signal/slot connections (worker threads -> UI thread). Register them in
+ *        main() with qRegisterMetaType.
+ */
 
 #include <QMetaType>
 

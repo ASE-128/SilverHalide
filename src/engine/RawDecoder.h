@@ -1,17 +1,19 @@
 #pragma once
 
-// Unified image decoder for the non-destructive pipeline. RAW camera files
-// (ARW/SR2/DNG/...) are decoded by libraw; ordinary display-ready files
-// (JPEG/PNG/TIFF) are decoded by stb_image and converted into the same linear
-// ProPhoto working space, so every format can be imported, edited and exported
-// identically. Each decode creates its own LibRaw instance; instances are
-// never shared between threads.
-//
-// The decoder produces *linear* ProPhoto RGB (D50) at 16-bit precision for RAW
-// files (libraw's output_color=4 linear ProPhoto, re-anchored to the D50
-// working space by the color manager) and 32-bit float precision for
-// JPEG/PNG/TIFF (converted from sRGB by the color manager). This keeps the
-// non-destructive pipeline in a wide working space.
+/**
+ * @brief Unified image decoder for the non-destructive pipeline.
+ *
+ * RAW camera files (ARW/SR2/DNG/...) are decoded by libraw; ordinary
+ * display-ready files (JPEG/PNG/TIFF) are decoded by stb_image and converted
+ * into the same linear ProPhoto working space, so every format can be imported,
+ * edited and exported identically. Each decode creates its own LibRaw instance;
+ * instances are never shared between threads.
+ *
+ * The decoder produces *linear* ProPhoto RGB (D50) at 16-bit precision for RAW
+ * files (libraw's output_color=4 linear ProPhoto, re-anchored to the D50 working
+ * space) and 32-bit float precision for JPEG/PNG/TIFF (converted from sRGB).
+ * This keeps the pipeline in a wide working space.
+ */
 
 #include <array>
 #include <cstdint>
@@ -65,7 +67,7 @@ struct DecodedImage {
     // non-RAW conversion; 0 when the source had no ICC (sRGB default) or for
     // RAW files. Lets a standard-preview cache record which source colour space
     // produced its pixels, and invalidate a cached preview if the source colour
-    // disposition changes (R-10).
+    // disposition changes.
     uint32_t sourceColorHash = 0;
 };
 
@@ -74,39 +76,40 @@ public:
     RawDecoder() = default;
     ~RawDecoder() = default;
 
-    // Supplies the color manager. The GUI calls this once at startup: RAW
-    // decodes use it to re-anchor libraw's ProPhoto into the D50 working space,
-    // and JPEG/PNG/TIFF decodes use it to convert sRGB into linear ProPhoto.
+    /** @brief Supplies the color manager. The GUI calls this once at startup:
+     *  RAW decodes use it to re-anchor libraw's ProPhoto into the D50 working
+     *  space, and JPEG/PNG/TIFF decodes use it to convert sRGB into linear
+     *  ProPhoto. The manager outlives this decoder and is never mutated here. */
     void setColorManager(std::shared_ptr<const ColorManager> cm);
 
-    // Returns a non-empty linear ProPhoto RGB buffer on success. Dispatches
-    // on the file extension: RAW/DNG go through libraw, everything else
-    // (JPEG/PNG/TIFF) through stb_image + the color manager.
-    //
-    // `dcp` is an optional camera colour profile. When non-null and the path is
-    // a RAW file, its ColorMatrix1 replaces libraw's built-in camera matrix in
-    // the decode (so a user-selected DCP actually changes the rendered colour,
-    // see R-01), and its tone curve is applied afterwards. It is ignored for
-    // non-RAW files. Ownership stays with the caller for the duration of the
-    // call.
+    /** @brief Decodes a file into a non-empty linear ProPhoto RGB buffer.
+     *  Dispatches on the file extension: RAW/DNG go through libraw, everything
+     *  else (JPEG/PNG/TIFF) through stb_image + the color manager.
+     *  @param dcp Optional camera colour profile. When non-null and the path is
+     *             a RAW file, its ColorMatrix1 replaces libraw's built-in camera
+     *             matrix so a user-selected DCP actually changes the rendered
+     *             colour, and its tone curve is applied afterwards. Ignored for
+     *             non-RAW files. Ownership stays with the caller for the call.
+     *  @return nullopt on decode failure. */
     std::optional<DecodedImage> decode(const std::filesystem::path& path,
                                        const DecodeParams& params,
                                        const DcpProfile* dcp = nullptr) const;
 
-    // Lightweight metadata-only read for RAW paths: opens the file with libraw
-    // and returns the camera / lens / exposure metadata WITHOUT demosaicing or
-    // colour conversion (no unpack/process). This lets UI paths that serve a
-    // cached standard preview still refresh DCP/Lensfun auto-matching, which
-    // today only happens on a real RAW decode. Returns nullopt for non-RAW
-    // paths or when the file cannot be opened.
+    /** @brief Lightweight metadata-only read for RAW paths: opens the file with
+     *  libraw and returns the camera / lens / exposure metadata WITHOUT
+     *  demosaicing or colour conversion (no unpack/process). Lets UI paths that
+     *  serve a cached standard preview still refresh DCP/Lensfun auto-matching.
+     *  @return nullopt for non-RAW paths or when the file cannot be opened. */
     std::optional<RawMeta> readMeta(const std::filesystem::path& path) const;
 
-    // Extracts the embedded JPEG preview as raw bytes, if present and large
-    // enough. Used by the thumbnail cache for fast browsing (RAW files only).
+    /** @brief Extracts the embedded JPEG preview as raw bytes, if present and
+     *  large enough. Used by the thumbnail cache for fast browsing (RAW only).
+     *  @return nullopt when no usable embedded thumbnail exists. */
     std::optional<std::vector<uint8_t>> extractEmbeddedThumbnail(
         const std::filesystem::path& path) const;
 
-    // True when `path` is a format the app can import (RAW or JPEG/PNG/TIFF).
+    /** @brief True when `path` is a format the app can import (RAW or
+     *  JPEG/PNG/TIFF). */
     static bool isSupported(const std::filesystem::path& path);
 
 private:

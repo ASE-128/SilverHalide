@@ -1,4 +1,4 @@
-// PHASE_11: ModelManager implementation.
+// ModelManager implementation.
 //
 // The pure-C++ bits (manifest parsing, cache paths, SHA-256 checksum) are
 // always available.  Only downloadModel() optionally pulls in QtNetwork.

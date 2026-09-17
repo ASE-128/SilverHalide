@@ -1,6 +1,6 @@
-// PHASE_12: AiDenoiseProcessor implementation.
+// AiDenoiseProcessor implementation.
 //
-// Uses the PHASE_11 AiInferenceEngine for real runs; a compiled-in bilateral
+// Uses the AiInferenceEngine for real runs; a compiled-in bilateral
 // filter provides identical semantics in builds without ONNX Runtime so
 // denoise() always returns something useful.
 

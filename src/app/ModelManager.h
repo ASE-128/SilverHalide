@@ -1,27 +1,27 @@
 #pragma once
 
-// ---------------------------------------------------------------------------
-// PHASE_11: ModelManager
-//
-// Responsibilities (per spec):
-//   • Parse resources/models/manifest.json into an in-memory registry.
-//   • Determine the OS-appropriate cache directory for downloaded .onnx files:
-//         Windows: %LOCALAPPDATA%/Silver Halide/models/
-//         Posix:   ~/.local/share/SilverHalide/models/  (fallback ~/.silverhalide)
-//   • Validate a model's SHA256 checksum against the manifest.
-//   • Trigger Qt-network downloads (QNetworkAccessManager) with progress
-//     reporting, including optional mirror fallbacks.  Download is also
-//     available as a pure-C++ stub (the spec explicitly allows Qt here, and
-//     we keep a no-Qt fallback path so the catalog layer tests still work).
-//   • Manage version upgrades: bumping a manifest entry's version triggers
-//     an automatic redownload.
-//
-// ENGINE / LAYERING RULES:
-//   • This header intentionally avoids including Qt types directly — the
-//     manifest-query / SHA256 / path helpers are pure C++ and safe to call
-//     from engine/catalog threads.  Only ModelManager::downloadModel() (the
-//     actual network call) is implemented in the .cpp guarded by Qt.
-// ---------------------------------------------------------------------------
+/**
+ * @brief Manages ONNX model assets: manifest registry, download, and cache.
+ *
+ * Responsibilities:
+ *   • Parse resources/models/manifest.json into an in-memory registry.
+ *   • Determine the OS-appropriate cache directory for downloaded .onnx files:
+ *         Windows: %LOCALAPPDATA%/Silver Halide/models/
+ *         Posix:   ~/.local/share/SilverHalide/models/  (fallback ~/.silverhalide)
+ *   • Validate a model's SHA256 checksum against the manifest.
+ *   • Trigger Qt-network downloads (QNetworkAccessManager) with progress
+ *     reporting, including optional mirror fallbacks. Download is also
+ *     available as a pure-C++ stub (the no-Qt fallback path so the catalog
+ *     layer tests still work).
+ *   • Manage version upgrades: bumping a manifest entry's version triggers an
+ *     automatic redownload.
+ *
+ * ENGINE / LAYERING RULES:
+ *   • This header intentionally avoids including Qt types directly — the
+ *     manifest-query / SHA256 / path helpers are pure C++ and safe to call
+ *     from engine/catalog threads. Only ModelManager::downloadModel() (the
+ *     actual network call) is implemented in the .cpp guarded by Qt.
+ */
 
 #include <cstdint>
 #include <filesystem>
@@ -33,6 +33,7 @@
 
 namespace lrc {
 
+/** @brief One model entry declared in the manifest (resources/models/manifest.json). */
 struct ModelManifestEntry {
     std::string id;
     std::string name;

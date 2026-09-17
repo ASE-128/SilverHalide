@@ -40,7 +40,7 @@ constexpr int kRawThumbsMax = 128;
 // collectionIds list later.
 constexpr int kCollectionSentinel = -1;
 
-// M6 / PHASE_6 virtual-copy badge geometry: a light "page" with a dog-eared
+// Virtual-copy badge geometry: a light "page" with a dog-eared
 // bottom-right corner, drawn at the thumbnail's bottom-right corner. When a
 // colour label is present on the same tile the label square is lifted above it
 // (see makeBadgedIcon) so the two bottom-right badges never overlap.
@@ -61,8 +61,8 @@ int g_badgeCacheInserts = 0;
 // The cache key covers every input that changes the composite appearance:
 // imageId, thumbnail version (rotated by setThumbnail so a changed base image
 // never reuses a stale composite), rating, flag, colour label, collection
-// membership and -- since M6 -- the variant id. A virtual copy shares the
-// imageId of its master, so without variantId the two tiles would collide in
+// membership and -- for virtual copies -- the variant id. A virtual copy shares
+// the imageId of its master, so without variantId the two tiles would collide in
 // the cache. The "filmstrip_badge_" prefix keeps these keys from colliding with
 // any other QPixmapCache user in the process.
 QString badgeCacheKey(int imageId, int thumbVersion, int rating, int flag,
@@ -101,20 +101,20 @@ QString rawCacheKey(int imageId, int version) {
 // Lightroom colour-label palette, indexed 1..7 (0 = none).
 QColor labelColorRgb(int labelColor) {
     switch (labelColor) {
-        case 1: return QColor(230, 80, 80);   // 红 red
-        case 2: return QColor(235, 150, 60);  // 橙 orange
-        case 3: return QColor(230, 210, 60);  // 黄 yellow
-        case 4: return QColor(110, 200, 90);  // 绿 green
-        case 5: return QColor(80, 190, 190);  // 青 cyan
-        case 6: return QColor(80, 140, 230);  // 蓝 blue
-        case 7: return QColor(170, 100, 210); // 紫 purple
+        case 1: return QColor(230, 80, 80);   // red
+        case 2: return QColor(235, 150, 60);  // orange
+        case 3: return QColor(230, 210, 60);  // yellow
+        case 4: return QColor(110, 200, 90);  // green
+        case 5: return QColor(80, 190, 190);  // cyan
+        case 6: return QColor(80, 140, 230);  // blue
+        case 7: return QColor(170, 100, 210); // purple
         default: return QColor();
     }
 }
 
 const char* kLabelColorNames[7] = {"红", "橙", "黄", "绿", "青", "蓝", "紫"};
 
-// Draws the M6 / PHASE_6 virtual-copy badge: a light "page" with a dog-eared
+// Draws the virtual-copy badge: a light "page" with a dog-eared
 // (folded-back) bottom-right corner, carrying the variant number. It sits at
 // the thumbnail's bottom-right corner; makeBadgedIcon lifts the colour-label
 // square above it so the two bottom-right badges never overlap.
@@ -252,9 +252,9 @@ FilmstripWidget::FilmstripWidget(QWidget* parent) : QWidget(parent) {
     connect(list_, &QListWidget::currentRowChanged, this,
             &FilmstripWidget::onCurrentChanged);
 
-    // M3-3: scroll / layout changes recompute the visible window and request
-    // thumbnails for newly visible items (dedupe happens in requestThumbnail).
-    // The viewport resize path is handled by eventFilter (deferred one event
+    // Scroll / layout changes recompute the visible window and request thumbnails
+    // for newly visible items (dedupe happens in requestThumbnail). The viewport
+    // resize path is handled by eventFilter (deferred one event
     // loop turn so the new layout is applied first).
     connect(list_->verticalScrollBar(), &QScrollBar::valueChanged, this,
             &FilmstripWidget::updateVisibleRange);
@@ -271,7 +271,7 @@ void FilmstripWidget::setImages(const QVector<Entry>& entries) {
     // LRU keeps the store bounded across rebuilds. The shared base thumbnail is
     // keyed by imageId, so a master and its virtual copies all reuse it.
 
-    // M9: incremental item sync. refreshFilmstrip fires on every rating/flag/
+    // Incremental item sync. refreshFilmstrip fires on every rating/flag/
     // colour/filter change, every import and the 2s folderMonitor poll; tearing
     // the whole list down and re-composing every icon on the main thread each
     // time is the synchronous cost the audit flagged. Instead, take the existing
@@ -301,18 +301,18 @@ void FilmstripWidget::setImages(const QVector<Entry>& entries) {
             item->setSizeHint(QSize(kIconWidth, kIconHeight + 18));
         }
         QString label = QFileInfo(e.filePath).fileName();
-        // M6: a virtual copy shows its display name next to the file name so
-        // tiles sharing the same file stay distinguishable under the thumbnail
-        // (the copy number also appears in the page-fold badge).
+        // A virtual copy shows its display name next to the file name so tiles sharing
+        // the same file stay distinguishable under the thumbnail (the copy number
+        // also appears in the page-fold badge).
         if (e.variantId != 0 && !e.variantName.empty())
             label += QStringLiteral(" · ") + QString::fromStdString(e.variantName);
         item->setText(label);
         item->setData(kItemRole, e.imageId);
         // Sequential i == the current row count, so this is an append.
         list_->insertItem(i, item);
-        // M3-3: no synchronous decode here -- the main thread never touches
-        // disk/embedded blobs during setImages. If the caller already supplied a
-        // decoded thumbnail, seed the bounded cache; otherwise the item is left
+        // No synchronous decode here -- the main thread never touches disk/embedded
+        // blobs during setImages. If the caller already supplied a decoded
+        // thumbnail, seed the bounded cache; otherwise the item is left
         // to the visible-window request path below.
         if (!e.thumbnail.isNull())
             storeRawThumbnail(e.imageId, e.thumbnail);
@@ -326,13 +326,13 @@ void FilmstripWidget::setImages(const QVector<Entry>& entries) {
     // In-flight request dedupe resets: the rows have changed, so a visible item
     // may need a (re)request even if one was outstanding on the old layout.
     pendingThumbRequests_.clear();
-    // M9: keep the badge cache across refreshes instead of wiping it on every
+    // Keep the badge cache across refreshes instead of wiping it on every
     // refreshFilmstrip. badgeCacheKey covers every input that changes the
     // composite (imageId, thumbnail version, rating, flag, colour label,
     // collection membership), so a refresh reuses the already-composed tiles for
     // unchanged rows and only changed/new rows pay for composition below. The
     // count-based eviction (kBadgeCacheMax) still bounds the global cache.
-    // M9: only the visible band does any per-refresh work. updateVisibleRange
+    // Only the visible band does any per-refresh work. updateVisibleRange
     // requests thumbnails AND composes icons for the on-screen window (+ one
     // screen of look-ahead); off-screen rows keep their previous icon / stay on
     // the placeholder until scrolled into view. Unloaded rows show placeholder
@@ -385,12 +385,12 @@ void FilmstripWidget::updateVisibleRange() {
     if (list_->count() == 0)
         return;
     QListWidget* lw = list_;
-    // 网格列数 (number of columns in the wrapping grid).
+    // Number of columns in the wrapping grid.
     const int columns = qMax(1, lw->viewport()->width() / kGridW);
     const int viewH = qMax(1, lw->viewport()->height());
     const int scrollY = lw->verticalScrollBar()->value();
-    // 可见窗口 = 当前视口 + 前后各 1 屏 (current viewport plus one screen of
-    // look-ahead above and below); items lie in a wrapping grid of kGridH stride.
+    // Visible window = current viewport plus one screen of look-ahead above and
+    // below; items lie in a wrapping grid of kGridH stride.
     const int topY = qMax(0, scrollY - viewH);
     const int bottomY = scrollY + viewH * 2;
     const int firstRow = (topY / kGridH) * columns;
@@ -400,9 +400,9 @@ void FilmstripWidget::updateVisibleRange() {
         const int id = imageIdAt(row);
         if (id < 0)
             continue;
-        // M9: the visible band is the only place that triggers new decodes or
-        // composes icons on a refresh/scroll. requestThumbnail skips rows that
-        // already have a raw thumbnail (LRU or pixmap fallback); refreshIcon
+        // The visible band is the only place that triggers new decodes or composes
+        // icons on a refresh/scroll. requestThumbnail skips rows that already
+        // have a raw thumbnail (LRU or pixmap fallback); refreshIcon
         // composes the badge tile from cache when possible (cheap) or from the
         // cached raw thumbnail / placeholder otherwise.
         requestThumbnail(id);
@@ -413,11 +413,11 @@ void FilmstripWidget::updateVisibleRange() {
 void FilmstripWidget::requestThumbnail(int imageId) {
     if (imageId < 0)
         return;
-    // 已加载则跳过: rawThumbs_ 或 QPixmapCache 兜底命中 (skip when the raw base
-    // is already available, either in the LRU or the pixmap fallback).
+    // Skip when the raw base is already available, either in the LRU or the pixmap
+    // fallback.
     if (hasRawThumb(imageId))
         return;
-    // 去重: 同一 imageId 不重复发射 (dedupe: no double emission per imageId).
+    // Dedupe: no double emission per imageId.
     if (pendingThumbRequests_.contains(imageId))
         return;
     pendingThumbRequests_.insert(imageId);
@@ -438,8 +438,7 @@ QImage FilmstripWidget::rawThumbnail(int imageId) {
         touchLru(imageId);
         return it.value();
     }
-    // LRU 淘汰后回退 QPixmapCache 兜底并重新播种回 LRU (recover an evicted base
-    // from the pixmap fallback and re-seed the LRU).
+    // Recover an evicted base from the pixmap fallback and re-seed the LRU.
     QPixmap cached;
     if (QPixmapCache::find(rawCacheKey(imageId, thumbVersions_.value(imageId)),
                            &cached) &&
@@ -454,8 +453,8 @@ QImage FilmstripWidget::rawThumbnail(int imageId) {
 void FilmstripWidget::storeRawThumbnail(int imageId, const QImage& thumb) {
     if (thumb.isNull())
         return;
-    // QPixmapCache 兜底,键含缩略图版本 (pixmap fallback keyed by thumbnail
-    // version so a changed base never reuses a stale fallback).
+    // Pixmap fallback keyed by thumbnail version so a changed base never reuses a
+    // stale fallback.
     QPixmapCache::insert(rawCacheKey(imageId, thumbVersions_.value(imageId)),
                          QPixmap::fromImage(thumb));
     if (rawThumbs_.contains(imageId)) {
@@ -465,7 +464,7 @@ void FilmstripWidget::storeRawThumbnail(int imageId, const QImage& thumb) {
         rawThumbs_.insert(imageId, thumb);
         lruOrder_.append(imageId);
     }
-    // 超上限淘汰最久未用 (evict the least-recently-used while over the cap).
+    // Evict the least-recently-used while over the cap.
     while (lruOrder_.size() > kRawThumbsMax) {
         const int evictId = lruOrder_.takeFirst();
         rawThumbs_.remove(evictId);
@@ -623,16 +622,16 @@ void FilmstripWidget::onCurrentChanged(int row) {
     if (id < 0)
         return;
     emit selectionChanged(id);
-    // M6: carry the clicked entry's variant id so MainWindow (Wave 3) can load
-    // the matching variant edit stack (0 = master). Emitted on every selection
-    // so the new signal alone is a complete replacement for selectionChanged.
+    // Carry the clicked entry's variant id so MainWindow can load the matching
+    // variant edit stack (0 = master). Emitted on every selection so the new
+    // signal alone is a complete replacement for selectionChanged.
     const Entry* e = entryAt(row);
     emit imageVariantSelected(id, e ? e->variantId : 0);
 }
 
 bool FilmstripWidget::eventFilter(QObject* obj, QEvent* event) {
-    // 布局/尺寸变化后重算可见窗口 (recompute the visible window after the list
-    // viewport resizes; deferred a turn so the new layout is applied first).
+    // Recompute the visible window after the list viewport resizes; deferred a turn
+    // so the new layout is applied first.
     if (obj == list_->viewport() && event->type() == QEvent::Resize)
         QTimer::singleShot(0, this, &FilmstripWidget::updateVisibleRange);
     return QWidget::eventFilter(obj, event);
@@ -704,7 +703,7 @@ void FilmstripWidget::contextMenuEvent(QContextMenuEvent* event) {
 
     QMenu menu(this);
 
-    // 评分 (rating).
+    // Rating.
     auto* ratingMenu = menu.addMenu(tr("评分"));
     for (int r = 0; r <= 5; ++r) {
         QAction* act = ratingMenu->addAction(
@@ -715,7 +714,7 @@ void FilmstripWidget::contextMenuEvent(QContextMenuEvent* event) {
                 [this, id, r]() { emit ratingRequested(id, r); });
     }
 
-    // 旗标 (flag).
+    // Flag.
     auto* flagMenu = menu.addMenu(tr("旗标"));
     QAction* pick = flagMenu->addAction(tr("选取 (P)"));
     pick->setCheckable(true);
@@ -733,7 +732,7 @@ void FilmstripWidget::contextMenuEvent(QContextMenuEvent* event) {
     connect(reject, &QAction::triggered, this,
             [this, id]() { emit flagRequested(id, lrc::ImageFlag::FlagRejected); });
 
-    // 色标 (colour label).
+    // Colour label.
     auto* labelMenu = menu.addMenu(tr("色标"));
     QAction* clearLabel = labelMenu->addAction(tr("清除色标"));
     connect(clearLabel, &QAction::triggered, this,
@@ -750,7 +749,7 @@ void FilmstripWidget::contextMenuEvent(QContextMenuEvent* event) {
         });
     }
 
-    // 收藏夹 (collections).
+    // Collections.
     auto* collectionMenu = menu.addMenu(tr("收藏夹"));
     if (collections_.isEmpty()) {
         QAction* noneCol = collectionMenu->addAction(tr("（无收藏夹）"));

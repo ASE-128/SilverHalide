@@ -1,10 +1,13 @@
 #pragma once
 
-// Lightroom-style collapsible panel. A clickable full-width header toggles the
-// content below it. Sections remember their expanded state via the button's
-// checked property (exposed for MainWindow to persist).
-//
-// The header is styled through the `panelHeader` object name in dark.qss.
+/**
+ * @brief Lightroom-style collapsible panel.
+ *
+ * A clickable full-width header toggles the content below it. Sections remember
+ * their expanded state via the button's checked property (exposed for
+ * MainWindow to persist). The header is styled through the `panelHeader`
+ * object name in dark.qss.
+ */
 
 #include <QString>
 #include <QWidget>

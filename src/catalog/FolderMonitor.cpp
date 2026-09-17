@@ -90,7 +90,7 @@ void FolderMonitor::poll() {
         }
     }
 
-    // R-15: if the folder could not be enumerated this poll, keep the known set
+    // If the folder could not be enumerated this poll, keep the known set
     // and the offline counters unchanged so a transient absence is never
     // mistaken for deletion. Report nothing (no adds/removes/modifies either).
     if (!folderOk) {
@@ -112,7 +112,7 @@ void FolderMonitor::poll() {
         }
 
     // Content changes: an existing file whose identity differs was replaced in
-    // place (R-14). Adopt the new identity and report it.
+    // place. Adopt the new identity and report it.
     for (auto& [p, st] : known_) {
         auto cit = current.find(p);
         if (cit == current.end())

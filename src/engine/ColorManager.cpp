@@ -242,7 +242,7 @@ ImageBufferPtr ColorManager::sourceToLinearProPhoto(
         return ImageBuffer::create(0, 0, PixelFormat::F32);
 
     // Source colour space: the embedded ICC when present, else a documented
-    // sRGB fallback so ICC-less files behave exactly as before (R-08).
+    // sRGB fallback so ICC-less files behave exactly as before.
     cmsHPROFILE source = nullptr;
     if (!iccBytes.empty())
         source = cmsOpenProfileFromMem(iccBytes.data(),
@@ -267,8 +267,7 @@ ImageBufferPtr ColorManager::sourceToLinearProPhoto(
         const size_t pixelCount =
             static_cast<size_t>(src.width()) * src.height();
         // 16-bit input is converted directly (TYPE_RGB_16), never truncated to
-        // 8 bits first, so the extra precision survives the colour transform
-        // (R-09).
+        // 8 bits first, so the extra precision survives the colour transform.
         cmsDoTransform(tr, src.data().data(), out->data().data(),
                        static_cast<cmsUInt32Number>(pixelCount));
         cmsDeleteTransform(tr);

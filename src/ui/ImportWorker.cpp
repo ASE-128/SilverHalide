@@ -33,14 +33,14 @@
 
 namespace {
 
-// S3-4: import batch granularity. Each commit absorbs up to this many image
-// rows + preview records so a crash mid-batch only loses the last partial
-// batch (≤ kImportBatchSize rows) instead of the whole import.
+// Import batch granularity. Each commit absorbs up to this many image rows +
+// preview records so a crash mid-batch only loses the last partial batch
+// (<= kImportBatchSize rows) instead of the whole import.
 constexpr int kImportBatchSize = 100;
 
-// S3-4: stage-2 thread pool ceiling. Clamped to [2, 6] so libraw's own
-// internal worker threads (typically 2-3) plus the stage-2 workers stay
-// close to the hardware concurrency budget instead of oversubscribing.
+// Stage-2 thread pool ceiling. Clamped to [2, 6] so libraw's own internal
+// worker threads (typically 2-3) plus the stage-2 workers stay close to the
+// hardware concurrency budget instead of oversubscribing.
 constexpr int kStage2MinThreads = 2;
 constexpr int kStage2MaxThreads = 6;
 
@@ -84,8 +84,8 @@ std::string sourceDateString(const std::filesystem::path& p) {
 }
 
 // Reads the on-disk fingerprint (byte size + unix last-write-time) of `p` for
-// the images.file_size/file_mtime columns (goal 4). Returns false when the file
-// cannot be stat()ted; callers then pass (0,0) = "unknown / keep current".
+// the images.file_size/file_mtime columns. Returns false when the file cannot be
+// stat()ted; callers then pass (0,0) = "unknown / keep current".
 bool fileFingerprint(const std::filesystem::path& p, int64_t& size,
                      int64_t& mtime) {
     std::error_code ec;
@@ -131,19 +131,19 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
         mode = lrc::ImportMode::Add;
 
     if (abort_.load())
-        return;  // 已请求取消:直接退出 (abort requested: bail out immediately).
+        return;  // abort requested: bail out immediately.
     const std::filesystem::path root = toStdPath(destRoot);
     const int total = paths.size();
     int done = 0;
     int added = 0;
 
-    // S3-4 stage-1 conversion failures (shared across QtConcurrent tasks).
+    // Stage-1 conversion failures (shared across QtConcurrent tasks).
     std::atomic<int> conversionFailures{0};
     QMutex firstErrorMutex;
     std::string firstError;
 
-    // S3: imports share the single catalog connection (goal 5). A batch
-    // transaction is opened just before the DB-serial stage and committed every
+    // Imports share the single catalog connection. A batch transaction is
+    // opened just before the DB-serial stage and committed every
     // kImportBatchSize rows; UI-thread writes queue on the single connection via
     // the busy_timeout, so a cancelled import's rollback can never undo an edit
     // the user saved while the import ran.
@@ -200,7 +200,7 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
                     // The DNG already lives in the library; drop the source RAW
                     // to complete the move. A leftover source is not fatal but
                     // must be surfaced so the user knows the move was in effect
-                    // a copy (M4).
+                    // a copy.
                     std::error_code ec;
                     if (!std::filesystem::remove(src, ec) && ec)
                         f.warn =
@@ -232,7 +232,7 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
                 // ok stays false: stage 3 will skip this file.
                 return;
             }
-            // M4: importFile returns the destination even when a Move's copy
+            // importFile returns the destination even when a Move's copy
             // succeeded but its source-deletion step failed (error is then set
             // and the source may still be on disk). Surface it so the user is
             // not led to believe the move actually moved the file.
@@ -246,10 +246,10 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
         f.catalogPath = std::move(catalogPath);
         f.convertedToDng = converted;
 
-        // P1-3: rename on import. Applies to the finalized cataloged path (the
-        // file in place, the copied/moved file, or the converted DNG). {date}
-        // uses the source file's modification date, {index} the per-file
-        // selection-order number, and collisions get a numeric suffix.
+        // Rename on import. Applies to the finalized cataloged path (the file in
+        // place, the copied/moved file, or the converted DNG). {date} uses the
+        // source file's modification date, {index} the per-file selection-order
+        // number, and collisions get a numeric suffix.
         if (!renameTemplate.isEmpty()) {
             const std::filesystem::path cur = f.catalogPath;
             const lrc::RenameTemplateArgs ra{
@@ -286,8 +286,7 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
     });
 
     if (abort_.load()) {
-        // 取消时回滚未提交的插入,不 emit finishedImport (roll back the
-        // pending inserts and return without finishedImport).
+        // Roll back the pending inserts and return without finishedImport.
         if (!catalog_.rollbackTransaction())
             emit importWarning(tr("取消导入时回滚失败：%1")
                                    .arg(QString::fromStdString(
@@ -370,7 +369,7 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
         if (rowsInBatch == 0)
             return true;
         if (!catalog_.commitTransaction()) {
-            // S2: a failed COMMIT leaves the transaction open; CatalogDatabase
+            // A failed COMMIT leaves the transaction open; CatalogDatabase
             // rolled it back internally. Report the failure and abort: only the
             // already-committed batches landed.
             emit importWarning(tr("导入批次提交失败：%1")
@@ -404,8 +403,8 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
         }
 
         const std::string dbPath = fromStdPath(f.catalogPath).toStdString();
-        // Record the on-disk fingerprint (byte size + mtime, goal 4) so later
-        // external modifications can be detected and re-imports stay idempotent.
+        // Record the on-disk fingerprint (byte size + mtime) so later external
+        // modifications can be detected and re-imports stay idempotent.
         int64_t fsize = 0, fmtime = 0;
         (void)fileFingerprint(f.catalogPath, fsize, fmtime);
         const int64_t id = catalog_.addImage(
@@ -421,17 +420,16 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
 
         // Thumbnail preview + standard preview land in the same import
         // transaction so they commit atomically with the image row. The full-
-        // res (1:1) preview stays lazy (M5-3): PreviewWorker builds it on the
-        // first 1:1 view, so import is not bottlenecked on a full-res render
-        // per photo.
+        // res (1:1) preview stays lazy: PreviewWorker builds it on the first 1:1
+        // view, so import is not bottlenecked on a full-res render per photo.
         if (f.thumb) {
             catalog_.storePreview(id, lrc::PreviewKind::Thumbnail,
                                   f.thumb->bytes, f.thumb->width,
                                   f.thumb->height);
             const int imageId = static_cast<int>(id);
-            // M2-3: decode the just-encoded JPEG in the worker thread and
-            // ship a ready QImage to the UI (queued connection, no
-            // qRegisterMetaType needed -- QImage is a built-in metatype).
+            // Decode the just-encoded JPEG in the worker thread and ship a ready
+            // QImage to the UI (queued connection; QImage is a built-in
+            // metatype, so no qRegisterMetaType is needed).
             QImage thumbImage;
             if (thumbImage.loadFromData(QByteArray(
                     reinterpret_cast<const char*>(f.thumb->bytes.data()),

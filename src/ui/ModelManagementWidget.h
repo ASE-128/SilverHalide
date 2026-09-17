@@ -1,19 +1,24 @@
 #pragma once
 
-// Settings dialog for AI model management. Lists every model declared in
-// resources/models/manifest.json, shows its on-disk readiness (SHA-verified /
-// not downloaded / license-blocked), and lets the user:
-//   • Download  — async fetch via ModelManager::downloadModel (QNAM), with a
-//                 progress bar and a per-row "取消" affordance. ZIP-packaged
-//                 models (nafnet-denoise) are auto-extracted on completion.
-//   • 导入文件  — pick a local .onnx (or .zip) and place it at the cache path,
-//                 for offline / air-gapped setups.
-//   • 打开缓存目录 — reveal %LOCALAPPDATA%/Silver Halide/models/ in Explorer.
-//
-// Launched from MainWindow's "设置 → 模型管理…" menu. Owns its own
-// ModelManager instance; in-flight downloads are aborted when the dialog
-// closes (QNAM destruction aborts replies, same lifecycle the nafnet_smoke
-// test relies on).
+/**
+ * @brief AI model management dialog.
+ *
+ * Lists every model declared in resources/models/manifest.json, shows its
+ * on-disk readiness (SHA-verified / not downloaded / license-blocked), and
+ * lets the user:
+ *   • Download — async fetch via ModelManager::downloadModel (QNAM), with a
+ *                progress bar and a per-row cancel affordance. ZIP-packaged
+ *                models (nafnet-denoise) are auto-extracted on completion.
+ *   • Import file — pick a local .onnx (or .zip) and place it at the cache
+ *                   path, for offline / air-gapped setups.
+ *   • Open cache folder — reveal %LOCALAPPDATA%/Silver Halide/models/ in
+ *                         Explorer.
+ *
+ * Launched from MainWindow's "Settings -> Model management..." menu. Owns its
+ * own ModelManager instance; in-flight downloads are aborted when the dialog
+ * closes (QNAM destruction aborts replies, the same lifecycle the nafnet_smoke
+ * test relies on).
+ */
 
 #include <QDialog>
 #include <QHash>

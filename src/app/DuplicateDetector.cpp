@@ -1,4 +1,4 @@
-// PHASE_14: DuplicateDetector implementation.
+// DuplicateDetector implementation.
 
 #include "app/DuplicateDetector.h"
 #include "utils/MathUtils.h"

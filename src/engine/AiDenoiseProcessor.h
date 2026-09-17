@@ -1,7 +1,7 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// PHASE_12: AiDenoiseProcessor
+// AiDenoiseProcessor
 //
 // Pure C++ denoise driver that wraps AiInferenceEngine to remove colour +
 // luminance noise from an image buffer.  When ONNX Runtime / the denoise

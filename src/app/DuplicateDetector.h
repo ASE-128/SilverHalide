@@ -1,26 +1,24 @@
 #pragma once
 
-// ---------------------------------------------------------------------------
-// PHASE_14: DuplicateDetector
-//
-// Two-stage duplicate detection (per spec §1):
-//   Stage 1 — pHash (perceptual hash, 64 bit) of a 320 px thumbnail.
-//             Hamming distance < 10 → candidate duplicates.  Pure C++,
-//             no model dependency.
-//   Stage 2 — deep-feature cosine similarity for each candidate group,
-//             using a MobileNetV3-style embedding via AiInferenceEngine.
-//             Cosine similarity > 0.92 → confirmed duplicate.  Falls back
-//             to a simple colour-histogram intersection when the embed
-//             model is unavailable so grouping still works.
-//
-// Thread-safe call pattern: callers build a `PhotoFrame` list (thumbnail
-// buffer + id) on their worker thread, then `detect()` returns a vector of
-// groups.  The database persistence of phash / embedding happens in the
-// `CatalogDatabase` class — this class intentionally knows nothing of
-// SQLite.
-//
-// Pure C++.  Lives in src/app/ per the spec.
-// ---------------------------------------------------------------------------
+/**
+ * @brief Two-stage duplicate detection across a photo set.
+ *
+ * Stage 1 — pHash (perceptual hash, 64 bit) of a 320 px thumbnail.
+ *           Hamming distance < 10 → candidate duplicates. Pure C++,
+ *           no model dependency.
+ * Stage 2 — deep-feature cosine similarity for each candidate group,
+ *           using a MobileNetV3-style embedding via AiInferenceEngine.
+ *           Cosine similarity > 0.92 → confirmed duplicate. Falls back
+ *           to a simple colour-histogram intersection when the embed
+ *           model is unavailable so grouping still works.
+ *
+ * Thread-safe call pattern: callers build a `PhotoFrame` list (thumbnail
+ * buffer + id) on their worker thread, then `detect()` returns a vector of
+ * groups. The database persistence of phash / embedding happens in the
+ * `CatalogDatabase` class — this class intentionally knows nothing of SQLite.
+ *
+ * Pure C++. Lives in src/app/.
+ */
 
 #include <cstdint>
 #include <memory>
@@ -33,11 +31,13 @@
 
 namespace lrc {
 
+/** @brief A single photo candidate for duplicate detection. */
 struct PhotoFrame {
     int64_t photoId = 0;
     ImageBuffer thumbnail; // any format / size >= 32 px on a side
 };
 
+/** @brief A confirmed set of duplicate photos (>= 2 members). */
 struct DuplicateGroup {
     std::vector<int64_t> memberIds; // sorted by input order
     float meanSimilarity = 0.0f;    // average pairwise similarity (0..1)

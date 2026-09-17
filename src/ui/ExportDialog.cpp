@@ -65,7 +65,7 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
     auto* form = new QFormLayout;
     form->setSpacing(8);
 
-    // Variant / virtual-copy selector (M6). Hidden until MainWindow supplies a
+    // Variant / virtual-copy selector. Hidden until MainWindow supplies a
     // variant list via setVariants(); a photo with no virtual copies keeps the
     // legacy single-master behaviour.
     variantCombo_ = new QComboBox(this);
@@ -78,7 +78,7 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
         formatCombo_->addItem(tr(kFormatNames[i]));
     form->addRow(tr("格式:"), formatCombo_);
 
-    // S17-18: longest-edge size preset. 0 = native resolution; the other
+    // Longest-edge size preset. 0 = native resolution; the other
     // entries cap the longest edge of the exported image (area-average
     // downscale, never upscales). ExportEngine::encodeAndWrite applies the
     // cap in linear F32 space before the format-specific encode, so every
@@ -116,8 +116,8 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
     qualityLayout->addWidget(qualityValueLabel_);
     form->addRow(tr("JPEG 质量:"), qualityRow_);
 
-    // P1-2: ICC profile to embed in the exported file (0 = none / byte-identical
-    // legacy output). Order must match ExportEngine::ExportSpec::IccChoice.
+    // ICC profile to embed in the exported file (0 = none / byte-identical legacy
+    // output). Order must match ExportEngine::ExportSpec::IccChoice.
     iccCombo_ = new QComboBox(this);
     iccCombo_->addItem(tr("无 (sRGB 默认)"), QVariant(0));
     iccCombo_->addItem(tr("sRGB"), QVariant(1));
@@ -126,7 +126,7 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
     iccCombo_->setCurrentIndex(0);
     form->addRow(tr("ICC:"), iccCombo_);
 
-    // P1-4: watermark overlay (PNG with alpha). Hidden until an overlay is chosen.
+    // Watermark overlay (PNG with alpha). Hidden until an overlay is chosen.
     auto* wmRow = new QWidget(this);
     auto* wmLayout = new QFormLayout(wmRow);
     wmLayout->setContentsMargins(0, 0, 0, 0);
@@ -169,10 +169,10 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
     connect(wmBrowse, &QPushButton::clicked, this, &ExportDialog::browseWatermark);
     connect(wmEnable_, &QCheckBox::toggled, this, &ExportDialog::onWatermarkToggle);
 
-    // P1-3: batch rename on export. When enabled, MainWindow exports the master
-    // + every virtual copy into the chosen folder, naming outputs from the
-    // template ({date}/{index}/{base}); the live preview mirrors what the batch
-    // will produce.
+    // Batch rename on export. When enabled, MainWindow exports the master + every
+    // virtual copy into the chosen folder, naming outputs from the template
+    // ({date}/{index}/{base}); the live preview mirrors what the batch will
+    // produce.
     renameBox_ = new QCheckBox(tr("批量导出时重命名文件"), this);
     form->addRow(renameBox_);
     renameEdit_ = new QLineEdit(this);
@@ -221,16 +221,16 @@ int ExportDialog::formatIndex() const { return formatCombo_->currentIndex(); }
 int ExportDialog::jpegQuality() const { return qualitySlider_->value(); }
 
 int ExportDialog::maxDim() const {
-    // S17-18: 0 (the first entry, "原始尺寸") leaves the export at native
-    // resolution; any other preset caps the longest edge.
+    // 0 (the first entry, "原始尺寸") leaves the export at native resolution;
+    // any other preset caps the longest edge.
     bool ok = false;
     const int v = sizeCombo_ ? sizeCombo_->currentData().toInt(&ok) : 0;
     return ok ? v : 0;
 }
 
 void ExportDialog::setVariants(const std::vector<lrc::EditVariant>& variants) {
-    // P1-3: cache the batch targets (master + copies) so the rename preview
-    // can render one row per output without a second catalog query.
+    // Cache the batch targets (master + copies) so the rename preview can render
+    // one row per output without a second catalog query.
     variants_ = variants;
 
     // Block signals while repopulating so variantChosen() reflects only real
@@ -302,7 +302,7 @@ void ExportDialog::onFormatChanged(int index) {
     // Show the quality row only for the lossy JPEG format.
     qualityRow_->setVisible(index == 0);
 
-    // R-07: keep the dialog honest about what each format actually keeps.
+    // Keep the dialog honest about what each format actually keeps.
     //   IC  profile  : embedded for JPEG/PNG/TIFF (pixels are converted to match, see
     //                  Engine sRGBEncodedToProfile). DNG stores linear ProPhoto data
     //                  that is not converted into any display space, so embedding a

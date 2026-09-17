@@ -14,15 +14,15 @@
 
 namespace {
 
-// PHASE_5: default offset of a newly created spot's source point from its
+// Default offset of a newly created spot's source point from its
 // target, expressed as a multiple of the spot's radius (placed to the right).
 constexpr double kSpotDefaultSourceOffset = 2.5;
 
-// PHASE_5: handle radius (widget px) added to a spot circle during hit-testing
+// Handle radius (widget px) added to a spot circle during hit-testing
 // so a small circle stays grabbable.
 constexpr double kSpotHandlePx = 6.0;
 
-// PHASE_7: snap range (widget px) for grabbing the Before/After divider.
+// Snap range (widget px) for grabbing the Before/After divider.
 constexpr double kDividerGrabPx = 4.0;
 
 // sRGB display value -> linear RGB (EOTF), the same transfer the renderer
@@ -193,7 +193,8 @@ void ImageViewport::setPointColorSamplerActive(bool active) {
 
 void ImageViewport::setWhiteBalanceSamplerActive(bool active) {
     if (active) {
-        // 激活白平衡吸管时关闭 HSL/点颜色/明亮度吸管 (mutual exclusion).
+        // Mutual exclusion: activating white balance disables HSL / point colour /
+        // luminance samplers.
         samplerActive_ = false;
         pointColorActive_ = false;
         luminanceActive_ = false;
@@ -209,7 +210,8 @@ void ImageViewport::setWhiteBalanceSamplerActive(bool active) {
 
 void ImageViewport::setColorRangeSamplerActive(bool active) {
     if (active) {
-        // 激活颜色范围吸管时关闭白平衡/HSL/点颜色/明亮度吸管 (mutual exclusion).
+        // Mutual exclusion: activating colour range disables white balance / HSL / point
+        // colour / luminance samplers.
         whiteBalanceActive_ = false;
         samplerActive_ = false;
         pointColorActive_ = false;
@@ -228,7 +230,8 @@ void ImageViewport::setColorRangeSamplerActive(bool active) {
 
 void ImageViewport::setLuminanceSamplerActive(bool active) {
     if (active) {
-        // 激活明亮度吸管时关闭白平衡/HSL/点颜色/颜色范围吸管 (mutual exclusion).
+        // Mutual exclusion: activating luminance disables white balance / HSL / point
+        // colour / colour range samplers.
         whiteBalanceActive_ = false;
         samplerActive_ = false;
         pointColorActive_ = false;
@@ -399,9 +402,9 @@ void ImageViewport::rebuildMaskOverlay() {
     // Colour-range overlays depend on the live reference colour rather than on
     // mask geometry, so they must bypass the geometry-hash dedup below.
     const bool colorRangeMask = maskDraft_.type == lrc::MaskType::ColorRange;
-    // PHASE_4: a geometry mask with colour/luminance sub-mask modifiers draws
-    // its combined weight (geometry x sub-masks), which depends on the pixel
-    // colours as well as the geometry.
+    // A geometry mask with colour/luminance sub-mask modifiers draws its combined
+    // weight (geometry x sub-masks), which depends on the pixel colours as well
+    // as the geometry.
     const bool hasSubMask =
         maskDraft_.useColorRange || maskDraft_.useLuminance;
     lrc::ColorRangeMask colorRange = maskDraft_.color;
@@ -668,8 +671,8 @@ void ImageViewport::setZoomMode(ZoomMode mode) {
         setFullResRequested(true);
     }
     update();
-    // PHASE_2: a fit <-> 1:1 transition changes which source the preview worker
-    // should use; report the current logical render size (deduplicated).
+    // A fit <-> 1:1 transition changes which source the preview worker should use;
+    // report the current logical render size (deduplicated).
     emitViewportResolutionChanged();
 }
 
@@ -747,7 +750,7 @@ void ImageViewport::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.fillRect(rect(), palette().window().color());
 
-    // PHASE_7: Before/After + reference split rendering owns the whole widget.
+    // Before/After + reference split rendering owns the whole widget.
     if (compareMode_ != CompareMode::Off) {
         paintCompare(painter);
         return;
@@ -763,8 +766,8 @@ void ImageViewport::paintEvent(QPaintEvent*) {
     paintCheckerboard(painter, rect());
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     if (spotVisualize_) {
-        // PHASE_5 "visualize spots": inverted + high-contrast copy so dust
-        // specks stand out. Rebuilt lazily when the flag or image changes.
+        // "Visualize spots": inverted + high-contrast copy so dust specks stand out.
+        // Rebuilt lazily when the flag or image changes.
         if (!spotVizValid_)
             rebuildSpotViz();
         if (!spotViz_.isNull())
@@ -781,7 +784,7 @@ void ImageViewport::paintEvent(QPaintEvent*) {
     painter.setPen(QColor(0, 0, 0, 120));
     painter.drawRect(dst.adjusted(0, 0, -1, -1));
 
-    // PHASE_5: spot circles + cursor ring when the spot tool is armed.
+    // Spot circles + cursor ring when the spot tool is armed.
     if (spotToolActive_)
         paintSpotOverlay(painter);
 
@@ -796,7 +799,7 @@ void ImageViewport::paintEvent(QPaintEvent*) {
         painter.drawLine(QPointF(p.x(), p.y() + 4), QPointF(p.x(), p.y() + 13));
     }
 
-    // 点颜色参考色取样标记：固定取样点，不随鼠标移动 (fixed mark).
+    // Fixed point-colour reference mark; it does not follow the mouse.
     if (pointColorActive_ && hasPointColorMark_) {
         const QPointF p = pointColorMark_;
         painter.setPen(QPen(QColor(120, 220, 255, 220), 1.0));
@@ -842,7 +845,7 @@ void ImageViewport::paintEvent(QPaintEvent*) {
         }
     }
 
-    // 颜色范围取样标记：镜像点颜色吸管标记画法 (mirror point-colour mark).
+    // Colour-range sample mark; mirrors the point-colour mark drawing.
     if (colorRangeActive_ && hasColorRangeMark_) {
         const QPointF p = colorRangeMark_;
         painter.setPen(QPen(QColor(120, 220, 255, 220), 1.0));
@@ -853,7 +856,7 @@ void ImageViewport::paintEvent(QPaintEvent*) {
         painter.drawLine(QPointF(p.x(), p.y() + 4), QPointF(p.x(), p.y() + 13));
     }
 
-    // 明亮度范围取样标记 (PHASE_4): 镜像点颜色吸管标记画法.
+    // Luminance range sample mark; mirrors the point-colour mark drawing.
     if (luminanceActive_ && hasLuminanceMark_) {
         const QPointF p = luminanceMark_;
         painter.setPen(QPen(QColor(255, 210, 120, 220), 1.0));
@@ -866,8 +869,8 @@ void ImageViewport::paintEvent(QPaintEvent*) {
 }
 
 void ImageViewport::resizeEvent(QResizeEvent*) {
-    // PHASE_2: report the new logical render resolution so the preview worker
-    // can re-render the Fit view at exactly this size.
+    // Report the new logical render resolution so the preview worker can re-render
+    // the Fit view at exactly this size.
     emitViewportResolutionChanged();
     if (isFitLike())
         update();
@@ -896,8 +899,8 @@ void ImageViewport::wheelEvent(QWheelEvent* event) {
     }
     setZoom(zoom_ * factor);
     const double cur = currentScale();
-    // 滚轮缩小到适合比例附近时回到上次的适合模式 (return to fit when zooming out).
-    // Snap-back fires only on the zoom-OUT direction: when the fit scale is
+    // Return to fit when zooming out near the fit scale. Snap-back fires only on the
+    // zoom-OUT direction: when the fit scale is
     // >= ~1.0 the 1:1 scale already sits in the fit band, so without the
     // direction guard an upward wheel would bounce straight back to fit and
     // wheel zoom-in would be silently dead.
@@ -939,8 +942,8 @@ void ImageViewport::mousePressEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
-    // PHASE_7: dragging the Before/After divider (LeftRight / TopBottom /
-    // Reference). Takes priority over zoom-into-1:1 so the seam stays grabby.
+    // Dragging the Before/After divider (LeftRight / TopBottom / Reference). Takes
+    // priority over zoom-into-1:1 so the seam stays grabby.
     if (event->button() == Qt::LeftButton && compareMode_ != CompareMode::Off) {
         const int hit = dividerHit(event->pos());
         if (hit != 0) {
@@ -1015,7 +1018,7 @@ void ImageViewport::mousePressEvent(QMouseEvent* event) {
             zoomMode_ = ZoomMode::OneToOne;
             emit zoomModeChanged(zoomMode_);
             setFullResRequested(true); // click-drag into 1:1 requests full-res
-            // 让点击的图像像素处于视口中心 (center the clicked pixel)
+            // Centre the clicked pixel in the viewport.
             const double scale = currentScale();
             panOffset_ = QPointF(scale * (image_.width() * 0.5 - clickImg.x()),
                                  scale * (image_.height() * 0.5 - clickImg.y()));
@@ -1045,20 +1048,20 @@ void ImageViewport::mouseDoubleClickEvent(QMouseEvent* event) {
 
 void ImageViewport::mouseMoveEvent(QMouseEvent* event) {
     lastMousePos_ = event->pos();
-    // PHASE_7: dragging the Before/After divider.
+    // Dragging the Before/After divider.
     if (dividerDragging_) {
         updateDivider(event->pos());
         event->accept();
         return;
     }
-    // PHASE_5: dragging a spot's target or source circle.
+    // Dragging a spot's target or source circle.
     if (draggingSpot_ >= 0) {
         moveSpotGesture(event->pos());
         event->accept();
         return;
     }
-    // PHASE_7: hover cursor over the divider seam; moving off it restores the
-    // active tool's cursor via applyToolCursor (which no-ops during a drag).
+    // Hover cursor over the divider seam; moving off it restores the active tool's
+    // cursor via applyToolCursor (which no-ops during a drag).
     if (compareMode_ != CompareMode::Off) {
         const int hit = dividerHit(event->pos());
         if (hit != 0) {
@@ -1179,7 +1182,7 @@ void ImageViewport::keyPressEvent(QKeyEvent* event) {
         return;
     }
     if (event->key() == Qt::Key_Delete) {
-        // Delete: remove the selected spot (PHASE_5).
+        // Delete: remove the selected spot.
         if (spotToolActive_ && selectedSpot_ >= 0 &&
             selectedSpot_ < static_cast<int>(spotRemovals_.size())) {
             deleteSpot(selectedSpot_);
@@ -1201,7 +1204,7 @@ void ImageViewport::keyReleaseEvent(QKeyEvent* event) {
     QWidget::keyReleaseEvent(event);
 }
 
-// --- Spot removal / healing brush (PHASE_5) ---------------------------------
+// --- Spot removal / healing brush -------------------------------------------
 
 void ImageViewport::setSpotToolActive(bool active) {
     if (active) {
@@ -1543,7 +1546,7 @@ void ImageViewport::applyToolCursor() {
     }
 }
 
-// --- Before/After + reference view (PHASE_7) --------------------------------
+// --- Before/After + reference view -------------------------------------------
 
 void ImageViewport::setBeforeAfterImages(const QImage& before,
                                          const QImage& after) {

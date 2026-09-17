@@ -1,7 +1,7 @@
 #pragma once
 
-// P1-3: batch-rename template rendering. Pure C++ (no Qt) so the renderer can
-// be unit-tested headless and shared by the import/export dialogs (UI) and the
+// Batch-rename template rendering. Pure C++ (no Qt) so the renderer can be
+// unit-tested headless and shared by the import/export dialogs (UI) and the
 // catalog rename worker.
 //
 // Template tokens (case-insensitive):
@@ -20,6 +20,11 @@
 
 namespace lrc {
 
+/** @brief Inputs for rendering a batch-rename template.
+ *
+ * Fields are used by renderRenameTemplate and uniqueRenamePath to substitute
+ * the template tokens {date}, {base} and {index[:W]}.
+ */
 struct RenameTemplateArgs {
     std::string tmpl;          // the template, e.g. "{date}_{base}_{index:3}"
     std::string base;          // original base name (no extension)
@@ -28,7 +33,15 @@ struct RenameTemplateArgs {
     std::string date;          // capture date (passed through verbatim)
 };
 
-/** Renders `args.tmpl` into a file base name (no extension). */
+/** @brief Renders `args.tmpl` into a file base name (no extension).
+ *
+ * Token lookup is case-insensitive. Unknown tokens are emitted verbatim so a
+ * typo degrades gracefully instead of producing an empty or mangled name.
+ *
+ * @param args Template, base name, sequence index/width and date.
+ * @return The rendered base name (never an empty string unless all tokens are
+ *         unknown and the template itself is empty).
+ */
 inline std::string renderRenameTemplate(const RenameTemplateArgs& args) {
     // Lowercase the template for case-insensitive token matching.
     std::string t = args.tmpl;

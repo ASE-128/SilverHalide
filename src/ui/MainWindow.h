@@ -1,8 +1,12 @@
 #pragma once
 
-// Top-level window: three-pane layout (navigation / preview+filmstrip /
-// develop), menu bar, status bar, and all background workers. The UI layer
-// talks to the engine and catalog exclusively through signals/slots.
+/**
+ * @brief Top-level MainWindow with a three-pane layout (navigation /
+ *        preview+filmstrip / develop), menu bar, status bar, and all background
+ *        workers. Lives on the UI (main) thread; the UI layer talks to the
+ *        engine and catalog exclusively through signals/slots, delegating heavy
+ *        work to child workers on their own QThreads.
+ */
 
 #include <optional>
 #include <string>
@@ -30,7 +34,7 @@
 namespace lrc {
 
 class ColorManager;
-class AiInferenceEngine;       // ONNX Runtime wrapper (PHASE_12/13 wiring)
+class AiInferenceEngine;       // ONNX Runtime wrapper
 class ModelManager;            // manifest + download/cache lifecycle
 class FolderMonitor;
 class Pipeline;
@@ -58,13 +62,18 @@ public:
     ~MainWindow() override;
 
 protected:
-    // M2-4: flush the debounced adjustment save before the window disappears.
+    /**
+     * @brief Flushes the debounced adjustment save before the window disappears.
+     */
     void closeEvent(QCloseEvent* event) override;
 
 signals:
-    // M3-3: the main thread hands one lazy filmstrip thumbnail to the
-    // background decoder (queued connection to a hub living on
-    // thumbLoaderThread_). Kept in the header so AUTOMOC knows the signal.
+    /**
+     * @brief The main thread hands one lazy filmstrip thumbnail to the
+     *        background decoder (queued connection to a hub living on
+     *        thumbLoaderThread_). Kept in the header so AUTOMOC knows the
+     *        signal.
+     */
     void thumbDecodeRequested(int imageId, const QString& thumbnailPath);
 
 private slots:
@@ -74,9 +83,14 @@ private slots:
     void openCatalog();
     void backupCatalog();
     void optimizeCatalog();
-    // M10: background backup/optimize completion (invoked back on the UI thread).
+    /**
+     * @brief Background backup completion (invoked back on the UI thread).
+     */
     void onCatalogBackupFinished(bool ok, const QString& error,
                                  const QString& destPath);
+    /**
+     * @brief Background optimize completion (invoked back on the UI thread).
+     */
     void onCatalogOptimizeFinished(bool ok, const QString& error);
     void showEditHistory();
     void exportImage();
@@ -88,13 +102,17 @@ private slots:
     void onCollectionSelected(int collectionId);
     void onManageCollections();
     void onRemoveImage(int imageId);
-    // P1-5: opens the snapshot panel for the current image.
+    /**
+     * @brief Opens the snapshot panel for the current image.
+     */
     void onManageSnapshots();
     void onFiltersChanged(int minRating, int flagFilter, int labelColorFilter);
     void onImageSelected(int imageId);
     void onAdjustmentsChanged(const lrc::Adjustments& adjustments);
-    // M5 coarse-then-refine: slider drag (30 ms throttle) drives a low-res
-    // preview; onAdjustmentsChanged (refine) still fires on pause/release.
+    /**
+     * @brief Coarse-then-refine: slider drag (30 ms throttle) drives a low-res
+     *        preview; onAdjustmentsChanged (refine) still fires on pause/release.
+     */
     void onAdjustmentsChangedCoarse(const lrc::Adjustments& adjustments);
     void onAdjustmentsCommitted(const lrc::Adjustments& adjustments);
     void onAutoRequested();
@@ -133,21 +151,34 @@ private slots:
     void onDcpProfileSelected(const QString& path);
     void openMaskWindow();
     void onFullResReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
-    // M6: low-res (kCoarseMaxDim) 1:1 intermediate frame, delivered ahead of
-    // fullResReady so a 1:1 slider drag gets immediate coarse feedback.
+    /**
+     * @brief Low-res (kCoarseMaxDim) 1:1 intermediate frame, delivered ahead of
+     *        fullResReady so a 1:1 slider drag gets immediate coarse feedback.
+     */
     void onFullResReadyCoarse(qint64 imageId,
                               const lrc::ImageBufferPtr& rgbU8);
-    // M2-3: thumbnail decoded on the import worker thread, delivered as a QImage.
+    /**
+     * @brief Thumbnail decoded on the import worker thread, delivered as a QImage.
+     */
     void onThumbReadyImage(int imageId, const QImage& thumb);
     void onThumbReady(int imageId, const QString& thumbnailPath);
-    // M3-3: the filmstrip asked for a lazy thumbnail (a visible row has none
-    // yet); enqueue it for background decode (bounded queue, one job in flight).
+    /**
+     * @brief The filmstrip asked for a lazy thumbnail (a visible row has none
+     *        yet); enqueue it for background decode (bounded queue, one job in
+     *        flight).
+     */
     void onThumbnailRequested(int imageId);
-    // M3-3: a background decode finished -- dispatch the next queued request.
+    /**
+     * @brief A background decode finished -- dispatch the next queued request.
+     */
     void onThumbnailDecoded(int imageId);
-    // M2-1: trailing edge of a histogram/status-bar throttle window.
+    /**
+     * @brief Trailing edge of a histogram/status-bar throttle window.
+     */
     void flushHistogramThrottle();
-    // M2-4: adjustment-save debounce window elapsed -> persist latest value.
+    /**
+     * @brief Adjustment-save debounce window elapsed -> persist latest value.
+     */
     void onSaveDebounceTimeout();
     void onImportProgress(int done, int total);
     void onImportFinished(int addedCount);
@@ -162,7 +193,7 @@ private slots:
     void writeSidecar();
     void watchFolderPoll();
 
-    // --- M5: spot removal ---------------------------------------------------
+    // --- Spot removal ------------------------------------------------------
     // The viewport's spot list changed (create / move / delete / drag). Apply it
     // to the current Adjustments, re-render live, and commit once the gesture
     // idles (see onSpotCommitTimeout).
@@ -172,7 +203,7 @@ private slots:
     // The spot gesture is idle -> push one undo entry and persist.
     void onSpotCommitTimeout();
 
-    // --- M6: virtual copies ---------------------------------------------------
+    // --- Virtual copies ------------------------------------------------------
     void createVirtualCopy();
     // A filmstrip virtual-copy row was selected (variantId != 0). Master rows are
     // still served by onImageSelected.
@@ -180,7 +211,7 @@ private slots:
     // A Navigator virtual-copy item was clicked (image + variant).
     void onVirtualCopySelected(int64_t imageId, int variantId);
 
-    // --- M7: before/after + reference view -----------------------------------
+    // --- Before/after + reference view ---------------------------------------
     // Toolbar mirror + (re)render request for a non-Off compare mode.
     void onCompareModeChanged(ImageViewport::CompareMode mode);
     void onBeforeAfterReady(qint64 imageId, const QImage& before,
@@ -188,7 +219,7 @@ private slots:
     void onReferenceReady(qint64 refImageId, const QImage& image);
     void toggleReferenceView();
 
-    // --- M8: keywords & metadata ---------------------------------------------
+    // --- Keywords & metadata --------------------------------------------------
     void onKeywordSelected(int64_t keywordId, const QString& fullPath);
     void onMetadataEdited(const std::string& title, const std::string& caption,
                           const std::string& copyright,
@@ -196,13 +227,13 @@ private slots:
                           const std::vector<std::string>& keywords);
     void applySearchFilter();
 
-    // --- M9: smart collections ------------------------------------------------
+    // --- Smart collections ----------------------------------------------------
     void onSmartCollectionSelected(int64_t smartCollectionId);
     void onNewSmartCollectionRequested();
 
-    // --- M10: panorama --------------------------------------------------------
+    // --- Panorama --------------------------------------------------------------
     void mergePanorama();
-    // M10: PanoramaDialog no longer carries PanoramaOptions across the signal
+    // PanoramaDialog no longer carries PanoramaOptions across the signal
     // (Qt 6.8 metatype conflict); the applied options are read from the dialog
     // via options() after exec() when needed.
     void onPanoramaMerged(const lrc::ImageBufferPtr& result);
@@ -213,23 +244,23 @@ private:
     void buildMenus();
     void startWorkers();
     void stopWorkers();
-    // S1: request abort + quit the event loops of every background worker.
+    // Request abort + quit the event loops of every background worker.
     void requestWorkersStop();
-    // S1: true once no worker thread is still running.
+    // True once no worker thread is still running.
     bool allWorkersStopped() const;
-    // M10: join the catalog backup/optimize thread (must finish before the
-    // catalog_ member is destroyed).
+    // Join the catalog backup/optimize thread (must finish before the catalog_
+    // member is destroyed).
     void joinDbOpThread();
-    // M2-1: immediate histogram + status-bar refresh (final/refine frames).
+    // Immediate histogram + status-bar refresh (final/refine frames).
     void updateHistogramNow(const QImage& image);
-    // M2-1: throttled histogram + status-bar refresh for coarse frames.
+    // Throttled histogram + status-bar refresh for coarse frames.
     void requestHistogramUpdate(const QImage& image);
-    // M2-4: persist the debounced adjustment (pendingSave_) immediately.
+    // Persist the debounced adjustment (pendingSave_) immediately.
     void flushPendingSave();
-    // M2-4: discard a queued adjustment save (used by undo/redo).
+    // Discard a queued adjustment save (used by undo/redo).
     void cancelPendingSave();
     void refreshFilmstrip();
-    // M3-3: start the next queued lazy-thumbnail decode if one is not running.
+    // Start the next queued lazy-thumbnail decode if one is not running.
     void maybeDispatchThumbDecode();
     void refreshLibraryFolders();
     void startImport(const QStringList& paths, bool convertToDng = false,
@@ -239,27 +270,27 @@ private:
     void convertToDng();
     void requestPreview(const QString& filePath, const lrc::Adjustments& adjustments);
     void requestAdjust(const lrc::Adjustments& adjustments);
-    // M5: low-res (kCoarseMaxDim) re-render of the working image; mirrors
+    // Low-res (kCoarseMaxDim) re-render of the working image; mirrors
     // requestAdjust but targets PreviewWorker::adjustPreviewCoarse.
     void requestAdjustCoarse(const lrc::Adjustments& adjustments);
     void requestFullRes();
     void clearFullRes();
     void requestAdjustFullRes();
-    // M6: 1:1 coarse-then-refine -- fast low-res re-render of the retained
-    // full-res buffer while a slider is dragged in 1:1 (mirrors requestAdjustFullRes
-    // but targets PreviewWorker::adjustFullResCoarse).
+    // 1:1 coarse-then-refine -- fast low-res re-render of the retained full-res
+    // buffer while a slider is dragged in 1:1 (mirrors requestAdjustFullRes but
+    // targets PreviewWorker::adjustFullResCoarse).
     void requestAdjustFullResCoarse(const lrc::Adjustments& adjustments);
     void updateHistogramAndStatus(const QImage& image);
     void setFilterFolder(const QString& folder);
     QImage toQImage(const lrc::ImageBufferPtr& buffer) const;
 
-    // --- M5-10 integration helpers ------------------------------------------
+    // --- Integration helpers ---------------------------------------------------
     // Shared image-load path: master (variantId 0) and virtual copies both route
     // here (the old onImageSelected body, parameterized by variant).
     void loadImageState(int imageId, int variantId);
     // Pushes the current Adjustments' spot list + count into the viewport/panel.
     void syncSpotStateFromAdjustments();
-    // Rebuilds the Navigator "虚拟副本" group from the full catalog listing.
+    // Rebuilds the Navigator "virtual copy" group from the full catalog listing.
     void buildNavigatorVirtualCopies();
     // Clears every navigator-driven filter dimension (folder / collection /
     // keyword / smart collection / search). Used when entering a new filter.
@@ -272,7 +303,7 @@ private:
     // Linear F32 -> linear U16 (panorama DNG writer needs U16).
     lrc::ImageBufferPtr f32ToU16(const lrc::ImageBufferPtr& f32) const;
 
-    // --- M1: undo/redo + global shortcuts ---------------------------------
+    // --- Undo/redo + global shortcuts -----------------------------------------
     // Application-wide key filter that implements the bare-key shortcuts
     // (Z/Tab/F/G/D/E/L/Home/End/[ ]/K/M/O/W/+/-). Modifier combos
     // (Ctrl+Z etc.) are handled by QShortcut instead.
@@ -294,21 +325,21 @@ private:
                                float focalLengthMm, float aperture,
                                float cropFactor);
 
-    // PHASE_12/13: constructs aiEngine_ + modelManager_, loads every ready
-    // model from <applicationDirPath>/models/manifest.json into the engine,
-    // and publishes the engine via Pipeline::setGlobalAiEngine. Safe to call
-    // when LRC_ENABLE_AI is off (the body is #ifdef-guarded to a no-op); safe
-    // to call when the bundled manifest is missing (logs + returns).
+    // Constructs aiEngine_ + modelManager_, loads every ready model from
+    // <applicationDirPath>/models/manifest.json into the engine, and publishes
+    // the engine via Pipeline::setGlobalAiEngine. Safe to call when LRC_ENABLE_AI
+    // is off (the body is #ifdef-guarded to a no-op); safe to call when the
+    // bundled manifest is missing (logs + returns).
     void initializeAiEngine();
 
-    // --- engine / catalog ----------------------------------------------
+    // --- engine / catalog --------------------------------------------------
     lrc::RawDecoder decoder_;
     std::shared_ptr<lrc::ColorManager> colorManager_;
     std::unique_ptr<lrc::Pipeline> pipeline_;
-    // PHASE_12/13: AI inference engine + model manager. The engine is shared
-    // process-wide via Pipeline::setGlobalAiEngine so the static
-    // applySpatialAdjustments / applyLocalAdjustments entry points can reach
-    // it. Owned here so the engine outlives every preview/export render.
+    // AI inference engine + model manager. The engine is shared process-wide via
+    // Pipeline::setGlobalAiEngine so the static applySpatialAdjustments /
+    // applyLocalAdjustments entry points can reach it. Owned here so the engine
+    // outlives every preview/export render.
     std::unique_ptr<lrc::AiInferenceEngine> aiEngine_;
     std::unique_ptr<lrc::ModelManager> modelManager_;
     std::unique_ptr<lrc::CatalogDatabase> catalog_;
@@ -321,9 +352,9 @@ private:
     PreviewWorker* previewWorker_ = nullptr;
     QThread* previewThread_ = nullptr;
     qint64 previewGeneration_ = 0;
-    // M10: catalog backup/optimize run on a std::thread so the UI thread never
-    // blocks on sqlite3_backup_step / VACUUM. Joined in the destructor before
-    // catalog_ is destroyed; dbOpRunning_ guards against re-entrant operations.
+    // Catalog backup/optimize run on a std::thread so the UI thread never blocks
+    // on sqlite3_backup_step / VACUUM. Joined in the destructor before catalog_
+    // is destroyed; dbOpRunning_ guards against re-entrant operations.
     std::thread dbOpThread_;
     bool dbOpRunning_ = false;
 
@@ -335,22 +366,22 @@ private:
     QScrollArea* developScroll_ = nullptr;  // scroll area wrapping developPanel_
     QDialog* maskWindow_ = nullptr;
     QTimer* folderTimer_ = nullptr;
-    // M2-1: one-shot throttle (150ms) that guarantees the last coarse frame's
+    // One-shot throttle (150ms) that guarantees the last coarse frame's
     // histogram/status update lands after the throttle window ends.
     QTimer* histogramThrottle_ = nullptr;
-    // M2-4: one-shot debounce (500ms) that coalesces adjustment DB writes.
+    // One-shot debounce (500ms) that coalesces adjustment DB writes.
     QTimer* saveDebounceTimer_ = nullptr;
-    // S1: while a background worker is still stopping, the close is deferred and
+    // While a background worker is still stopping, the close is deferred and
     // this repeating timer re-closes once every worker has finished.
     QTimer* workerStopPollTimer_ = nullptr;
-    // M4 toolbar groups: the viewport/panel are the source, the toolbar mirrors.
+    // Toolbar groups: the viewport/panel are the source, the toolbar mirrors.
     QButtonGroup* viewButtonGroup_ = nullptr;  // Fit / FitWidth / 1:1
     QButtonGroup* maskButtonGroup_ = nullptr;  // linear / radial / brush
-    QAction* spotToolAction_ = nullptr;        // M5: checkable spot-removal tool
-    QButtonGroup* compareButtonGroup_ = nullptr;  // M7: Off / L-R / T-B / single
-    QLineEdit* searchEdit_ = nullptr;          // M8: top-toolbar search box
-    QTimer* searchDebounceTimer_ = nullptr;    // M8: search debounce (300 ms)
-    QTimer* spotCommitTimer_ = nullptr;        // M5: spot-gesture commit debounce
+    QAction* spotToolAction_ = nullptr;        // checkable spot-removal tool
+    QButtonGroup* compareButtonGroup_ = nullptr;  // Off / L-R / T-B / single
+    QLineEdit* searchEdit_ = nullptr;          // top-toolbar search box
+    QTimer* searchDebounceTimer_ = nullptr;    // search debounce (300 ms)
+    QTimer* spotCommitTimer_ = nullptr;        // spot-gesture commit debounce
     QString currentDcpProfilePath_;
 
     // --- state ----------------------------------------------------------
@@ -365,49 +396,49 @@ private:
     lrc::Adjustments currentAdjustments_;
     lrc::UndoStack<lrc::Adjustments> undoStack_;  // 50-step undo history
     bool maskStrokeActive_ = false;  // true while a mask stroke is being drawn
-    bool gestureActive_ = false;     // M3: a slider-drag gesture is in progress
+    bool gestureActive_ = false;     // a slider-drag gesture is in progress
     bool fullResActive_ = false;  // true while the 1:1 full-res view is live
     QString filterFolder_;
     int filterRating_ = 0;       // 0 = any
     int filterFlag_ = 0;         // 0 = any, 1 = picked, -1 = rejected, 2 = none
     int filterLabelColor_ = 0;   // 0 = any, 1..7 = colour label
     int filterCollectionId_ = -1;  // -1 = all collections
-    // M8/M9: additional navigator-driven filter dimensions (mutually exclusive
-    // with the folder / collection / search filters; clearing happens in
+    // Additional navigator-driven filter dimensions (mutually exclusive with the
+    // folder / collection / search filters; clearing happens in
     // clearImageFilters()).
-    QString filterSearchText_;     // M8: non-empty -> restrict to searchImages()
-    int64_t filterKeywordId_ = -1;  // M8: keyword filter (-1 = none)
-    int64_t filterSmartCollectionId_ = -1;  // M9: smart collection (-1 = none)
+    QString filterSearchText_;     // non-empty -> restrict to searchImages()
+    int64_t filterKeywordId_ = -1;  // keyword filter (-1 = none)
+    int64_t filterSmartCollectionId_ = -1;  // smart collection (-1 = none)
 
-    // --- M5-10 integration state --------------------------------------------
+    // --- Integration state ----------------------------------------------------
     bool spotStrokeActive_ = false;  // true while a spot gesture is in flight
-    // M6: which edit variant the current photo view shows (0 = master).
+    // Which edit variant the current photo view shows (0 = master).
     int currentVariantId_ = 0;
-    // M6: variant the debounced adjustment save belongs to (mirror of
+    // Variant the debounced adjustment save belongs to (mirror of
     // pendingSaveImageId_).
     int pendingSaveVariantId_ = 0;
-    // M6: export-variant selection (defaults to the currently-viewed variant).
+    // Export-variant selection (defaults to the currently-viewed variant).
     qint64 currentExportVariantId_ = 0;
-    // M7: catalog id of the reference photo (-1 = reference view off).
+    // Catalog id of the reference photo (-1 = reference view off).
     int64_t referenceImageId_ = -1;
-    // M9: navigator virtual-copies group rebuild guard (rebuild only when the
+    // Navigator virtual-copies group rebuild guard (rebuild only when the
     // library image count changes or after an explicit invalidation).
     bool virtualCopiesBuilt_ = false;
     int lastVcImageCount_ = -1;
-    // M10: source image ids of the panorama currently being merged.
+    // Source image ids of the panorama currently being merged.
     std::vector<int64_t> panoramaSourceIds_;
 
-    // --- M2-1: histogram/status-bar throttle state -------------------------
+    // --- Histogram/status-bar throttle state -----------------------------------
     qint64 lastHistogramMs_ = 0;      // monotonic ms of the last full histogram update
     bool histogramPending_ = false;   // a coarse histogram update is queued
     QElapsedTimer histogramClock_;    // monotonic clock for the throttle
     QImage pendingHistogramImage_;    // most recent coarse frame awaiting flush
 
-    // --- M2-4: debounced adjustment persistence ----------------------------
+    // --- Debounced adjustment persistence --------------------------------------
     std::optional<lrc::Adjustments> pendingSave_;  // latest value awaiting flush
     int pendingSaveImageId_ = -1;     // image the pending save belongs to
 
-    // --- M3-3: filmstrip lazy-thumbnail background decoding ------------------
+    // --- Filmstrip lazy-thumbnail background decoding ---------------------------
     QThread* thumbLoaderThread_ = nullptr;  // thread that decodes thumbnails
     QObject* thumbLoaderHub_ = nullptr;     // lives on thumbLoaderThread_, runs decode
     QVector<int> pendingThumbnails_;        // imageIds awaiting decode (bounded FIFO)

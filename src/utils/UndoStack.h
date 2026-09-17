@@ -10,36 +10,60 @@
 
 namespace lrc {
 
+/**
+ * @brief A bounded undo/redo stack shared by the engine and catalog layers.
+ *
+ * Stores full snapshots of a state type T (an Adjustments object, a string,
+ * etc.). push() records a new edit and discards the redo branch, so the stack
+ * always represents a single linear history with an optional cap.
+ *
+ * @tparam T Snapshot value type (must be copyable).
+ */
 template <typename T>
 class UndoStack {
 public:
+    /** @brief Constructs an empty stack.
+     * @param limit Maximum number of undo states retained (default 50).
+     */
     explicit UndoStack(size_t limit = 50);
 
-    // Records a new edit. Clears the redo branch (starts a new linear history)
-    // and drops the oldest state once the undo history exceeds limit.
+    /** @brief Records a new edit.
+     *
+     * Clears the redo branch (starts a new linear history) and drops the
+     * oldest state once the undo history exceeds the limit.
+     */
     void push(const T& state);
 
-    // Moves the most recent state into the redo stack. Returns false (and
-    // leaves the stack untouched) when there is nothing to undo.
+    /** @brief Moves the most recent state into the redo stack.
+     * @return False (leaving the stack untouched) when there is nothing to
+     *         undo.
+     */
     bool undo();
 
-    // Inverse of undo: moves the most recently undone state back into the undo
-    // stack. Returns false (and leaves the stack untouched) when there is
-    // nothing to redo.
+    /** @brief Inverse of undo: moves the most recently undone state back into
+     *         the undo stack.
+     * @return False (leaving the stack untouched) when there is nothing to
+     *         redo.
+     */
     bool redo();
 
     bool canUndo() const;
     bool canRedo() const;
 
-    // Read-only access to the most recently pushed state (the back of the
-    // undo stack). Only valid while canUndo() is true (undo_ is non-empty).
+    /** @brief Read-only access to the most recently pushed state.
+     * @return The back of the undo stack.
+     * @note Only valid while canUndo() is true (undo_ is non-empty).
+     */
     const T& top() const;
 
-    // Changes the history cap. Trims the oldest states immediately if the
-    // current undo history exceeds the new limit.
+    /** @brief Changes the history cap.
+     *
+     * Trims the oldest states immediately if the current undo history exceeds
+     * the new limit.
+     */
     void setLimit(size_t limit);
 
-    // Discards all history (both undo and redo stacks).
+    /** @brief Discards all history (both undo and redo stacks). */
     void clear();
 
 private:

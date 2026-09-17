@@ -49,7 +49,7 @@ public:
     // or chromatic aberration; applyGeometry handles only geometric
     // distortion. Post-crop vignetting is a separate manual stage (see
     // Pipeline::renderFullLinear). The UI must not advertise Lensfun
-    // vignetting/CA as active output. (R-05)
+    // vignetting/CA as active output.
 };
 
 } // namespace lrc

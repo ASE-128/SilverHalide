@@ -1,7 +1,7 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// PHASE_11: AiInferenceEngine — pure C++ ONNX Runtime wrapper.
+// AiInferenceEngine — pure C++ ONNX Runtime wrapper.
 //
 // DESIGN RULES (enforced by this file):
 //   • NO Qt includes anywhere in this header or the .cpp.
@@ -173,7 +173,7 @@ private:
     std::unique_ptr<Impl> impl_;
 
     mutable std::shared_mutex mutex_;
-    // R-06: dedicated mutex for the error state. Reads/writes to `lastError_`
+    // Dedicated mutex for the error state. Reads/writes to `lastError_`
     // are guarded by this mutex instead of `mutex_`, because run()/runImage()
     // hold a *shared* lock on `mutex_` for the whole inference body and must
     // never try to upgrade to a write on it (that would self-deadlock).

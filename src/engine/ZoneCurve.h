@@ -25,27 +25,50 @@ namespace zonecurve {
 
 constexpr size_t kZoneCount = 4;
 
-// Anchor x (input tonal position) of each zone, in shadows..highlights order.
+/**
+ * @brief Anchor x (input tonal position) of each zone, in shadows..highlights
+ *        order.
+ */
 inline std::array<float, kZoneCount> anchors() {
     return {0.25f, 0.47f, 0.64f, 0.82f};
 }
 
-// Curve points (black endpoint, four zones, white endpoint) from explicit zone
-// outputs, in shadows..highlights order. Outputs are clamped to [0,1].
+/**
+ * @brief Builds curve points (black endpoint, four zones, white endpoint) from
+ *        explicit zone outputs, in shadows..highlights order.
+ *
+ * @param shadows The shadows zone output value.
+ * @param darks The darks zone output value.
+ * @param lights The lights zone output value.
+ * @param highlights The highlights zone output value.
+ * @return Points suitable for pipeline LUTs. Outputs are clamped to [0,1].
+ */
 std::vector<ToneCurvePoint> fromOutputs(float shadows, float darks,
                                         float lights, float highlights);
 
-// Identity curve: every zone output equals its anchor, giving y == x.
+/**
+ * @brief Identity curve: every zone output equals its anchor, giving y == x.
+ */
 std::vector<ToneCurvePoint> makeLinear();
 
-// Quantizes an arbitrary point set onto the four zone handles by nearest
-// anchor x. Zones with no nearby point stay linear. Used when loading curves
-// produced by the older free-form editor.
+/**
+ * @brief Quantizes an arbitrary point set onto the four zone handles by nearest
+ *        anchor x.
+ *
+ * Zones with no nearby point stay linear. Used when loading curves produced by
+ * the older free-form editor.
+ */
 std::vector<ToneCurvePoint> fromPoints(const std::vector<ToneCurvePoint>& points);
 
-// Monotone piecewise-cubic interpolation of the (x-sorted) points, evaluated
-// at normalized input x in [0,1]. Falls back to the nearest endpoint when the
-// domain is degenerate.
+/**
+ * @brief Monotone piecewise-cubic (Fritsch-Carlson) interpolation of the
+ *        (x-sorted) points, evaluated at normalized input x in [0,1].
+ *
+ * @param points Control points sorted by x.
+ * @param x Normalized input x in [0,1].
+ * @return Interpolated output y. Falls back to the nearest endpoint when the
+ *         domain is degenerate.
+ */
 inline float interpolate(const std::vector<ToneCurvePoint>& points, float x) {
     const size_t n = points.size();
     if (n == 0)

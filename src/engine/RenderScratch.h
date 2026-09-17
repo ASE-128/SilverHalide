@@ -49,10 +49,17 @@ inline void scratchResize(std::vector<float>& v, size_t minElems) {
 
 }  // namespace detail
 
-// Acquires a thread-local buffer holding at least minElems floats. The buffer
-// is marked in use; hand it back with scratchRelease (or use the ScratchBuffer
-// RAII guard, which does so on scope exit). Buffers are reused across calls and
-// retained for the life of the thread.
+/**
+ * @brief Acquires a thread-local float buffer of at least minElems elements.
+ *
+ * The buffer is marked in use. Hand it back with `scratchRelease` (or use the
+ * `ScratchBuffer` RAII guard, which does so on scope exit). Buffers are reused
+ * across calls and retained for the life of the thread; callers must not access
+ * a buffer after release.
+ *
+ * @param minElems Minimum float capacity requested.
+ * @return Reference to the acquired buffer.
+ */
 inline std::vector<float>& scratchVec(size_t minElems) {
     lrc::detail::ScratchPool& p = lrc::detail::scratchPool();
     for (size_t i = 0; i < p.bufs.size(); ++i) {
@@ -68,7 +75,12 @@ inline std::vector<float>& scratchVec(size_t minElems) {
     return p.bufs.back();
 }
 
-// Returns a scratch buffer acquired by scratchVec back to the pool.
+/**
+ * @brief Returns a scratch buffer acquired by `scratchVec` back to the pool.
+ *
+ * Passing a buffer that was not acquired via `scratchVec` (for that thread) is
+ * a no-op.
+ */
 inline void scratchRelease(std::vector<float>& v) {
     lrc::detail::ScratchPool& p = lrc::detail::scratchPool();
     for (size_t i = 0; i < p.bufs.size(); ++i) {
@@ -79,8 +91,13 @@ inline void scratchRelease(std::vector<float>& v) {
     }
 }
 
-// RAII guard around a scratch buffer: acquires on construction, releases on
-// destruction, so a forgotten release can never leak a slot or grow the pool.
+/**
+ * @brief RAII guard around a scratch buffer.
+ *
+ * Acquires on construction, releases on destruction, so a forgotten release can
+ * never leak a slot or grow the pool. Non-copyable; movable transfers ownership
+ * of the wrapped buffer.
+ */
 class ScratchBuffer {
 public:
     ScratchBuffer() : vec_(nullptr) {}

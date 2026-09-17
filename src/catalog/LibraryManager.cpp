@@ -136,9 +136,9 @@ std::optional<std::filesystem::path> LibraryManager::importFile(
         // std::filesystem::remove reports failure through ec; a false return
         // with a clean ec simply means the source was already absent, which is
         // a completed move, not an error. On a real failure the copy stays in
-        // the library and the caller is told the source may remain on disk
-        // (M4) -- importFile still returns the destination so the copy is
-        // cataloged, but the error string must not be swallowed.
+        // the library and the caller is told the source may remain on disk --
+        // importFile still returns the destination so the copy is cataloged,
+        // but the error string must not be swallowed.
         std::filesystem::remove(src, ec);
         if (ec)
             setError(error, "copied to " + dest.string() +

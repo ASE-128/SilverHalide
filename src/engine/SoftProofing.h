@@ -1,7 +1,7 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// PHASE_15: SoftProofing — soft-proof wrapper over Little-CMS2.
+// SoftProofing — soft-proof wrapper over Little-CMS2.
 //
 // Creates (and caches) an lcms2 proofing transform:
 //

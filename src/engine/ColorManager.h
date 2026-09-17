@@ -48,12 +48,11 @@ public:
     // space, honouring the source bit depth and its embedded ICC profile.
     //
     // `src` must be U8 or U16 (native depth; 16-bit sources are not truncated
-    // before the transform, see R-09). `iccBytes` is the byte-serialized source
+    // before the transform). `iccBytes` is the byte-serialized source
     // colour profile embedded in the file (JPEG APP2 / PNG iCCP / TIFF 34675);
     // when empty the source is assumed to be sRGB (the documented fallback, so
     // ICC-less files keep the historical behaviour). The transform runs through
-    // lcms so a wide-gamut source is interpreted in its true space, not sRGB
-    // (R-08).
+    // lcms so a wide-gamut source is interpreted in its true space, not sRGB.
     ImageBufferPtr sourceToLinearProPhoto(
         const ImageBuffer& src, const std::vector<uint8_t>& iccBytes) const;
 
@@ -74,7 +73,7 @@ public:
     // sRGB if the file cannot be opened).
     void loadDisplayProfile(const std::filesystem::path& iccPath);
 
-    // P1-2: ICC profile presets that may be embedded in exported files. sRGB is
+    // ICC profile presets that may be embedded in exported files. sRGB is
     // the default export colour space (matches the display-render path).
     enum class ExportColorProfile { SRGB, AdobeRGB, DisplayP3 };
 
@@ -93,7 +92,7 @@ public:
      * Input `enc` must be display-ready sRGB-encoded pixels (U8 or U16). The
      * target is `iccBytes`, the exact profile bytes the caller will embed; the
      * transform runs through lcms (relative-colorimetric) so the exported
-     * pixels and their embedded ICC tag describe the same colour space (R-03).
+     * pixels and their embedded ICC tag describe the same colour space.
      * When `iccBytes` is empty or the target profile/transform cannot be built
      * the input is returned unchanged, so the caller never pairs converted
      * pixels against a missing label.

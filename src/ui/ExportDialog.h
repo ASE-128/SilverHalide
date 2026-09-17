@@ -1,9 +1,12 @@
 #pragma once
 
-// Multi-format export dialog (JPEG / PNG / TIFF-8 / TIFF-16 / DNG). The engine
-// layer (ExportEngine) already supports every format; this dialog gathers the
-// format-specific options and an output path, then MainWindow routes the job
-// to PreviewWorker::exportImage.
+/**
+ * @brief Multi-format export dialog (JPEG / PNG / TIFF-8 / TIFF-16 / DNG).
+ *
+ * The engine layer (ExportEngine) already supports every format; this dialog
+ * gathers the format-specific options and an output path, then MainWindow
+ * routes the job to PreviewWorker::exportImage.
+ */
 
 #include <QDialog>
 #include <QImage>
@@ -11,7 +14,7 @@
 
 #include <vector>
 
-#include "ui/PreviewWorker.h"  // ExportWatermark (P1-4)
+#include "ui/PreviewWorker.h"  // for ExportWatermark
 
 class QCheckBox;
 class QComboBox;
@@ -22,7 +25,7 @@ class QWidget;
 
 namespace lrc {
 
-// catalog/CatalogDatabase.h (M6). Forward-declared so this header stays
+// catalog/CatalogDatabase.h. Forward-declared so this header stays
 // Qt-only and free of catalog/ includes.
 struct EditVariant;
 
@@ -38,11 +41,11 @@ public:
     // Combo index == PreviewWorker::ExportFormat value.
     int formatIndex() const;
     int jpegQuality() const;
-    // S17-18: longest-edge pixel cap for the exported image. 0 = keep native
+    // Longest-edge pixel cap for the exported image. 0 = keep native
     // resolution (no downscale). Read from the size-preset combo.
     int maxDim() const;
 
-    // --- virtual-copy / variant selection (M6) -----------------------------
+    // --- Virtual-copy / variant selection ------------------------------------
     // Fills the variant selector with the master plus every virtual copy of
     // the current photo. `variants` is expected to be the result of
     // CatalogDatabase::listVariants(imageId). The selector is shown only when
@@ -60,14 +63,14 @@ public:
     // Composed a suggested filename for the given format index (incl. dot).
     static QString defaultFileName(const QString& baseName, int formatIndex);
 
-    // --- P1-2 ICC ----------------------------------------------------------
+    // --- ICC --------------------------------------------------------------
     // Returns an ExportEngine::ExportSpec::IccChoice value (0 = none).
     int iccIndex() const;
-    // --- P1-4 watermark -----------------------------------------------------
+    // --- Watermark ---------------------------------------------------------
     // Returns the configured watermark (RGBA overlay + position/opacity/scale).
     ExportWatermark watermark() const;
 
-    // --- P1-3 batch rename --------------------------------------------------
+    // --- Batch rename ------------------------------------------------------
     // True when the user switched on "rename on batch export" and typed a
     // template. When enabled, MainWindow exports the master + all virtual
     // copies into the chosen folder, naming each output from the template
@@ -94,21 +97,21 @@ private:
 
     QComboBox* variantCombo_ = nullptr;
     QComboBox* formatCombo_ = nullptr;
-    QComboBox* sizeCombo_ = nullptr;  // S17-18: longest-edge preset.
-    QComboBox* iccCombo_ = nullptr;   // P1-2: ICC preset (0 = none).
-    QCheckBox* renameBox_ = nullptr;  // P1-3: batch-rename on/off.
-    QLineEdit* renameEdit_ = nullptr; // P1-3: rename template.
-    QLabel* renamePreview_ = nullptr; // P1-3: rendered batch-name preview.
-    // P1-3: cached variant list (master + virtual copies) so the preview can
-    // show the batch outputs without re-querying the catalog.
+    QComboBox* sizeCombo_ = nullptr;  // longest-edge preset.
+    QComboBox* iccCombo_ = nullptr;   // ICC preset (0 = none).
+    QCheckBox* renameBox_ = nullptr;  // batch-rename on/off.
+    QLineEdit* renameEdit_ = nullptr; // rename template.
+    QLabel* renamePreview_ = nullptr; // rendered batch-name preview.
+    // Cached variant list (master + virtual copies) so the preview can show the
+    // batch outputs without re-querying the catalog.
     std::vector<lrc::EditVariant> variants_;
-    QCheckBox* wmEnable_ = nullptr;   // P1-4: watermark on/off.
-    QLabel* wmPathLabel_ = nullptr;   // P1-4: chosen overlay file label.
-    QComboBox* wmPosition_ = nullptr; // P1-4: corner / centre.
-    QSlider* wmOpacity_ = nullptr;    // P1-4: opacity 0..100.
-    QSlider* wmScale_ = nullptr;      // P1-4: scale 0..50 (~0..0.5 edge ratio).
-    QWidget* wmRow_ = nullptr;        // P1-4: watermark options group.
-    // P1-4: straight-alpha RGBA overlay decoded from the chosen PNG.
+    QCheckBox* wmEnable_ = nullptr;   // watermark on/off.
+    QLabel* wmPathLabel_ = nullptr;   // chosen overlay file label.
+    QComboBox* wmPosition_ = nullptr; // corner / centre.
+    QSlider* wmOpacity_ = nullptr;    // opacity 0..100.
+    QSlider* wmScale_ = nullptr;      // scale 0..50 (~0..0.5 edge ratio).
+    QWidget* wmRow_ = nullptr;        // watermark options group.
+    // Straight-alpha RGBA overlay decoded from the chosen PNG.
     QImage wmOverlay_;
 
     QLineEdit* pathEdit_ = nullptr;

@@ -71,9 +71,8 @@ void EditHistoryDialog::onRestore() {
         QMessageBox::warning(this, tr("编辑历史"), tr("无法读取该快照。"));
         return;
     }
-    // 持久化 + 撤销 + 预览统一交给 commitAdjustments,恢复只写一条快照 (persistence,
-    // undo and preview all go through MainWindow::commitAdjustments, so a restore
-    // writes exactly one snapshot, not two).
+    // Persistence, undo and preview all go through MainWindow::commitAdjustments,
+    // so a restore writes exactly one snapshot, not two.
     restored_ = *adjustments;
     accept();
 }

@@ -75,9 +75,9 @@ ImportDialog::ImportDialog(const QString& defaultDestDir, QWidget* parent)
     hint->setEnabled(false); // dimmed hint under the checkbox
     root->addWidget(hint);
 
-    // P1-3: Lightroom-style rename on import. The user types a template using
-    // {date}, {index[:W]} and {base}; the library renames each file to the
-    // rendered name (collisions get a numeric suffix) before cataloging it.
+    // Lightroom-style rename on import. The user types a template using {date},
+    // {index[:W]} and {base}; the library renames each file to the rendered name
+    // (collisions get a numeric suffix) before cataloging it.
     renameBox_ = new QCheckBox(tr("导入时重命名文件"), this);
     root->addWidget(renameBox_);
     auto* renameRow = new QHBoxLayout;

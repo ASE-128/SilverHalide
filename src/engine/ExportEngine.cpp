@@ -17,7 +17,7 @@ namespace lrc {
 namespace {
 
 // ---------------------------------------------------------------------------
-// P1-2 / P1-4: ICC profile resolution + watermark compositing helpers
+// ICC profile resolution + watermark compositing helpers
 // ---------------------------------------------------------------------------
 
 // Resolves the ICC profile bytes to embed for a spec. Priority: a custom user
@@ -172,7 +172,7 @@ bool ExportEngine::exportJpeg(const std::filesystem::path& outPath,
     }
     rgb = applyWatermark(rgb, spec);
     const auto icc = resolveIccBytes(spec);
-    // R-03: convert display sRGB pixels into the chosen ICC space so the
+    // Convert display sRGB pixels into the chosen ICC space so the
     // embedded profile and the pixel data describe the same colour space.
     rgb = cm_->sRGBEncodedToProfile(*rgb, icc);
     if (!ImageIO::writeJpeg(outPath, *rgb, quality, icc)) {
@@ -185,7 +185,7 @@ bool ExportEngine::exportJpeg(const std::filesystem::path& outPath,
 void ExportEngine::quantizeToU16Parallel(
     const ImageBuffer& f32, ImageBuffer& u16, int rowsPerStrip,
     const std::function<void(const float*, float*, size_t)>& convert) {
-    // S16: quantize F32 -> U16 with row-strip parallelism. Each strip is an
+    // Quantize F32 -> U16 with row-strip parallelism. Each strip is an
     // independent range of rows; chunks never overlap so no locks are needed.
     // The per-pixel math is identical to the old single-threaded loop (same
     // clamp * 65535.0f cast), so the output is bit-for-bit identical.
@@ -240,7 +240,7 @@ bool ExportEngine::exportPng(const std::filesystem::path& outPath,
     }
     rgb = applyWatermark(rgb, spec);
     const auto icc = resolveIccBytes(spec);
-    // R-03: real sRGB -> target ICC pixel conversion (see sRGBEncodedToProfile).
+    // Real sRGB -> target ICC pixel conversion (see sRGBEncodedToProfile).
     rgb = cm_->sRGBEncodedToProfile(*rgb, icc);
     if (!ImageIO::writePng(outPath, *rgb, icc)) {
         lastError_ = "cannot write output file";
@@ -264,7 +264,7 @@ bool ExportEngine::exportTiff(const std::filesystem::path& outPath,
         }
         rgb = applyWatermark(rgb, spec);
         const auto icc8 = resolveIccBytes(spec);
-        // R-03: mirror JPEG/PNG — convert the display sRGB pixels into the chosen
+        // Mirror JPEG/PNG — convert the display sRGB pixels into the chosen
         // ICC space before embedding the same profile, so pixels and tag agree.
         rgb = cm_->sRGBEncodedToProfile(*rgb, icc8);
         if (!ImageIO::writeTiff(outPath, *rgb, icc8)) {
@@ -282,13 +282,13 @@ bool ExportEngine::exportTiff(const std::filesystem::path& outPath,
         }
         auto u16 = ImageBuffer::create(lin->width(), lin->height(),
                                        PixelFormat::U16);
-        // S16: strip-parallel quantization (replaces the old serial loop).
+        // Strip-parallel quantization (replaces the old serial loop).
         quantizeToU16Parallel(
             *lin, *u16, 64, [&](const float* s, float* d, size_t n) {
                 cm_->linearProPhotoToSRGB(s, d, n);
             });
         const auto icc16 = resolveIccBytes(spec);
-        // R-03: the pixels above are sRGB-encoded; convert them into the chosen
+        // The pixels above are sRGB-encoded; convert them into the chosen
         // ICC space so the embedded profile and the data describe the same colour
         // space. When icc16 is empty (None/sRGB default) this is a no-op clone.
         const auto conv = cm_->sRGBEncodedToProfile(*u16, icc16);
@@ -318,12 +318,12 @@ bool ExportEngine::exportDng(const std::filesystem::path& outPath,
     }
     auto u16 = ImageBuffer::create(lin->width(), lin->height(),
                                    PixelFormat::U16);
-    // S16: strip-parallel quantization, no colour conversion (linear DNG).
+    // Strip-parallel quantization, no colour conversion (linear DNG).
     quantizeToU16Parallel(*lin, *u16, 64, nullptr);
-    // R-07: linear DNG carries linear ProPhoto working-space data that is NOT
+    // Linear DNG carries linear ProPhoto working-space data that is NOT
     // converted into any display space, so embedding a display ICC (sRGB /
-    // Adobe RGB / Display P3) would mislabel the colour space (the R-03 class
-    // of bug). The profile is intentionally omitted; the dialog disables the
+    // Adobe RGB / Display P3) would mislabel the colour space. The profile is
+    // intentionally omitted; the dialog disables the
     // ICC (and watermark) choices for DNG so nothing is silently dropped.
     if (!ImageIO::writeDng(outPath, *u16, {})) {
         lastError_ = "cannot write output file";
@@ -336,7 +336,7 @@ bool ExportEngine::encodeAndWrite(const std::filesystem::path& outPath,
                                   uint64_t imageId, const ImageBuffer& linear,
                                   const Adjustments& adjustments,
                                   const ExportSpec& spec) {
-    // S17-18: optional maxDim downscale. Applied in linear F32 space before
+    // Optional maxDim downscale. Applied in linear F32 space before
     // the per-format dispatch so every format takes the same path. The resize
     // is area-average (never upscales), so a maxDim >= native longest edge is
     // a no-op and the output stays at full resolution. When a resize happens
@@ -361,7 +361,7 @@ bool ExportEngine::encodeAndWrite(const std::filesystem::path& outPath,
                                   scaledSpec);
         }
     }
-    // S16: single dispatch entry point for all export formats.
+    // Single dispatch entry point for all export formats.
     switch (spec.format) {
         case ExportSpec::Format::Jpeg:
             return exportJpeg(outPath, imageId, linear, adjustments,

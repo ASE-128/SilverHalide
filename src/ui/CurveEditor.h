@@ -1,11 +1,15 @@
 #pragma once
 
-// Lightroom-style zone tone-curve editor. Four draggable zone handles -
-// shadows / darks / lights / highlights - are pinned between fixed black and
-// white endpoints. Dragging a handle raises or lowers its tonal band while the
-// monotonicity constraint keeps the curve from folding over. Double-clicking a
-// handle resets that zone to linear. Curve output feeds the pipeline's
-// tone-curve stage.
+/**
+ * @brief Lightroom-style zone tone-curve editor.
+ *
+ * Four draggable zone handles — shadows / darks / lights / highlights — are
+ * pinned between fixed black and white endpoints. Dragging a handle raises or
+ * lowers its tonal band while the monotonicity constraint keeps the curve from
+ * folding over. Double-clicking a handle resets that zone to linear. Curve
+ * output feeds the pipeline's tone-curve stage. Emits signals only; never
+ * touches the engine directly.
+ */
 
 #include <QWidget>
 #include <vector>

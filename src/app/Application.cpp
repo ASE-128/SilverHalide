@@ -33,8 +33,8 @@ QString Application::defaultCatalogPath() {
     if (base.isEmpty())
         base = QDir::homePath() + QStringLiteral("/SilverHalide");
     QDir().mkpath(base);
-    // 目录即库: the default catalog is a *folder* named after the default
-    // catalog (base/Default), holding Default.shcat + previews.shcat/.
+    // Default catalog is a *folder* named after the default catalog
+    // (base/Default), holding Default.shcat + previews.shcat/.
     const QString folder = base + QLatin1Char('/') +
                            QString::fromLatin1(lrc::app::kDefaultCatalogName);
 

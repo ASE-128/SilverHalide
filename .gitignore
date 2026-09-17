@@ -40,13 +40,23 @@ qrc_*.cpp
 *.jsc
 qt/
 
+# ===== 大型构建依赖归档 =====
+# onnxruntime 解压目录已在上方忽略，这里覆盖误提交的源码包。
+# 依赖由 CMake 通过 ONNXRUNTIME_ROOT 指向外部预置目录，不入版本库。
+onnxruntime-win-x64-*.zip
+
+# ===== autotools 生成缓存（不提交）=====
+autom4te.cache/
+
 # ===== vcpkg =====
 vcpkg_installed/
+_vcpkg_exported_*/
 
-# ===== 包管理 / 依赖缓存 =====
+# ===== 包管理 / 运行时依赖缓存 =====
 node_modules/
 __pycache__/
 *.pyc
+.uv/
 
 # ===== 日志与临时文件 =====
 *.log
@@ -54,27 +64,20 @@ __pycache__/
 *.swp
 *.swo
 *~
+*.bak
 
 # ===== 系统文件 =====
 .DS_Store
 Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
 
-# ===== Aider 个人状态文件（不提交）=====
-# 历史文件
-.aider.chat.history.md
-.aider.input.history
-.aiderignore
-
-# 注意：以下项目级配置保留在版本控制中：
-# .aider.conf.yml
-# .aider.model.settings.yml
-.aider*
-
-#=====IDE======
+# ===== IDE =====
 .trae/
 .claude/
 .github/
 .vscode/
+.idea/
 *.user
 *.autosave
 

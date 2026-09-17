@@ -1,15 +1,17 @@
 #pragma once
 
-// Polling folder watcher (std::filesystem based — Qt-free). The UI drives
-// poll() from a QTimer; changes are reported through a callback. Phase-1
-// import watches the imported folder so newly added files appear automatically.
-//
-// Beyond path add/remove the monitor also tracks file identity (size +
-// last-write time) so an in-place content change is reported as "modified"
-// (R-14). Removable files are only reported after they stay gone across
-// kOfflineThreshold consecutive polls; when the whole folder becomes
-// unavailable in a single poll no removal is reported at all, so a transient
-// network/disconnected-drive absence cannot destroy catalog records (R-15).
+/**
+ * @brief Polling folder watcher (std::filesystem based — Qt-free).
+ *
+ * The UI drives poll() from a QTimer; changes are reported through a callback.
+ * Phase-1 import watches the imported folder so newly added files appear
+ * automatically. Beyond path add/remove the monitor also tracks file identity
+ * (size + last-write time) so an in-place content change is reported as
+ * "modified". Removable files are only reported after they stay gone across
+ * kOfflineThreshold consecutive polls; when the whole folder becomes
+ * unavailable in a single poll no removal is reported at all, so a transient
+ * network/disconnected-drive absence cannot destroy catalog records.
+ */
 
 #include <cstdint>
 #include <filesystem>
@@ -23,9 +25,11 @@ namespace lrc {
 
 class FolderMonitor {
 public:
-    // `modified` = files whose size or last-write time changed since the
-    // previous scan (content replaced in place). `removed` is only emitted
-    // after a file has been absent for kOfflineThreshold consecutive polls.
+    /** @brief Result of one poll() scan.
+     *
+     *  `modified` = files whose size or last-write time changed since the
+     *  previous scan (content replaced in place). `removed` is only emitted
+     *  after a file has been absent for kOfflineThreshold consecutive polls. */
     using ChangeCallback =
         std::function<void(const std::vector<std::filesystem::path>& added,
                            const std::vector<std::filesystem::path>& modified,
@@ -33,14 +37,18 @@ public:
 
     explicit FolderMonitor(std::filesystem::path folder);
 
+    /// @brief Installs the change callback; replaces any previous one.
     void setCallback(ChangeCallback callback);
 
-    // Records the current file set as the baseline (called on import).
+    /// @brief Records the current file set as the baseline (called on import).
     void start();
 
-    // Scans the folder and reports differences since the last call.
+    /// @brief Scans the folder and reports differences since the last call.
     void poll();
 
+    /** @brief Current known importable file set.
+     *  @return Live snapshot refreshed by start()/poll(); valid until the next
+     *          poll. */
     const std::vector<std::filesystem::path>& currentFiles() const;
 
     // Extension lists and path predicates delegate to engine/ImageFormats,
@@ -53,7 +61,7 @@ public:
     static bool isImportableFile(const std::filesystem::path& path);
 
 private:
-    // File identity used to detect in-place content changes (R-14).
+    // File identity used to detect in-place content changes.
     struct FileStamp {
         std::uintmax_t size = 0;
         std::filesystem::file_time_type modified{};
@@ -64,7 +72,7 @@ private:
     ChangeCallback callback_;
     // Known importable files -> their last observed identity.
     std::map<std::filesystem::path, FileStamp> known_;
-    // Consecutive times each known-but-missing file was absent (R-15 offline
+    // Consecutive times each known-but-missing file was absent (offline
     // grace). A file is not reported as removed until this reaches the
     // threshold.
     std::map<std::filesystem::path, int> missingPolls_;

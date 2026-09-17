@@ -19,13 +19,21 @@
 
 namespace lrc {
 
-// Structured Dublin-Core / Lightroom metadata exchanged with an XMP sidecar.
-// This is deliberately NOT part of Adjustments (metadata is not a develop
-// parameter); it rides alongside Adjustments through the sidecar API.
+/**
+ * @brief Structured Dublin-Core / Lightroom metadata exchanged with an XMP
+ *        sidecar.
+ *
+ * This is deliberately NOT part of Adjustments (metadata is not a develop
+ * parameter); it rides alongside Adjustments through the sidecar API.
+ */
 struct XmpMetadata {
-    // Keyword labels.  Hierarchical keywords use '|' as the level separator,
-    // e.g. "Scenery|Iceland|Waterfall" (Lightroom's lr:hierarchicalSubject
-    // convention).  dc:subject is stored the same way.
+    /**
+     * @brief Keyword labels.
+     *
+     * Hierarchical keywords use '|' as the level separator, e.g.
+     * "Scenery|Iceland|Waterfall" (Lightroom's lr:hierarchicalSubject
+     * convention). dc:subject is stored the same way.
+     */
     std::vector<std::string> keywords;
 
     std::string title;      // dc:title
@@ -36,29 +44,50 @@ struct XmpMetadata {
     bool operator==(const XmpMetadata&) const = default;
 };
 
+/**
+ * @brief Minimal XMP/RDF document reader/writer for the crs: namespace.
+ *
+ * Parses and serializes Lightroom camera-raw-settings attributes plus
+ * dc:/lr: metadata and crs:SpotCorrections. Value interpretation (numeric /
+ * enum) is left to the mapping layer (XmpProfile); this class only moves XML.
+ */
 class XmpDocument {
 public:
-    // Parses XMP XML text (an .xmp sidecar or RAW-embedded xmpdata) and fills
-    // `outCrsAttrs` with every attribute in the crs: namespace
-    // (http://ns.adobe.com/camera-raw-settings/1.0/).  Names are stored WITHOUT
-    // the "crs:" prefix (e.g. "Exposure2012").  Returns false when the text is
-    // not well-formed XML or contains no crs attributes.  Non-crs attributes,
-    // unknown namespaces and nested rdf: structures are ignored.
+    /**
+     * @brief Parses XMP XML text and collects every crs: attribute.
+     *
+     * @param xmlText The XMP text (an .xmp sidecar or RAW-embedded xmpdata).
+     * @param outCrsAttrs Receives each attribute in the crs: namespace
+     *        (http://ns.adobe.com/camera-raw-settings/1.0/). Names are stored
+     *        WITHOUT the "crs:" prefix (e.g. "Exposure2012").
+     * @return false when the text is not well-formed XML or contains no crs
+     *         attributes. Non-crs attributes, unknown namespaces and nested
+     *         rdf: structures are ignored.
+     */
     static bool parse(const std::string& xmlText,
                       std::map<std::string, std::string>& outCrsAttrs);
 
-    // Serializes crs attributes into a minimal but valid XMP RDF document:
-    //   <x:xmpmeta><rdf:RDF><rdf:Description ... crs attrs .../></rdf:RDF></x:xmpmeta>
-    // with the crs namespace declared.  `rdfAbout` becomes rdf:about (empty =
-    // omitted).  Attribute values are emitted verbatim (already formatted by the
-    // mapping layer).
+    /**
+     * @brief Serializes crs attributes into a minimal, valid XMP RDF document:
+     *        <x:xmpmeta><rdf:RDF><rdf:Description ... crs attrs .../></rdf:RDF></x:xmpmeta>
+     *        with the crs namespace declared.
+     *
+     * @param crsAttrs Flat attribute map (keys without the "crs:" prefix).
+     * @param rdfAbout Value for rdf:about; empty = omitted.
+     * @return The serialized XMP document text. Values are emitted verbatim
+     *         (already formatted by the mapping layer).
+     */
     static std::string serialize(const std::map<std::string, std::string>& crsAttrs,
                                  const std::string& rdfAbout = std::string());
 
     // --- Structured spot-correction element -------------------------------
-    // One crs:SpotCorrection entry as found in a crs:SpotCorrections rdf:Bag.
-    // String-valued on purpose: this is the XML layer; value interpretation
-    // (normalized float, Clone/Heal enum) is done by XmpProfile.
+    /**
+     * @brief One crs:SpotCorrection entry as found in a crs:SpotCorrections
+     *        rdf:Bag.
+     *
+     * String-valued on purpose: this is the XML layer; value interpretation
+     * (normalized float, Clone/Heal enum) is done by XmpProfile.
+     */
     struct SpotCorrectionXml {
         std::string type;     // crs:CorrectionType "Clone" / "Heal"
         std::string source;   // crs:CorrectionSource "Source" (manual source)
@@ -71,32 +100,60 @@ public:
         std::string sourceY;  // crs:SourceY custom key (no LRC equivalent), normalized 0..1
     };
 
-    // Parses crs:SpotCorrections from XMP XML text into string-valued entries.
-    // Returns false when the text is malformed or contains no spot corrections.
-    // Tolerant of both attribute-form and element-form properties and of both
-    // crs:CorrectionMask (project) and crs:CorrectionMasks (Lightroom plural).
+    /**
+     * @brief Parses crs:SpotCorrections from XMP XML text into string-valued
+     *        entries.
+     *
+     * @param xmlText The XMP text.
+     * @param out Receives the parsed entries.
+     * @return false when the text is malformed or contains no spot corrections.
+     *         Tolerant of both attribute-form and element-form properties and
+     *         of both crs:CorrectionMask (project) and crs:CorrectionMasks
+     *         (Lightroom plural).
+     */
     static bool parseSpotCorrections(const std::string& xmlText,
                                      std::vector<SpotCorrectionXml>& out);
 
-    // Serializes spot corrections into a crs:SpotCorrections XML fragment.
+    /**
+     * @brief Serializes spot corrections into a crs:SpotCorrections XML
+     *        fragment (inside a minimal XMP document).
+     */
     static std::string serializeSpotCorrections(
         const std::vector<SpotCorrectionXml>& spots);
 
     // --- dc:/lr: metadata ---------------------------------------------------
-    // Reads dc:subject / lr:hierarchicalSubject keywords, dc:title,
-    // dc:description, dc:rights and dc:creator from XMP XML text.  Returns
-    // false only when the text is not well-formed XML; `out` is left as the
-    // defaults when nothing is found.
+    /**
+     * @brief Reads dc:/lr: metadata (keywords, title, description, rights,
+     *        creator) from XMP XML text.
+     *
+     * @param xmlText The XMP text.
+     * @param out Receives the metadata; left at defaults when nothing found.
+     * @return false only when the text is not well-formed XML.
+     */
     static bool readMetadata(const std::string& xmlText, XmpMetadata& out);
 
-    // Serializes metadata into a minimal XMP RDF document that carries only the
-    // dc:/lr: elements (no crs attributes).  Empty fields are omitted.
+    /**
+     * @brief Serializes metadata into a minimal XMP RDF document carrying only
+     *        the dc:/lr: elements (no crs attributes). Empty fields are
+     *        omitted.
+     */
     static std::string serializeMetadata(const XmpMetadata& md);
 
-    // Full document serialization: crs attributes plus, optionally, dc:/lr:
-    // metadata and crs:SpotCorrections, all on a single rdf:Description.
-    // Passing null / empty keeps the corresponding section out of the output,
-    // so callers that only need the flat crs attributes keep the legacy shape.
+    /**
+     * @brief Full document serialization: crs attributes plus, optionally,
+     *        dc:/lr: metadata and crs:SpotCorrections, all on a single
+     *        rdf:Description.
+     *
+     * @param crsAttrs Flat attribute map (keys without the "crs:" prefix).
+     * @param rdfAbout Value for rdf:about; empty = omitted.
+     * @param metadata Optional dc:/lr: metadata; null omits the section.
+     * @param spots Optional crs:SpotCorrections; null/empty omits the section.
+     * @return The serialized XMP document text.
+     *
+     * @note Passing null/empty keeps the corresponding section out of the
+     *       output, so callers that only need the flat crs attributes keep the
+     *       legacy shape.
+     */
     static std::string serializeFull(
         const std::map<std::string, std::string>& crsAttrs,
         const std::string& rdfAbout = std::string(),

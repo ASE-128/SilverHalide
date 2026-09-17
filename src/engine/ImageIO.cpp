@@ -24,7 +24,7 @@ namespace lrc {
 namespace {
 
 // ---------------------------------------------------------------------------
-// P1-2: ICC profile embedding helpers (JPEG APP2 / PNG iCCP / TIFF tag 34675)
+// ICC profile embedding helpers (JPEG APP2 / PNG iCCP / TIFF tag 34675)
 // ---------------------------------------------------------------------------
 
 // Standard PNG CRC-32 (IEEE 802.3 polynomial, reflected MSB-first like zlib).
@@ -143,7 +143,7 @@ std::vector<uint8_t> jpegIccMarkers(const std::vector<uint8_t>& icc) {
         // JPEG segment length must account for the 2 length bytes themselves
         // (the parser subtracts them back via segLen-2). ICC header is 14 bytes:
         // "ICC_PROFILE\0"(12) + seq(1) + count(1). Off-by-two here silently
-        // corrupts the ICC payload and breaks extraction (R-08).
+        // corrupts the ICC payload and breaks extraction.
         const size_t segLen = end - begin + 14 + 2;
         out.push_back(0xFF);
         out.push_back(0xE2);  // APP2
@@ -394,7 +394,7 @@ bool writeTiffRaw(const std::filesystem::path& path, int w, int h, int bps,
 // single or multiple strips, optional horizontal (Predictor 2) differencing.
 //
 // When `preserveDepth` is true a 16-bit source is returned at U16 (not
-// truncated to 8 bits, see R-09); otherwise the result is display-ready 8-bit
+// truncated to 8 bits); otherwise the result is display-ready 8-bit
 // sRGB, matching the loadImage contract. When `iccOut` is non-null the embedded
 // InterColorProfile (tag 34675) bytes, if present, are copied into it.
 ImageBufferPtr loadTiffImpl(const std::vector<uint8_t>& bytes, bool preserveDepth,
@@ -510,7 +510,7 @@ ImageBufferPtr loadTiffImpl(const std::vector<uint8_t>& bytes, bool preserveDept
 
     const size_t sampleBytes = bps / 8;
     const size_t bytesPerRow = static_cast<size_t>(w) * spp * sampleBytes;
-    // Preserve 16-bit source depth (R-09) when requested; otherwise and for
+    // Preserve 16-bit source depth when requested; otherwise and for
     // 8-bit sources the output is display-ready U8.
     PixelFormat outFmt = PixelFormat::U8;
     if (preserveDepth && bps == 16)
@@ -838,7 +838,7 @@ ImageBufferPtr ImageIO::loadImage(const uint8_t* data, size_t size) {
 
 namespace {
 // Shared decode core for the source (import) path: given raw file bytes, return
-// pixels at native bit depth plus the embedded source ICC (R-08/R-09). Both the
+// pixels at native bit depth plus the embedded source ICC. Both the
 // file-path and in-memory import APIs delegate here so they stay consistent.
 ImageIO::SourceImage decodeSourceBytes(const std::vector<uint8_t>& bytes) {
     ImageIO::SourceImage result;
@@ -848,7 +848,7 @@ ImageIO::SourceImage decodeSourceBytes(const std::vector<uint8_t>& bytes) {
         return result;
     };
 
-    // TIFF: preserve native bit depth + extract tag 34675 ICC (R-08/R-09).
+    // TIFF: preserve native bit depth + extract tag 34675 ICC.
     if (bytes.size() >= 4 &&
         ((bytes[0] == 'I' && bytes[1] == 'I') ||
          (bytes[0] == 'M' && bytes[1] == 'M'))) {

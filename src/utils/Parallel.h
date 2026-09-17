@@ -19,19 +19,33 @@
 
 namespace lrc::parallel {
 
-// Number of worker threads (>= 1). Controlled by the LRC_THREADS environment
-// variable when set, otherwise std::thread::hardware_concurrency(). Starting
-// the pool is the side effect of the first call; it is instant in practice.
+/** @brief Number of worker threads backing the pool (>= 1).
+ *
+ * Controlled by the LRC_THREADS environment variable when set, otherwise
+ * std::thread::hardware_concurrency(). Starting the pool is a side effect of
+ * the first call; it is instant in practice.
+ */
 unsigned threadCount();
 
-// A reasonable default chunk size for a buffer of `n` elements: targets ~8
-// chunks per worker so scheduling stays cheap while still balancing load.
+/** @brief A reasonable default chunk size for a buffer of `n` elements.
+ *
+ * Targets ~8 chunks per worker so scheduling stays cheap while still balancing
+ * load.
+ */
 size_t defaultGrain(size_t n);
 
-// Runs fn(begin, end) for a set of chunks that exactly cover [0, n). Each
-// chunk is a contiguous half-open range. `grain` is the chunk size in
-// elements; when n <= grain (or the pool has a single worker, or the caller
-// is itself a pool worker) the whole range runs inline.
+/** @brief Runs fn(begin, end) for chunks that exactly cover [0, n).
+ *
+ * Each chunk is a contiguous half-open range. When n <= grain, the pool has a
+ * single worker, or the caller is itself a pool worker, the whole range runs
+ * inline.
+ *
+ * @param n     Range length.
+ * @param grain Element count per chunk.
+ * @param fn    Called once per chunk; chunks never overlap, so `fn` may write
+ *              per-chunk output regions without locks. The call blocks until
+ *              every chunk has run.
+ */
 void parallelFor(size_t n, size_t grain,
                  const std::function<void(size_t, size_t)>& fn);
 

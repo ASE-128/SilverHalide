@@ -1,24 +1,25 @@
 #pragma once
 
-// PHASE_15: Soft Proofing dialog.
-//
-// Modal dialog wrapping engine/SoftProofing.h.  The user picks:
-//   * destination profile (dropdown of installed ICC profiles plus "Load from
-//     file…")
-//   * rendering intent (Perceptual / Relative Colorimetric / Absolute
-//     Colorimetric / Saturation — maps directly to lcms2 intents)
-//   * use black-point compensation  (on by default; the SoftProofing engine
-//     uses the cmsFLAGS_BLACKPOINTCOMPENSATION flag when true)
-//   * simulate paper & ink (gamut warning + PCS black-point mapping for
-//     Absolute Colorimetric — SoftProofing handles it via the paperWhite flag)
-//   * out-of-gamut warning color + toggle
-//
-// Live preview: the dialog owns a small SoftProofing instance and exposes
-// applyProof() as slot that MainWindow can invoke on the currently-displayed
-// preview QImage.  Because preview size changes (fit-zoom etc.) are handled
-// by the image view, the dialog exposes *parameters only* and the actual
-// rendering happens inside ImageViewport — this header only packages the
-// controls.
+/**
+ * @brief Soft Proofing dialog.
+ *
+ * Modal dialog wrapping engine/SoftProofing.h. The user picks:
+ *   * destination profile (dropdown of installed ICC profiles plus "Load from
+ *     file…")
+ *   * rendering intent (Perceptual / Relative Colorimetric / Absolute
+ *     Colorimetric / Saturation — maps directly to lcms2 intents)
+ *   * use black-point compensation (on by default; the SoftProofing engine
+ *     uses the cmsFLAGS_BLACKPOINTCOMPENSATION flag when true)
+ *   * simulate paper & ink (gamut warning + PCS black-point mapping for
+ *     Absolute Colorimetric — SoftProofing handles it via the paperWhite flag)
+ *   * out-of-gamut warning color + toggle
+ *
+ * Live preview: the dialog owns a small SoftProofing instance and exposes
+ * applyProof() as a slot that MainWindow can invoke on the currently-displayed
+ * preview QImage. Because preview size changes (fit-zoom etc.) are handled by
+ * the image view, the dialog exposes *parameters only* and the actual rendering
+ * happens inside ImageViewport — this header only packages the controls.
+ */
 
 #include <QColor>
 #include <QDialog>

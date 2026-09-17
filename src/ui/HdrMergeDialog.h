@@ -1,8 +1,12 @@
 #pragma once
 
-// HDR merge dialog: pick 2+ bracketed photos from the catalog (checkboxes),
-// optionally enable de-ghosting, choose the output DNG path, then MainWindow
-// routes the selection to PreviewWorker::mergeHdr on the background thread.
+/**
+ * @brief HDR merge dialog.
+ *
+ * Picks 2+ bracketed photos from the catalog (checkboxes), optionally enables
+ * de-ghosting, chooses the output DNG path, then MainWindow routes the
+ * selection to PreviewWorker::mergeHdr on the background thread.
+ */
 
 #include <QDialog>
 #include <QString>

@@ -1,4 +1,4 @@
-// PHASE_11: AiInferenceEngine implementation.
+// AiInferenceEngine implementation.
 //
 // Compile-time branches:
 //   • LRC_ENABLE_AI=1  -> pull in <onnxruntime_cxx_api.h>, real sessions.
@@ -41,7 +41,7 @@ namespace {
 // DEDICATED error mutex `errMutex_` (never `mutex_`): run()/runImage() hold a
 // shared lock on `mutex_` for their whole body, so writing `lastError_` under
 // `mutex_` from inside them would self-deadlock. Using `errMutex_` both fixes
-// the original R-06 data race and avoids that deadlock.
+// the original data race and avoids that deadlock.
 inline std::string getLastError(std::string& err,
                                 std::shared_mutex& mx) {
     // `mx` must be non-const: std::shared_lock<std::shared_mutex> can only
@@ -117,7 +117,7 @@ std::vector<float> runBuiltin(BuiltinKind kind,
 }
 
 // ---------------------------------------------------------------------------
-// Execution-provider helpers (DirectML, P1-1)
+// Execution-provider helpers (DirectML)
 // ---------------------------------------------------------------------------
 
 // True when this ONNX Runtime build exposes a DirectML execution provider.

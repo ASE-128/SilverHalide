@@ -1,11 +1,15 @@
 #pragma once
 
-// Lightroom-style import dialog. Picks any importable photo (RAW, DNG, JPEG,
-// PNG, TIFF) and offers three import policies — Add / Copy / Move — plus an
-// "import as DNG" checkbox. When enabled, each imported RAW (ARW/SR2/...) is
-// first converted to a .dng and the DNG is cataloged instead. Display-ready
-// formats pass through unchanged. MainWindow routes the chosen paths + policy
-// + destination to ImportWorker::importPaths.
+/**
+ * @brief Lightroom-style import dialog.
+ *
+ * Picks any importable photo (RAW, DNG, JPEG, PNG, TIFF) and offers three
+ * import policies — Add / Copy / Move — plus an "import as DNG" checkbox. When
+ * enabled, each imported RAW (ARW/SR2/...) is first converted to a .dng and the
+ * DNG is cataloged instead. Display-ready formats pass through unchanged.
+ * MainWindow routes the chosen paths + policy + destination to
+ * ImportWorker::importPaths.
+ */
 
 #include <QDialog>
 #include <QStringList>
