@@ -37,6 +37,12 @@ public:
     // `suggestedPath` is the default output path shown in the path field.
     explicit ExportDialog(const QString& suggestedPath, QWidget* parent = nullptr);
 
+    // Out-of-line: `variants_` is a std::vector of the forward-declared
+    // lrc::EditVariant, whose destructor needs a complete type. Defined in the
+    // .cpp (which includes catalog/CatalogDatabase.h) so any TU that merely
+    // instantiates this dialog (e.g. AUTOMOC) is safe.
+    ~ExportDialog() override;
+
     QString outputPath() const;
     // Combo index == PreviewWorker::ExportFormat value.
     int formatIndex() const;

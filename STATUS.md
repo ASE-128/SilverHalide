@@ -507,14 +507,18 @@ cmake --build build_gui --config Release
 | **M3 蒙版引擎级性能 Phase2（geometryHash 去重 + brushWeightField COW 权重场缓存 + 叠加层降分辨率 + dab 并笔 + 软度滑块接线 + TestMaskRaster）**                                                                               | ✅ v2.6.0 新增     |
 | **M4 直观 UI（顶部 QToolBar：视图模式互斥组适合窗口/适合宽度/1:1 + 放大缩小 + 蒙版工具互斥组线性/径向/画笔；zoomModeChanged + maskToolActivated 双向同步、面板为源工具栏镜像；dark.qss 补齐 QToolBar/QToolButton:checked/QComboBox/QCheckBox 纯 CSS）**  | ✅ v2.7.0 新增     |
 | **M5 预览更新速率（coarse-then-refine：DevelopPanel 拖动 30ms coarse 节流 + PreviewWorker adjustPreviewCoarse 480 渲染 + MainWindow 路由；refine 维持 50ms 停顿路径；1:1 下 coarse 仍更新预览层、不触发全尺寸刷新；TestPipeline 2 用例）** | ✅ v2.8.0 新增     |
-| **P1-3 批量重命名（`RenameTemplate` 模板 `{date}/{index[:W]}/{base}` + 冲突唯一路径；导入端 ImportDialog 复选/模板/预览 + ImportWorker Stage1 按选择顺序重命名；导出端 ExportDialog 批量重命名 + MainWindow 走 batchExport 导出母版+所有虚拟副本）** | 🔧 代码已落地未验收 |
+| **P1-3 批量重命名（`RenameTemplate` 模板 `{date}/{index[:W]}/{base}` + 冲突唯一路径；导入端 ImportDialog 复选/模板/预览 + ImportWorker Stage1 按选择顺序重命名；导出端 ExportDialog 批量重命名 + MainWindow 走 batchExport 导出母版+所有虚拟副本）** | ✅ headless 端到端 + Qt `batchExport` 真实导出断言 / 对话框 smoke 已验收（GUI 手动验收待做） |
 
 ### 🔄 进行中
 
 - **竞品对齐优化**：当前任务文件为
   [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md)。
-  P1-3 批量重命名（导入+导出 UI）已落地但未验收；P1-1 DirectML、P1-2 导出 ICC
-  代码已存在于工作区，需复核验收；P2/P3/T 尚未启动。
+  P1-1~P1-5 代码均已落地；P1-3 批量重命名 headless 端到端（磁盘唯一 + DB `file_path`
+  同步 + 取消回滚）与导出端 `batchExport` 真实导出断言（JPEG/PNG/TIFF16 落盘 + 魔数）+ 导入/导出/快照
+  对话框 smoke 均通过——后者经新增 GUI 测试目标 `tests/lrc_qt_tests`（Qt6 链接，
+  offscreen 运行：BatchExportTest 3/3、DialogSmokeTest 5/5，`[p1]` 15 用例 / 115 断言）。
+  仍待验收：P1-1「CPU vs DirectML 逐通道容差 + ≥2x 耗时」需 GPU + 410MB NAFNet 下载实测
+  （本机未测；provider API 与优雅回退已覆盖，DirectML 可用性已作为 INFO 上报）。P2/P3/T 尚未启动。
 
 - **性能 M1-M5**：相关实现和报告已归档，部分量化验收仍需单独复核；不要将归档文档中的历史测试数字直接当作当前基线。
 

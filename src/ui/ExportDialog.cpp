@@ -49,6 +49,10 @@ std::string todayString() {
 
 } // namespace
 
+// Defined in this TU so the vector<EditVariant> member (forward-declared type
+// in the header) is destroyed where EditVariant is complete.
+ExportDialog::~ExportDialog() = default;
+
 ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
     : QDialog(parent) {
     setWindowTitle(tr("导出"));

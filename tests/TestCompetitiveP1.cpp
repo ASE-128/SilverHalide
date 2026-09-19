@@ -12,10 +12,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -124,6 +126,134 @@ TEST_CASE("P1-3: single-file-update path stays unique and rejects collisions",
 }
 
 // ---------------------------------------------------------------------------
+// P1-3 — batch-rename end-to-end integration (replicates ImportWorker Stage 1)
+// ---------------------------------------------------------------------------
+//
+// These two cases reproduce, at the headless catalog layer, the exact sequence
+// ImportWorker::importPaths performs after files have landed: render the rename
+// template per selection-order index, uniquify the target inside the staging
+// directory, move the file on disk, then persist the final path. The first
+// case proves the batch contract from §2 (unique on-disk names + DB file_path
+// sync, numeric suffix on collisions); the second proves the cancel contract
+// (a rolled-back batch leaves no half-committed renamed path in the DB).
+
+TEST_CASE("P1-3: batch rename yields unique on-disk names and synced DB",
+          "[p1][rename][catalog]") {
+    const auto tmp =
+        std::filesystem::temp_directory_path() / "lrc_p1_batch_rename";
+    const auto staging = tmp / "staging";
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec);
+    std::filesystem::create_directories(staging, ec);
+
+    // Files already "landed" in the catalog staging dir (the post-copy/move
+    // state ImportWorker::importPaths renames from). Distinct source bases so
+    // any collision below comes only from the occupied render target.
+    const std::filesystem::path landed[] = {
+        staging / "IMG_0001.dng", staging / "IMG_0002.dng",
+        staging / "IMG_0003.dng"};
+    for (const auto& f : landed)
+        { std::ofstream(f, std::ios::binary) << "dummy"; }
+
+    // Pre-occupy the render target of selection-order slot 1 (template
+    // "2026_{index:2}" renders "2026_01" for index 1), forcing the worker to
+    // step to a "-2" suffix and exercising the numeric-collision path.
+    const auto occupied = staging / "2026_01.dng";
+    { std::ofstream(occupied, std::ios::binary) << "x"; }
+
+    CatalogDatabase db(tmp / "catalog.lrcat");
+    REQUIRE(db.open());
+
+    const lrc::RenameTemplateArgs base{"2026_{index:2}", "", 1, 2,
+                                       "2026-09-05"};
+    std::vector<std::filesystem::path> finalPaths;
+    std::vector<int64_t> ids;
+    int seq = 0;
+    for (const auto& cur : landed) {
+        const lrc::RenameTemplateArgs ra{base.tmpl, cur.stem().string(),
+                                         ++seq, base.indexWidth, base.date};
+        // Unique-target resolution against the live staging dir, then move.
+        const std::filesystem::path newPath = lrc::uniqueRenamePath(
+            cur.parent_path(), ra, cur.extension().string());
+        if (newPath != cur) {
+            std::filesystem::rename(cur, newPath, ec);
+            REQUIRE_FALSE(ec);
+        }
+        finalPaths.push_back(newPath);
+        // Persist the renamed path exactly as ImportWorker does.
+        const int64_t id = db.addImage(newPath.string(), "");
+        REQUIRE(id > 0);
+        ids.push_back(id);
+    }
+
+    // All on-disk regular filenames in staging are unique after the batch.
+    std::set<std::string> names;
+    for (std::filesystem::directory_iterator it(staging), end;
+         it != end; ++it)
+        if (it->is_regular_file())
+            names.insert(it->path().filename().string());
+    REQUIRE(names.size() >= 4);  // 3 DNGs + the pre-occupied marker
+    std::sort(finalPaths.begin(), finalPaths.end());
+    for (const auto& p : finalPaths)
+        REQUIRE(names.count(p.filename().string()) == 1);
+
+    // Collision was resolved: slot 1 landed on "2026_01-2.dng"; slots 2-3 on
+    // the unoccupied renders.
+    REQUIRE(names.count("2026_01-2.dng") == 1);
+    REQUIRE(names.count("2026_02.dng") == 1);
+    REQUIRE(names.count("2026_03.dng") == 1);
+
+    // Each DB file_path mirrors the renamed on-disk path (lookup by final path
+    // resolves back to the inserted id — the catalog-level sync guarantee).
+    for (size_t i = 0; i < finalPaths.size(); ++i) {
+        const auto rec = db.findImageByPath(finalPaths[i].string());
+        REQUIRE(rec.has_value());
+        REQUIRE(rec->id == ids[i]);
+    }
+
+    std::filesystem::remove_all(tmp, ec);
+}
+
+TEST_CASE("P1-3: cancelled import rolls back renamed paths from the DB",
+          "[p1][rename][catalog]") {
+    const auto tmp =
+        std::filesystem::temp_directory_path() / "lrc_p1_batch_cancel";
+    const auto staging = tmp / "staging";
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec);
+    std::filesystem::create_directories(staging, ec);
+
+    const std::filesystem::path landed[] = {
+        staging / "SRC_0001.dng", staging / "SRC_0002.dng"};
+    for (const auto& f : landed)
+        { std::ofstream(f, std::ios::binary) << "dummy"; }
+
+    CatalogDatabase db(tmp / "catalog.lrcat");
+    REQUIRE(db.open());
+    // ImportWorker wraps the whole import in a transaction; cancel rolls it
+    // back. Here the renames happen inside the transaction, then the batch is
+    // aborted exactly like ImportWorker::importPaths does on abort_.
+    REQUIRE(db.beginTransaction());
+    int seq = 0;
+    for (const auto& cur : landed) {
+        const lrc::RenameTemplateArgs ra{"2026_{index:2}", cur.stem().string(),
+                                         ++seq, 2, "2026-09-05"};
+        const std::filesystem::path newPath = lrc::uniqueRenamePath(
+            cur.parent_path(), ra, cur.extension().string());
+        if (newPath != cur) {
+            std::filesystem::rename(cur, newPath, ec);
+            REQUIRE_FALSE(ec);
+        }
+        REQUIRE(db.addImage(newPath.string(), "") > 0);
+    }
+    // Cancel: nothing committed. No renamed or original path may survive.
+    REQUIRE(db.rollbackTransaction());
+    REQUIRE(db.listImages().empty());
+
+    std::filesystem::remove_all(tmp, ec);
+}
+
+// ---------------------------------------------------------------------------
 // P1-5 — named snapshots
 // ---------------------------------------------------------------------------
 TEST_CASE("P1-5: named snapshot create/apply/rename/delete round-trips",
@@ -210,8 +340,14 @@ TEST_CASE("P1-1: provider API defaults to CPU and never throws", "[p1][ai]") {
     // CPU is always available; DirectML query is safe (false in stub builds).
     REQUIRE(AiInferenceEngine::isProviderAvailable(
         AiInferenceEngine::ExecutionProvider::Cpu));
-    (void)AiInferenceEngine::isProviderAvailable(
-        AiInferenceEngine::ExecutionProvider::DirectML);
+    // Report the runtime DirectML capability so the P1-1 acceptance record knows
+    // whether the "CPU vs DirectML ≥2x" leg is even measurable on this machine.
+    // A true here is a prerequisite for running the 410 MB NAFNet comparison.
+    INFO("DirectML available at runtime: "
+         << AiInferenceEngine::isProviderAvailable(
+                AiInferenceEngine::ExecutionProvider::DirectML)
+         << " ; real ONNX backend: "
+         << AiInferenceEngine::hasRealBackend());
 
     engine.setPreferredProvider(
         AiInferenceEngine::ExecutionProvider::DirectML);

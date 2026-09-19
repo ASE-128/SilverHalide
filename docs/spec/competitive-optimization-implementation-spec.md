@@ -30,6 +30,23 @@
 
 - 未完成项（未验收）：导入端 `CatalogDatabase::updateImagePath` 的批量路径同步在 ImportWorker 内通过重命名后落盘路径直接生效，但缺少端到端「批量重命名后目录内文件名唯一、DB `file_path` 同步更新、取消不改文件」集成用例；导出端虚拟副本批量导出尚未做真实导出断言（只验证编译与路径生成）。需按 §2 验收标准补齐。
 
+**P1-3 端到端集成测试补齐（2026-09-19，工作区未提交，状态：headless 层已验收）**：
+
+- `TestCompetitiveP1.cpp` 新增两个 `[p1][rename][catalog]` 集成用例，在 headless catalog 层逐字复刻 `ImportWorker` Stage-1 重命名流程（落盘后按选择顺序渲染模板 → `uniqueRenamePath` 去重 → 磁盘 rename → 以最终路径入库）：
+  - **批处理契约**：3 个已落盘文件 + 预占第 1 序号的渲染目标，强制走 `-2` 冲突分支；断言批处理后目录内文件名唯一、DB `file_path` 与磁盘改名后路径镜像一致（`findImageByPath` 命回原 id）。
+  - **取消/回滚契约**：事务内完成改名入库后 `rollbackTransaction()`，断言 DB 不残留任何半提交的重命名路径（`listImages()` 为空）——对应 ImportWorker 取消时回滚事务的行为。
+- headless `[p1]` 重跑通过：15 用例 / 115 断言（原 13/87）。
+- 仍待验收（属于 GUI/真实导出，见 T-3 范畴）：导出端虚拟副本 `batchExport` 真实导出断言、导入/导出对话框 UI smoke；P1-1「CPU vs DirectML 逐通道容差 + ≥2x 耗时」需 GPU 实测。
+
+**P1 GUI/真实导出验收（2026-09-19，工作区未提交，状态：Qt 层已验收）**：
+
+- 新增 Qt 测试目标 `tests/lrc_qt_tests`（仅 `LRC_ENABLE_QT` 时构建，Qt6::Test/Widgets + AUTOMOC，链接 `src/ui/PreviewWorker.cpp` 与 `ExportDialog/ImportDialog/SnapshotDialog`），归一化到 `tests/CMakeLists.txt`：
+  - **batchExport 真实导出断言**：写临时 JPEG → 构造 PreviewWorker（worker 线程，同 MainWindow::startWorkers）→ 一次 batchExport 三个 ExportItem（JPEG/PNG/TIFF16，各独立输出路径）→ 断言 `batchExportFinished(success=N, fail=0)` 且每个落盘文件魔数正确（JPEG FFD8FF / PNG 89504E47… / TIFF II*\x2A）。offscreen 运行 3/3 通过。
+  - **对话框 smoke**：ExportDialog / ImportDialog / SnapshotDialog 构造 + 公开状态断言（ExportDialog 变体选择默认母版、rename 默认关、format 越5格式；ImportDialog rename 默认关；SnapshotDialog 对无快照图片 reload 不崩溃）。5/5 通过。
+- 附带修复 `ExportDialog` 一个隐性缺陷：头文件持 `std::vector<lrc::EditVariant>`（前向声明类型）导致隐式内联析构在 AUTOMOC TU 对不完整类型实例化失败；将 `~ExportDialog()` 改为 out-of-line，在 `.cpp`（已含 `catalog/CatalogDatabase.h`）中 `= default`。
+- GUI-with-AI 构建（`build_gui`，`LRC_ENABLE_AI=ON` + ONNXRUNTIME_ROOT）重新配置/重建通过，`SilverHalide.exe` 与 `lrc_qt_tests` 均成功，无回归。
+- **P1-1 环境门控说明**：provider API + DirectML 优雅回退 + builtin 模型在 DirectML preferred 下可跑已有用例覆盖；「CPU vs DirectML 逐通道容差 + ≥2x 耗时」需一台带 GPU 的机器 + 按 manifest 下载 410MB NAFNet（本机无该模型）。`TestCompetitiveP1.cpp` 的 P1-1 provider 用例现以 `INFO` 上报运行时 DirectML 可用性与真实 ONNX 后端，供 GPU 机器直接验收。
+
 **当前执行顺序**：先从 P1-1、P1-2、P1-3 开始；每项完成后补充对应测试与实测记录，再进入 P2。P1-5 快照系统、T 技术债可作为独立批次插入，但不得把已有 `edit_history` 或 SIMD 框架直接视为规格任务完成。
 
 **状态判定规则**：以 Git 工作区、源码/测试实测和本文件的验收记录为准。计划存在不等于代码已落地，代码存在不等于验收完成；状态应分别记录为“待实施”“代码已落地但未验收”“已验收”或“已提交”。

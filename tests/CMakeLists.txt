@@ -57,3 +57,38 @@ if(MSVC)
 endif()
 
 add_test(NAME lrc_tests COMMAND lrc_tests)
+
+# ---------------------------------------------------------------------------
+# GUI-layer Qt tests (P1 acceptance).
+#
+# Built only when LRC_ENABLE_QT=ON. Compiles the real widget sources that the
+# headless suite cannot (PreviewWorker + the import/export/snapshot dialogs)
+# and drives them with QtTest: PreviewWorker::batchExport produces real JPEG /
+# PNG / TIFF16 files on disk, and the dialogs are constructed + interrogated.
+# Run: build_gui/tests/lrc_qt_tests.exe
+# ---------------------------------------------------------------------------
+if(LRC_ENABLE_QT)
+  find_package(Qt6 REQUIRED COMPONENTS Test Widgets)
+
+  set(CMAKE_AUTOMOC ON)
+
+  add_executable(lrc_qt_tests
+    lrc_qt_tests.cpp
+    ../src/ui/PreviewWorker.cpp
+    ../src/ui/ExportDialog.cpp
+    ../src/ui/ImportDialog.cpp
+    ../src/ui/SnapshotDialog.cpp)
+  target_link_libraries(lrc_qt_tests PRIVATE
+    lrc_catalog lrc_engine
+    Qt6::Test Qt6::Widgets)
+  target_include_directories(lrc_qt_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_compile_definitions(lrc_qt_tests PRIVATE
+    LRC_ENABLE_QT=1
+    "LRC_PROJECT_MANIFEST_DIR=\"${CMAKE_SOURCE_DIR}\"")
+  if(MSVC)
+    target_compile_options(lrc_qt_tests PRIVATE /utf-8 /W3 /EHsc)
+    target_compile_definitions(lrc_qt_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+  endif()
+
+  add_test(NAME lrc_qt_tests COMMAND lrc_qt_tests)
+endif()
