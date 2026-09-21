@@ -527,7 +527,7 @@ TEST_CASE("RawDecoder: embedded ICC drives the non-RAW conversion (R-08, JPEG)",
     RawDecoder decoder;
     decoder.setColorManager(cm);
 
-    // Same saturated red pixels, only the embedded profile differs. The old path
+    // Same saturated green pixels, only the embedded profile differs. The old path
     // always treated the source as sRGB, so both decoded identically; honouring
     // a wide-gamut profile (Adobe RGB) must change the result.
     const auto adobe =
@@ -537,7 +537,7 @@ TEST_CASE("RawDecoder: embedded ICC drives the non-RAW conversion (R-08, JPEG)",
     REQUIRE_FALSE(adobe.empty());
     REQUIRE_FALSE(srgbProf.empty());
 
-    const auto src = makeSolidU8(8, 4, 1.0f, 0.0f, 0.0f);
+    const auto src = makeSolidU8(8, 4, 0.0f, 1.0f, 0.0f);
     const auto jpgAdobe =
         std::filesystem::temp_directory_path() / "lrc_cc_adobe.jpg";
     const auto jpgSrgb =
@@ -552,8 +552,8 @@ TEST_CASE("RawDecoder: embedded ICC drives the non-RAW conversion (R-08, JPEG)",
     std::filesystem::remove(jpgSrgb, ec);
     REQUIRE(dAdobe.has_value());
     REQUIRE(dSrgb.has_value());
-    REQUIRE(std::fabs(dAdobe->linear->pixel(0, 0, 0) -
-                      dSrgb->linear->pixel(0, 0, 0)) > 0.02f);
+    REQUIRE(std::fabs(dAdobe->linear->pixel(0, 0, 1) -
+                      dSrgb->linear->pixel(0, 0, 1)) > 0.02f);
 }
 
 TEST_CASE("RawDecoder: PNG iCCP profile is honoured (R-08)", "[raw][io]") {
@@ -565,7 +565,7 @@ TEST_CASE("RawDecoder: PNG iCCP profile is honoured (R-08)", "[raw][io]") {
         ColorManager::exportProfileBytes(ColorManager::ExportColorProfile::AdobeRGB);
     const auto srgbProf =
         ColorManager::exportProfileBytes(ColorManager::ExportColorProfile::SRGB);
-    const auto src = makeSolidU8(8, 4, 1.0f, 0.0f, 0.0f);
+    const auto src = makeSolidU8(8, 4, 0.0f, 1.0f, 0.0f);
 
     const auto pngAdobe =
         std::filesystem::temp_directory_path() / "lrc_cc_adobe.png";
@@ -581,6 +581,6 @@ TEST_CASE("RawDecoder: PNG iCCP profile is honoured (R-08)", "[raw][io]") {
     std::filesystem::remove(pngSrgb, ec);
     REQUIRE(dAdobe.has_value());
     REQUIRE(dSrgb.has_value());
-    REQUIRE(std::fabs(dAdobe->linear->pixel(0, 0, 0) -
-                      dSrgb->linear->pixel(0, 0, 0)) > 0.02f);
+    REQUIRE(std::fabs(dAdobe->linear->pixel(0, 0, 1) -
+                      dSrgb->linear->pixel(0, 0, 1)) > 0.02f);
 }
