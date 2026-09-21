@@ -13,6 +13,14 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## MobileSAM 点击式蒙版（2026-09-21，已提交）
+
+- **P2-3（AI 蒙版扩展）点击交互全链路落地并提交**：MobileSAM 两阶段分割（`AiInference::runSamPoint` — encoder 生成 embedding + decoder 按点/noIou 输出）接入 `AiMaskGenerator` 新增 `AiMaskTarget::Prompt`；`Adjustments::AiMaskParams` 加 `std::vector<SamPoint> points`，`Mask::hash/geometryHash` 覆盖（缓存键随点变化）。UI 层 `ImageViewport` 点击加点（前景绿/背景红 + 十字标记）、`DevelopPanel`「AI 点选」按钮 + 前景/背景切换 + 清除点 + 羽化滑杆、`MainWindow` 撤销接线。
+- **布局修正（实测真实模型）**：`mobilesam-encoder` 输入为 **NHWC `[H,W,3]`**（非 manifest 原声明的 NCHW），已恢复引擎 NHWC 布局并同步修正 manifest/测试声明；decoder 为单掩码候选，iou/mask 候选轴按末维/倒数第三维稳健取用。
+- **验证**：headless `[ai]` 35 用例 / 284 断言（含真实模型 runSamPoint + Prompt 端到端）、全量 **454 用例 / 752,822 断言** 全绿。
+- **R-08 预存失败修复**：测试用纯绿断言 G 通道（sRGB/AdobeRGB 红原色相同、绿原色才不同），区分 embedded ICC 应用，全量转绿后并入提交。
+- Commit `0ac13bb` + `4520933` 已推送 `SilverHalide/main`。
+
 ## 当前任务状态（2026-09-12）
 
 - **当前进行中的任务**：[竞品对齐优化实施规格](docs/spec/competitive-optimization-implementation-spec.md) +
