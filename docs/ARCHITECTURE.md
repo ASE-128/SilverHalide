@@ -138,7 +138,10 @@ UI 通过 `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` 下发请求，
   参数堆叠是单层 JSON，无图层/快照；编辑历史为每次提交的线性快照，无分支/时间线。
 - 1:1 为真全尺寸：`PreviewWorker` 后台全尺寸解码，同一时刻 1 份缓冲、不塞 LRU。
 - 非 RAW 导入（JPEG/PNG/TIFF）经 sRGB → 线性 ProPhoto 转换；16 位 TIFF 导入时量化为 8 位；
-  TIFF 读取器仅支持未压缩 RGB（应用自身导出格式及常见工具产物）。
+  TIFF 读取器仅支持未压缩 RGB（应用自身导出格式及常见工具产物）；写出时 rows-per-strip 自适应
+  `max(64, ceil(h/64))` 以降低大图单 strip 内存峰值，读取器支持多 strip 布局。
+- `gaussianBlur`（sigma≤4 精确可分离路径）在 `LRC_ENABLE_SIMD=ON` 时走 8-lane AVX2 快速路径
+  （`blurExactPassAVX2`）；默认关闭时与标量路径逐位一致，开启时为容差一致（Δ<0.008）。
 - 文件夹监视用 2s 轮询（`std::filesystem`），非 OS 事件驱动。
 - 直方图直接统计预览 8bit，每 4M 像素抽样一次。
 - 蒙版局部调整的画笔权重场（`Pipeline::brushWeightField`）以 COW `shared_ptr` 缓存，键 =

@@ -9,7 +9,11 @@
 // ScratchBuffer guard; the raw scratchVec / scratchRelease pair is also exposed
 // for the cases that need a plain vector reference.
 //
-// Pure C++20, Qt-free, header-only (no .cpp, no CMake registration).
+// Pure C++20, Qt-free, header-only (no .cpp, no CMake registration). Shutdown
+// contract (T-1): each thread's pool is owned by that thread and destroyed with
+// it at thread exit; call lrc::scratchPoolDrain() to release the calling
+// thread's buffers deterministically (e.g. before a long-lived worker exits).
+// A ScratchBuffer must never outlive the thread that acquired it.
 
 #include <cstddef>
 #include <deque>
@@ -30,6 +34,23 @@ struct ScratchPool {
 inline ScratchPool& scratchPool() {
     static thread_local ScratchPool pool;
     return pool;
+}
+
+/**
+ * @brief Releases every pooled scratch buffer for the calling thread.
+ *
+ * Idempotent; the pool re-populates on demand after a drain. Call this from a
+ * long-lived worker thread before it exits to release the pooled buffers
+ * deterministically instead of at an unpredictable point during process
+ * teardown.
+ *
+ * @note Only the calling thread's own pool is touched; cross-thread pools are
+ *       released by their own thread-exit destructors.
+ */
+inline void scratchPoolDrain() {
+    ScratchPool& p = scratchPool();
+    p.bufs.clear();
+    p.inUse.clear();
 }
 
 // Grows `v` to hold minElems, or shrinks it when the requested size is a clear

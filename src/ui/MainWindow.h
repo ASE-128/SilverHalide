@@ -128,6 +128,7 @@ private slots:
     void redoAdjustment();
     void onMaskGeometryChanged(const lrc::Mask& mask);
     void onMaskEditFinished();
+    void onMaskPromptClearRequested(int index);
     void onZoomModeChanged(ImageViewport::ZoomMode mode);
     void onMaskToolActivated(lrc::MaskType tool);
     void onWhiteBalanceSampled(const QColor& color);

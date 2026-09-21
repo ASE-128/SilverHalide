@@ -224,3 +224,48 @@ TEST_CASE("RenderScratch: nested ScratchBuffer acquisitions hold independent slo
 
     REQUIRE(poolInUseCount() == inUse0);
 }
+
+// --- T-1: deterministic teardown --------------------------------------------
+// The historical flaky SIGSEGV came from scratch-pool teardown ordering. Each
+// thread's pool is destroyed with the thread, and an explicit drain is provided
+// so a long-lived worker can release its buffers deterministically. This stress
+// test hammers acquire/release + drain concurrently and repeatedly; a
+// double-free / dangling ScratchBuffer would crash here (far more reliably than
+// the original 1/3 repro).
+
+TEST_CASE("RenderScratch: T-1 concurrent drain + reuse stays crash-free",
+          "[RenderScratch][t1]") {
+    const int kThreads = 8, kIters = 200;
+
+    std::vector<std::thread> workers;
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([t] {
+            unsigned seed = static_cast<unsigned>(t * 131 + 7);
+            for (int i = 0; i < kIters; ++i) {
+                const size_t n = 32u + ((seed = seed * 1664525u + 1013904223u) % 4096u);
+                {
+                    ScratchBuffer a(n);
+                    ScratchBuffer b(n / 2 + 1);
+                    std::fill_n(a.data(), a.size(), 1.0f);
+                    std::fill_n(b.data(), b.size(), 2.0f);
+                }
+                // Explicit drain mid-session: pool must not dangle or crash even
+                // though future guards will re-populate it.
+                if (i % 20 == 0)
+                    detail::scratchPoolDrain();
+            }
+        });
+    }
+    for (auto& w : workers)
+        w.join();
+
+    // Main-thread drain after the children have exited: first return the guard,
+    // then the pool must collapse to empty (deterministic teardown).
+    {
+        ScratchBuffer keep(8);
+        REQUIRE(poolInUseCount() == 1u);
+    }
+    detail::scratchPoolDrain();
+    REQUIRE(poolInUseCount() == 0u);
+    REQUIRE(poolCapacityEntries() == 0u);
+}

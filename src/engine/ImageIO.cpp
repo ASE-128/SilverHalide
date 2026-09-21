@@ -303,16 +303,26 @@ bool writeTiffRaw(const std::filesystem::path& path, int w, int h, int bps,
         uint32_t value;  // inline value, or the file offset for the ICC data
         bool isOffset;
     };
+    // T-2: adaptive rows-per-strip. A single whole-image strip (< RowsPerStrip =
+    // h) keeps one contiguous w*h*3 allocation alive in readers and spikes the
+    // decode memory peak on very large photos. Cap the strip at max(64, h/64)
+    // rows so the strip count stays near 64 even at 100MP+, while small images
+    // (h <= 64) keep their previous single-strip layout byte-identical.
+    const uint32_t rowsPerStrip =
+        std::max<uint32_t>(64u, (static_cast<uint32_t>(h) + 63u) / 64u);
+    const uint32_t stripCount =
+        (static_cast<uint32_t>(h) + rowsPerStrip - 1u) / rowsPerStrip;
+
     std::vector<Entry> ifd;
     ifd.push_back({256, 4, 1, static_cast<uint32_t>(w), false});          // ImageWidth
     ifd.push_back({257, 4, 1, static_cast<uint32_t>(h), false});          // ImageLength
     ifd.push_back({258, 3, 1, static_cast<uint32_t>(bps), false});        // BitsPerSample
     ifd.push_back({259, 3, 1, 1, false});                                 // Compression = none
     ifd.push_back({262, 3, 1, 2, false});                                 // Photometric = RGB
-    ifd.push_back({273, 4, 1, 0, true});                                  // StripOffsets (patched)
+    ifd.push_back({273, 4, stripCount, 0, true});                         // StripOffsets (patched)
     ifd.push_back({277, 3, 1, 3, false});                                 // SamplesPerPixel
-    ifd.push_back({278, 4, 1, static_cast<uint32_t>(h), false});          // RowsPerStrip
-    ifd.push_back({279, 4, 1, 0, true});                                  // StripByteCounts (patched)
+    ifd.push_back({278, 4, 1, rowsPerStrip, false});                      // RowsPerStrip
+    ifd.push_back({279, 4, stripCount, 0, true});                         // StripByteCounts (patched)
     ifd.push_back({284, 3, 1, 1, false});                                 // PlanarConfig = chunky
     if (dng) {
         // DNGVersion 1.4.0.0 (BYTE[4], packed little-endian: 01 04 00 00).
@@ -332,33 +342,48 @@ bool writeTiffRaw(const std::filesystem::path& path, int w, int h, int bps,
         if (icc->size() <= 0xFFFFFFFFu)
             ifd.push_back({34675, 1, static_cast<uint32_t>(icc->size()), 0, true});
     }
-    // The strip entries sit at fixed offsets even when extra DNG/ICC tags are
-    // appended — they are the first two entries with isOffset==true in input
-    // order (indices 5 and 8 for the base set). Patch by scanning instead of
-    // hard-coding, so adding ICC does not shift them.
-    for (auto& e : ifd) {
-        if (e.tag == 273) e.value = 0;
-        if (e.tag == 279) e.value = 0;
+    // The strip entries are patched below by scanning the tags vector (tag
+    // 273 / 279 / 34675), so extra DNG/ICC tags never shift their values.
+    uint32_t ifdOffset = 8;
+    uint32_t ifdBytes = 2 + static_cast<uint32_t>(ifd.size()) * 12 + 4;
+    const uint32_t rowBytes = static_cast<uint32_t>(w) * 3 * (bps / 8);
+
+    // Multi-strip layout: the StripOffsets/StripByteCounts arrays are kept
+    // inline after the IFD (each is stripCount LONGs); single-strip images keep
+    // the value inline as before. Per-strip pixel blocks then follow, and the
+    // ICC profile (padded to 4-byte alignment, matching the previous writer)
+    // sits at the end.
+    uint32_t arraysOffset = 0, countsOffset = 0;
+    uint32_t dataStart = ifdOffset + ifdBytes;
+    if (stripCount > 1) {
+        arraysOffset = dataStart;
+        dataStart += stripCount * 4;
+        countsOffset = dataStart;
+        dataStart += stripCount * 4;
     }
 
-    uint32_t ifdOffset = 8;
-    uint32_t ifdBytes =
-        2 + static_cast<uint32_t>(ifd.size()) * 12 + 4;
-    // Align pixel data to a 4-byte boundary (TIFF-compatible readers like
-    // libtiff expect word-aligned strips).
-    uint32_t pixelOffset = ifdOffset + ifdBytes;
-    const uint32_t rowBytes = static_cast<uint32_t>(w) * 3 * (bps / 8);
-    const uint64_t pixelBytes64 = static_cast<uint64_t>(rowBytes) * h;
-    uint32_t iccOffset = 0;
-    const uint64_t pixelLength = (pixelOffset + pixelBytes64);
-    if (icc && !icc->empty()) {
-        iccOffset = (pixelLength + 3) & ~3u;
-        for (auto& e : ifd)
-            if (e.tag == 34675) e.value = iccOffset;  // patched below
+    std::vector<uint32_t> stripOffsets(stripCount), stripCounts(stripCount);
+    uint64_t cursor = dataStart;
+    for (uint32_t s = 0; s < stripCount; ++s) {
+        stripOffsets[s] = static_cast<uint32_t>(cursor);
+        const uint32_t rows = std::min(
+            rowsPerStrip, static_cast<uint32_t>(h) - s * rowsPerStrip);
+        stripCounts[s] = static_cast<uint32_t>(static_cast<uint64_t>(rowBytes) * rows);
+        cursor += stripCounts[s];
     }
+
+    uint32_t iccOffset = 0;
+    const uint64_t pixelLength = cursor;
+    if (icc && !icc->empty())
+        iccOffset = static_cast<uint32_t>((cursor + 3) & ~uint64_t(3));
+
     for (auto& e : ifd) {
-        if (e.tag == 273) e.value = pixelOffset;
-        if (e.tag == 279) e.value = static_cast<uint32_t>(pixelBytes64);
+        if (e.tag == 273)
+            e.value = (stripCount > 1) ? arraysOffset : stripOffsets[0];
+        else if (e.tag == 279)
+            e.value = (stripCount > 1) ? countsOffset : stripCounts[0];
+        else if (e.tag == 34675 && icc && !icc->empty())
+            e.value = iccOffset;
     }
 
     os.put('I');
@@ -373,13 +398,24 @@ bool writeTiffRaw(const std::filesystem::path& path, int w, int h, int bps,
         put32(os, e.value);
     }
     put32(os, 0); // no next IFD
-    os.write(reinterpret_cast<const char*>(pixels),
-             static_cast<std::streamsize>(pixelBytes64));
+    if (stripCount > 1) {
+        for (uint32_t o : stripOffsets)
+            put32(os, o);
+        for (uint32_t c : stripCounts)
+            put32(os, c);
+    }
+    // Write each strip's pixel rows contiguously (source bytes are already
+    // interleaved RGB in row-major order, so the strip split is purely linear).
+    size_t srcOffset = 0;
+    for (uint32_t s = 0; s < stripCount; ++s) {
+        os.write(reinterpret_cast<const char*>(pixels + srcOffset),
+                 static_cast<std::streamsize>(stripCounts[s]));
+        srcOffset += stripCounts[s];
+    }
     // ICC profile bytes (with padding to keep the file 4-byte aligned). This
     // must come after the pixel data because the strip offsets point there.
     if (icc && !icc->empty()) {
-        const auto pad = iccOffset - static_cast<uint32_t>(pixelLength);
-        for (uint32_t k = 0; k < pad; ++k)
+        for (uint64_t k = iccOffset - pixelLength; k > 0; --k)
             os.put(0);
         os.write(reinterpret_cast<const char*>(icc->data()),
                  static_cast<std::streamsize>(icc->size()));

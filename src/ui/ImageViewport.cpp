@@ -547,6 +547,15 @@ void ImageViewport::beginMaskGesture(const QPointF& widgetPos) {
             maskLastDab_ = widgetPos;
             break;
         default:
+            // Click-prompt (MobileSAM) mask: a press adds one SamPoint at the
+            // click, labelled foreground/background by the armed prompt mode.
+            if (maskTool_ == lrc::MaskType::AiMask &&
+                maskDraft_.type == lrc::MaskType::AiMask &&
+                maskDraft_.ai.target == lrc::AiMaskTarget::Prompt) {
+                maskDraft_.ai.points.push_back(lrc::SamPoint{
+                    static_cast<float>(n.x()), static_cast<float>(n.y()),
+                    maskPromptLabel_});
+            }
             break;
     }
     rebuildMaskOverlay();
@@ -842,6 +851,23 @@ void ImageViewport::paintEvent(QPaintEvent*) {
             const double r = maskBrushRadius_ *
                              qMin(image_.width(), image_.height()) * scale;
             painter.drawEllipse(lastMousePos_, r, r);
+        }
+    }
+
+    // Click-prompt (MobileSAM) markers: green = foreground, red = background.
+    // Drawn independently of the red weight overlay (the viewport cannot
+    // rasterize the semantic mask without the model — Pipeline does that).
+    if (maskTool_ == lrc::MaskType::AiMask &&
+        maskDraft_.type == lrc::MaskType::AiMask &&
+        maskDraft_.ai.target == lrc::AiMaskTarget::Prompt) {
+        for (const auto& pt : maskDraft_.ai.points) {
+            const QPointF p = normToWidget(QPointF(pt.nx, pt.ny));
+            painter.setPen(QPen(pt.label ? QColor(0, 230, 118, 235)
+                                         : QColor(255, 60, 60, 235), 2.0));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(p, 7, 7);
+            painter.drawLine(QPointF(p.x() - 11, p.y()), QPointF(p.x() + 11, p.y()));
+            painter.drawLine(QPointF(p.x(), p.y() - 11), QPointF(p.x(), p.y() + 11));
         }
     }
 

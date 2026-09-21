@@ -72,6 +72,7 @@ option(LRC_ENABLE_QT "Build the Qt6 GUI" ON)
 option(LRC_USE_OPENCV "Enable OpenCV auxiliary helpers (heavy dependency)" OFF)
 option(LRC_ENABLE_AI "Enable AI features (ONNX Runtime)" ON)
 option(LRC_ENABLE_LENSFUN "Enable Lensfun lens correction profiles" ON)
+option(LRC_ENABLE_SIMD "Enable SIMD fast paths (gaussianBlur AVX2, batch passes)" OFF)
 
 # ---------------------------------------------------------------------------
 # External dependencies. Two acquisition strategies:
@@ -381,6 +382,24 @@ if(LRC_LENSFUN_FOUND)
   endif()
 else()
   target_compile_definitions(lrc_engine PUBLIC LRC_ENABLE_LENSFUN=0)
+endif()
+# --- Optional SIMD fast paths (LRC_ENABLE_SIMD, default OFF) ----------------
+# When enabled, define the guard macro and compile with AVX2 so that
+# `#if defined(LRC_ENABLE_SIMD) && defined(__AVX2__)` blocks (P2-2 viral
+# gaussianBlur, M4-3 batch passes) are actually compiled in. The AVX2 path has
+# its own tolerance regression (see TestPipeline) and is not bit-identical.
+if(LRC_ENABLE_SIMD)
+  target_compile_definitions(lrc_engine PUBLIC LRC_ENABLE_SIMD=1)
+  if(MSVC)
+    target_compile_options(lrc_engine PRIVATE /arch:AVX2)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(lrc_engine PRIVATE -mavx2 -mfma)
+  endif()
+  # LRC_ENABLE_SIMD is PUBLIC and lrc_tests links lrc_engine (via lrc_catalog),
+  # so the SIMD-gated regression test in TestPipeline.cpp is compiled automatically.
+  # No else branch: leave LRC_ENABLE_SIMD undefined when OFF so that all the
+  # engine's `#ifdef LRC_ENABLE_SIMD` (not just `==1`) guards stay false,
+  # exactly matching their pre-P2-2 default-disabled behaviour.
 endif()
 # Path used by ModelManager.cpp to locate the shipped manifest when the
 # executable runs from a build directory (rather than the installed layout).

@@ -33,6 +33,9 @@
 #include <xmmintrin.h>
 #include <emmintrin.h>
 #endif
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 #endif
 
 namespace lrc {
@@ -434,6 +437,82 @@ void boxBlurVertical(const float* src, float* dst, int w, int h,
     });
 }
 
+#if defined(LRC_ENABLE_SIMD) && defined(__AVX2__)
+// P2-2: AVX2 fast path for the exact separable blur. Each output row is
+// independent; within a row the 8-lane block keeps per-pixel summation order
+// identical to the scalar kernel (each lane is its own accumulator); the
+// fused-multiply-add reassociates, so output is tolerance-identical rather than
+// bit-identical (see P2-2 acceptance: Δ<0.008). Edge columns fall back to scalar.
+//
+// `vertical` selects which coordinate varies per tap:
+//   horizontal: src[y*w + x+i]  -> 8 contiguous columns at row y.
+//   vertical:   src[(y+i)*w+x]  -> 8 contiguous columns at clamped row y+i.
+void blurExactPassAVX2(const float* src, float* dst, int w, int h, int radius,
+                       const float* kernel, bool vertical) {
+    // Interior columns fully inside [radius, w-radius) can be vectorized.
+    const int interior = w - 2 * radius;
+    const int blocks = interior / 8;                 // full 8-lane groups
+    const int vecStart = radius;
+    const int vecEnd = vecStart + blocks * 8;
+
+    lrc::parallel::parallelFor(static_cast<size_t>(h),
+                               lrc::parallel::defaultGrain(static_cast<size_t>(h)),
+                               [&](size_t by, size_t ey) {
+        for (int y = static_cast<int>(by); y < static_cast<int>(ey); ++y) {
+            float* drow = dst + static_cast<size_t>(y) * w;
+            // Scalar edges needing clamp: [0, vecStart) and [vecEnd, w).
+            for (int x = 0; x < vecStart; ++x) {
+                float acc = 0.0f;
+                if (vertical) {
+                    for (int i = -radius; i <= radius; ++i) {
+                        const int sy = std::clamp(y + i, 0, h - 1);
+                        acc += src[static_cast<size_t>(sy) * w + x] *
+                               kernel[static_cast<size_t>(i + radius)];
+                    }
+                } else {
+                    for (int i = -radius; i <= radius; ++i) {
+                        const int sx = std::clamp(x + i, 0, w - 1);
+                        acc += src[static_cast<size_t>(y) * w + sx] *
+                               kernel[static_cast<size_t>(i + radius)];
+                    }
+                }
+                drow[x] = acc;
+            }
+            for (int x = vecEnd; x < w; ++x) {
+                float acc = 0.0f;
+                if (vertical) {
+                    for (int i = -radius; i <= radius; ++i) {
+                        const int sy = std::clamp(y + i, 0, h - 1);
+                        acc += src[static_cast<size_t>(sy) * w + x] *
+                               kernel[static_cast<size_t>(i + radius)];
+                    }
+                } else {
+                    for (int i = -radius; i <= radius; ++i) {
+                        const int sx = std::clamp(x + i, 0, w - 1);
+                        acc += src[static_cast<size_t>(y) * w + sx] *
+                               kernel[static_cast<size_t>(i + radius)];
+                    }
+                }
+                drow[x] = acc;
+            }
+            // AVX2 interior.
+            for (int xb = vecStart; xb < vecEnd; xb += 8) {
+                __m256 acc = _mm256_setzero_ps();
+                for (int i = -radius; i <= radius; ++i) {
+                    const __m256 k = _mm256_set1_ps(
+                        kernel[static_cast<size_t>(i + radius)]);
+                    const float* p = vertical
+                        ? src + (static_cast<size_t>(std::clamp(y + i, 0, h - 1)) * w + xb)
+                        : src + (static_cast<size_t>(y) * w + xb + i);
+                    acc = _mm256_fmadd_ps(_mm256_loadu_ps(p), k, acc);
+                }
+                _mm256_storeu_ps(drow + xb, acc);
+            }
+        }
+    });
+}
+#endif // LRC_ENABLE_SIMD && __AVX2__
+
 // Separable Gaussian blur of a single-channel image. sigma <= 0 returns a copy.
 // Small sigma (<= 4.0) uses the exact O(radius) separable convolution; large
 // sigma (> 4.0, e.g. clarity at ~min(w,h)/50) uses three O(1)-per-pixel
@@ -467,6 +546,22 @@ void gaussianBlur(const float* src, int w, int h, float sigma,
         for (int i = 0; i <= radius * 2; ++i)
             kernel[static_cast<size_t>(i)] /= sum;
 
+        #if defined(LRC_ENABLE_SIMD) && defined(__AVX2__)
+        // P2-2 AVX2 fast path. blurExactPassAVX2 runs the exact separable
+        // convolution with 8-lane FMA accumulation; each lane keeps the same
+        // per-pixel summation order as the scalar kernel, so the output is
+        // tolerance-identical (FMA reassociation yields Δ ~1e-7, far under the
+        // P2-2 acceptance Δ<0.008) rather than bit-identical. Edge columns use
+        // the identical scalar clamp path.
+        {
+            ScratchBuffer tmp(out.size());
+            blurExactPassAVX2(src, tmp.data(), w, h, radius, kernel.data(),
+                              false /* horizontal */);
+            blurExactPassAVX2(tmp.data(), out.data(), w, h, radius,
+                              kernel.data(), true /* vertical */);
+        }
+        return;
+#else
         // Horizontal pass (each output row is independent).
         ScratchBuffer tmp(out.size());
         const size_t rowGrain =
@@ -501,6 +596,7 @@ void gaussianBlur(const float* src, int w, int h, float sigma,
             }
         });
         return;
+#endif
     }
 
     // --- Fast path: 3 identical box-blur passes approximate the Gaussian. ---
@@ -2249,7 +2345,12 @@ void Pipeline::applyLocalAdjustments(const Adjustments& a, float* p, int w,
             const std::string modelId = m.ai.modelIdOverride.empty()
                 ? std::string(defaultModelIdFor(m.ai.target))
                 : m.ai.modelIdOverride;
-            if (engine && engine->hasModel(modelId)) {
+            // Prompt masks use an encoder+decoder pair rather than a single
+            // model, so defaultModelIdFor(Prompt)=="" would fail hasModel().
+            // Route them through generate() unconditionally — AiMaskGenerator
+            // falls back to a zero mask when the models are unavailable.
+            const bool promptMask = (m.ai.target == AiMaskTarget::Prompt);
+            if (engine && (promptMask || engine->hasModel(modelId))) {
                 // Wrap p into a fresh F32 buffer (single memcpy; the
                 // segmentation inference cost dominates). AiMaskGenerator
                 // returns an RGB buffer where R=G=B=weight; collapse to a

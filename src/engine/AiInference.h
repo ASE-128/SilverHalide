@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <vector>
@@ -40,6 +41,36 @@ struct ModelInfo {
     //   input[n] = (pixel[n] - mean[c]) / std[c]   (NCHW, c in 0..2)
     std::vector<float> inputMean = {0.0f, 0.0f, 0.0f};
     std::vector<float> inputStd  = {1.0f, 1.0f, 1.0f};
+};
+
+/**
+ * @brief A single point prompt for click-prompt (SAM) segmentation.
+ *
+ * Coordinates are normalized to the [0,1] range of the original image
+ * (0,0 = top-left, 1,1 = bottom-right) regardless of aspect ratio; the engine
+ * maps them into the model's 1024x1024 padded space internally.
+ */
+struct SamPoint {
+    float nx = 0.5f;   // normalized x in [0,1]
+    float ny = 0.5f;   // normalized y in [0,1]
+    int   label = 1;   // 1 = foreground (include), 0 = background (exclude)
+
+    bool operator==(const SamPoint&) const = default;
+};
+
+/**
+ * @brief Result of a click-prompt segmentation run.
+ *
+ * `mask` is a single-channel weight map of original width `width` x `height`
+ * (row-major float, values in [0,1]) selected as the highest-IoU candidate.
+ * `iouScore` is that candidate's predicted IoU. `ok` is false on any failure.
+ */
+struct SamMaskResult {
+    int width = 0;
+    int height = 0;
+    std::vector<float> mask;     // width * height, [0,1], row-major
+    float iouScore = 0.0f;
+    bool ok = false;
 };
 
 /**
@@ -95,6 +126,33 @@ public:
     ImageBufferPtr runImage(const std::string& modelId,
                             const ImageBuffer& input,
                             const ModelShape& outputShape);
+
+    /**
+     * @brief Two-stage click-prompt segmentation (MobileSAM).
+     *
+     * Runs the point-promptable encoder+decoder pair over `input`:
+     *   1. encodes a square, longest-edge-1024, pad-to-square image once into
+     *      an image embedding (the encoder model);
+     *   2. feeds that embedding together with the prompt `points` into the
+     *      decoder model, which emits candidate masks + IoU predictions.
+     *
+     * The encoder runs once per call. For interactive use where only the
+     * prompt changes between clicks, the caller should cache the embedding and
+     * re-run only the decoder — not available through this method.
+     *
+     * @param encoderId Model id of the image-encoder model (e.g. "mobilesam-encoder").
+     * @param decoderId Model id of the mask-decoder model (e.g. "mobilesam-decoder").
+     * @param input     Source image (any format; converted internally).
+     * @param points    Non-empty foreground/background point prompts.
+     * @return Best (highest-IoU) mask at original resolution, or ok=false on
+     *         failure (missing/unloadable model, LRC_ENABLE_AI=0, empty points).
+     *
+     * @note Thread-safe per the engine's per-thread session design.
+     */
+    SamMaskResult runSamPoint(const std::string& encoderId,
+                              const std::string& decoderId,
+                              const ImageBuffer& input,
+                              const std::vector<SamPoint>& points);
 
     /**
      * @brief Image pre-processing pipeline (exposed so callers can inspect
@@ -169,6 +227,14 @@ private:
     // are only pulled into the .cpp TU. Each thread gets its own Ort::Session
     // because single-session Run() is not thread-safe (per ONNX docs).
     struct SessionHolder;
+
+    // Acquires (creating if necessary) the thread-local session for `modelId`,
+    // covering both the builtin fast-path and lazy real-ONNX session creation.
+    // Returns nullptr and sets lastError on any failure (unloaded model,
+    // missing env/file, LRC_ENABLE_AI=0). Shared by run() and runSamPoint() so
+    // both paths reuse the same per-thread session cache.
+    SessionHolder* getOrCreateSession(const std::string& modelId);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 

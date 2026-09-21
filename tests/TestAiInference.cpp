@@ -20,10 +20,14 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <limits>
 #include <numeric>
 #include <vector>
 
 #include "engine/AiInference.h"
+#include "engine/AiMaskGenerator.h"
 #include "engine/ImageBuffer.h"
 
 namespace lrc::tests {
@@ -181,6 +185,179 @@ TEST_CASE("AiInference: load + run via ModelInfo works on stub backend or fails 
     std::iota(in.begin(), in.end(), 0.0f);
     auto out = engine.run("test_identity", in, {1, 3, 4, 4});
     CHECK(out.size() == in.size());
+}
+
+// ---------------------------------------------------------------------------
+// MobileSAM two-stage click-prompt segmentation.
+//
+// Only exercises the real encoder+decoder when (1) the build has a real ONNX
+// backend and (2) the mobile_sam *.onnx weights are found in the per-user
+// model cache (%LOCALAPPDATA%/Silver Halide/models). Otherwise it is a no-op
+// SUCCEED so stub / CI builds stay green without downloading anything.
+// ---------------------------------------------------------------------------
+TEST_CASE("AiInference: runSamPoint produces a finite point-driven mask",
+          "[ai][inference][sam]") {
+    if (!AiInferenceEngine::hasRealBackend()) {
+        SUCCEED("Stub backend — skipping real SAM inference.");
+        return;
+    }
+
+    // Locate the upstream mobile_sam weights (cache layout from ModelManager).
+    std::filesystem::path cacheDir;
+#if defined(_WIN32)
+    {
+        char buf[32767] = {};
+        size_t n = 0;
+        if (getenv_s(&n, buf, "LOCALAPPDATA") == 0 && n > 1)
+            cacheDir = std::filesystem::path(buf) / "Silver Halide" / "models";
+    }
+#else
+    if (const char* lp = std::getenv("LOCALAPPDATA"))
+        cacheDir = std::filesystem::path(lp) / "Silver Halide" / "models";
+#endif
+    const auto encoderPath = cacheDir / "mobilesam-encoder.onnx";
+    const auto decoderPath = cacheDir / "mobilesam-decoder.onnx";
+    if (!std::filesystem::exists(encoderPath) ||
+        !std::filesystem::exists(decoderPath)) {
+        SUCCEED("mobile_sam weights not cached — skipping real SAM inference.");
+        return;
+    }
+
+    AiInferenceEngine engine;
+    engine.setPreferredProvider(AiInferenceEngine::ExecutionProvider::Cpu);
+
+    ModelInfo enc{
+        "mobilesam-encoder", encoderPath,
+        ModelShape{{1024, 1024, 3}, "NHWC"},   // real input_image [H,W,3] dynamic NHWC
+        ModelShape{{1, 256, 64, 64}, "NCHW"}};
+    ModelInfo dec{
+        "mobilesam-decoder", decoderPath,
+        ModelShape{{1, 256, 64, 64}, "NCHW"},  // image_embeddings
+        ModelShape{{1, 1, 256, 256}, "NCHW"}}; // low_res_masks (single-mask output)
+    REQUIRE(engine.loadModel(enc));
+    REQUIRE(engine.loadModel(dec));
+
+    // Synthetic input: a bright square in the top-left, black background.
+    constexpr int W = 64, H = 48;
+    ImageBuffer buf(W, H, PixelFormat::F32);
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const bool inside = (x >= 8 && x < 24 && y >= 8 && y < 24);
+            const float v = inside ? 1.0f : 0.0f;
+            buf.setPixel(x, y, 0, v);
+            buf.setPixel(x, y, 1, v);
+            buf.setPixel(x, y, 2, v);
+        }
+    }
+
+    // One foreground point on the bright square.
+    std::vector<SamPoint> pts;
+    pts.push_back({16.0f / W, 16.0f / H, /*label=*/1});
+
+    SamMaskResult r = engine.runSamPoint("mobilesam-encoder",
+                                         "mobilesam-decoder", buf, pts);
+    if (!r.ok) {
+        INFO("runSamPoint failed: " + engine.lastError());
+        FAIL("runSamPoint expected to succeed with cached weights.");
+        return;
+    }
+
+    REQUIRE(r.width == W);
+    REQUIRE(r.height == H);
+    REQUIRE(r.mask.size() == static_cast<std::size_t>(W * H));
+    CHECK(std::isfinite(r.iouScore));
+
+    // All weights must be in [0,1] with no NaN/Inf.
+    bool finiteInRange = true;
+    for (float v : r.mask)
+        if (!(v >= 0.0f && v <= 1.0f) || !std::isfinite(v)) { finiteInRange = false; break; }
+    CHECK(finiteInRange);
+
+    // The clicked bright square should come out foreground: strong weight at the
+    // prompt point; the far corner (background) should be much weaker.
+    const float atClick = r.mask[static_cast<std::size_t>(16 * W + 16)];
+    const float farCorner = r.mask[static_cast<std::size_t>((H - 4) * W + (W - 4))];
+    CHECK(atClick > 0.5f);
+    CHECK(farCorner < atClick);
+}
+
+// AiMaskGenerator::generate with AiMaskTarget::Prompt must route through
+// runSamPoint and return a finite w×h weight field (never null). Gated on the
+// real backend + cached mobile_sam weights; otherwise it is a no-op SUCCEED so
+// stub / CI builds stay green.
+TEST_CASE("AiInference: AiMaskGenerator Prompt mask rasterizes via MobileSAM",
+          "[ai][inference][sam][prompt-mask]") {
+    if (!AiInferenceEngine::hasRealBackend()) {
+        SUCCEED("Stub backend — skipping Prompt mask rasterization.");
+        return;
+    }
+
+    std::filesystem::path cacheDir;
+#if defined(_WIN32)
+    {
+        char buf[32767] = {};
+        size_t n = 0;
+        if (getenv_s(&n, buf, "LOCALAPPDATA") == 0 && n > 1)
+            cacheDir = std::filesystem::path(buf) / "Silver Halide" / "models";
+    }
+#else
+    if (const char* lp = std::getenv("LOCALAPPDATA"))
+        cacheDir = std::filesystem::path(lp) / "Silver Halide" / "models";
+#endif
+    const auto encoderPath = cacheDir / "mobilesam-encoder.onnx";
+    const auto decoderPath = cacheDir / "mobilesam-decoder.onnx";
+    if (!std::filesystem::exists(encoderPath) ||
+        !std::filesystem::exists(decoderPath)) {
+        SUCCEED("mobile_sam weights not cached — skipping Prompt mask rasterization.");
+        return;
+    }
+
+    AiInferenceEngine engine;
+    engine.setPreferredProvider(AiInferenceEngine::ExecutionProvider::Cpu);
+    REQUIRE(engine.loadModel(ModelInfo{
+        "mobilesam-encoder", encoderPath,
+        ModelShape{{1, 3, 1024, 1024}, "NHWC"},
+        ModelShape{{1, 256, 64, 64}, "NCHW"}}));
+    REQUIRE(engine.loadModel(ModelInfo{
+        "mobilesam-decoder", decoderPath,
+        ModelShape{{1, 256, 64, 64}, "NCHW"},
+        ModelShape{{1, 4, 256, 256}, "NCHW"}}));
+
+    constexpr int W = 64, H = 48;
+    ImageBuffer buf(W, H, PixelFormat::F32);
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const bool inside = (x >= 8 && x < 24 && y >= 8 && y < 24);
+            const float v = inside ? 1.0f : 0.0f;
+            buf.setPixel(x, y, 0, v);
+            buf.setPixel(x, y, 1, v);
+            buf.setPixel(x, y, 2, v);
+        }
+    }
+
+    AiMaskParams params;
+    params.target = AiMaskTarget::Prompt;
+    params.points.push_back(SamPoint{16.0f / W, 16.0f / H, /*label=*/1});
+
+    AiMaskGenerator gen(&engine);
+    auto mask = gen.generate(buf, params);
+    REQUIRE(mask != nullptr);
+    REQUIRE(mask->width() == W);
+    REQUIRE(mask->height() == H);
+
+    const float* p = reinterpret_cast<const float*>(mask->data().data());
+    bool finiteInRange = true;
+    for (size_t i = 0; i < static_cast<size_t>(W * H) * 3; ++i)
+        if (!(p[i] >= 0.0f && p[i] <= 1.0f) || !std::isfinite(p[i]))
+            { finiteInRange = false; break; }
+    CHECK(finiteInRange);
+
+    // The clicked foreground square should be strongly weighted after refine;
+    // the far (background) corner should be much weaker.
+    const float atClick = p[static_cast<size_t>(16 * W + 16) * 3];
+    const float farCorner = p[static_cast<size_t>((H - 4) * W + (W - 4)) * 3];
+    CHECK(atClick > 0.5f);
+    CHECK(farCorner < atClick);
 }
 
 } // namespace lrc::tests

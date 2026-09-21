@@ -186,6 +186,29 @@ ImageBufferPtr AiMaskGenerator::generate(const ImageBuffer& input,
     const int w = input.width(), h = input.height();
     if (w <= 0 || h <= 0) return nullptr;
 
+    // Click-prompt (MobileSAM) path: rasterize the SamPoint list via the
+    // encoder+decoder pair, then apply the same threshold/feather/invert
+    // refinement as the one-shot models. Returns a zero mask when the points
+    // are empty or inference fails, so callers never dereference a null buffer.
+    if (params.target == AiMaskTarget::Prompt) {
+        if (!params.points.empty() && engine_) {
+            const auto res = engine_->runSamPoint(
+                defaultPromptEncoderId(), defaultPromptDecoderId(), input,
+                params.points);
+            if (res.ok && static_cast<int>(res.mask.size()) == w * h) {
+                auto grey = singleChToGreyBuf(res.mask, w, h);
+                if (grey)
+                    return refineMask(*grey, params.threshold, params.feather,
+                                      params.invert);
+            }
+        }
+        // Fall through to an explicit zero mask on any failure.
+        auto zero = ImageBuffer::create(w, h, PixelFormat::F32);
+        auto& d = zero->data();
+        std::fill(d.begin(), d.end(), 0);
+        return zero;
+    }
+
     const std::string modelId = modelIdOverride.empty()
         ? defaultModelIdFor(params.target)
         : modelIdOverride;

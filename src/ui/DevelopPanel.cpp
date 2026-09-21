@@ -645,8 +645,9 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     maskAiSubjectBtn_ = new QPushButton(tr("AI 主体"), this);
     maskAiSkyBtn_ = new QPushButton(tr("AI 天空"), this);
     maskAiBackgroundBtn_ = new QPushButton(tr("AI 背景"), this);
+    maskAiPromptBtn_ = new QPushButton(tr("AI 点选"), this);
     for (QPushButton* b : {maskAiSubjectBtn_, maskAiSkyBtn_,
-                           maskAiBackgroundBtn_}) {
+                           maskAiBackgroundBtn_, maskAiPromptBtn_}) {
         b->setProperty("secondary", true);
         aiMaskRow->addWidget(b);
     }
@@ -657,6 +658,41 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             [this]() { addAiMask(lrc::AiMaskTarget::Sky); });
     connect(maskAiBackgroundBtn_, &QPushButton::clicked, this,
             [this]() { addAiMask(lrc::AiMaskTarget::Background); });
+    connect(maskAiPromptBtn_, &QPushButton::clicked, this,
+            [this]() { addAiMask(lrc::AiMaskTarget::Prompt); });
+
+    // Click-prompt (MobileSAM) controls: foreground/background point mode and a
+    // "clear points" action. Shown only while a Prompt mask is selected.
+    auto* promptRow = new QHBoxLayout;
+    promptRow->setSpacing(6);
+    maskPromptFgBtn_ = new QPushButton(tr("前景点"), this);
+    maskPromptBgBtn_ = new QPushButton(tr("背景点"), this);
+    maskPromptClearBtn_ = new QPushButton(tr("清除点"), this);
+    maskPromptFgBtn_->setCheckable(true);
+    maskPromptBgBtn_->setCheckable(true);
+    maskPromptFgBtn_->setChecked(true);  // foreground by default
+    auto* promptGroup = new QButtonGroup(this);
+    promptGroup->setExclusive(true);
+    promptGroup->addButton(maskPromptFgBtn_);
+    promptGroup->addButton(maskPromptBgBtn_);
+    for (QPushButton* b : {maskPromptFgBtn_, maskPromptBgBtn_,
+                           maskPromptClearBtn_}) {
+        b->setProperty("secondary", true);
+        promptRow->addWidget(b);
+    }
+    maskPromptRow_ = new QWidget(this);
+    maskPromptRow_->setLayout(promptRow);
+    maskPromptRow_->setVisible(false);
+    maskSec->addWidget(maskPromptRow_);
+    connect(maskPromptFgBtn_, &QPushButton::clicked, this,
+            [this]() { emit maskPromptLabelChanged(1); });
+    connect(maskPromptBgBtn_, &QPushButton::clicked, this,
+            [this]() { emit maskPromptLabelChanged(0); });
+    connect(maskPromptClearBtn_, &QPushButton::clicked, this,
+            [this]() {
+                if (currentMaskIndex() >= 0)
+                    emit maskPromptClearRequested(currentMaskIndex());
+            });
 
     // Mask list + delete.
     auto* maskComboRow = new QHBoxLayout;
@@ -1561,6 +1597,8 @@ void DevelopPanel::onMaskFeatherChanged(int value) {
         m.linear.feather = f;
     else if (m.type == lrc::MaskType::RadialGradient)
         m.radial.feather = f;
+    else if (m.type == lrc::MaskType::AiMask)
+        m.ai.feather = f;
     else
         return;
     // Keep the slider and spin in sync (spin shows 0..100, slider 0..10000).
@@ -1704,6 +1742,8 @@ void DevelopPanel::syncMaskSliders() {
             feather = m.linear.feather;
         else if (m.type == lrc::MaskType::RadialGradient)
             feather = m.radial.feather;
+        else if (m.type == lrc::MaskType::AiMask)
+            feather = m.ai.feather;
     }
     {
         const QSignalBlocker b1(maskFeatherSlider_);
@@ -1740,6 +1780,9 @@ void DevelopPanel::syncMaskSection() {
                     case lrc::AiMaskTarget::Background:
                         label = tr("AI 背景");
                         break;
+                    case lrc::AiMaskTarget::Prompt:
+                        label = tr("AI 点选");
+                        break;
                 }
             } else {
                 label = tr("蒙版 %1").arg(static_cast<int>(i) + 1);
@@ -1761,23 +1804,28 @@ void DevelopPanel::updateMaskSectionVisibility() {
     const int idx = currentMaskIndex();
     const bool has = idx >= 0 && idx < static_cast<int>(current_.masks.size());
     bool showFeather = false, showBrush = false, showColor = false,
-         showSubRange = false;
+         showSubRange = false, showPrompt = false;
     if (has) {
         const lrc::MaskType t = current_.masks[static_cast<size_t>(idx)].type;
         showFeather = (t == lrc::MaskType::LinearGradient ||
-                       t == lrc::MaskType::RadialGradient);
+                       t == lrc::MaskType::RadialGradient ||
+                       t == lrc::MaskType::AiMask);  // AI masks use the feather slider
         showBrush = (t == lrc::MaskType::Brush);
         showColor = (t == lrc::MaskType::ColorRange);
         // The range sub-mask panel layers on top of geometry masks (linear / radial /
         // brush), not the standalone colour-range mask.
         showSubRange = has && t != lrc::MaskType::None &&
                        t != lrc::MaskType::ColorRange;
+        showPrompt = (t == lrc::MaskType::AiMask &&
+                      current_.masks[static_cast<size_t>(idx)].ai.target ==
+                          lrc::AiMaskTarget::Prompt);
     }
     maskFeatherRow_->setVisible(showFeather);
     maskBrushRow_->setVisible(showBrush);
     maskSoftnessRow_->setVisible(showBrush);
     maskColorRow_->setVisible(showColor);
     subRangeRow_->setVisible(showSubRange);
+    maskPromptRow_->setVisible(showPrompt);
     maskDeleteBtn_->setEnabled(has);
 }
 

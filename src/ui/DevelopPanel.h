@@ -200,6 +200,12 @@ signals:
     // existing mask in the combo) and after any path that disarms it to None.
     // MainWindow mirrors it in its toolbar (the panel is the source).
     void maskToolActivated(lrc::MaskType tool);
+    // The user switched the click-prompt (MobileSAM) point mode (1 = foreground,
+    // 0 = background). MainWindow routes it to ImageViewport::setMaskPromptLabel.
+    void maskPromptLabelChanged(int label);
+    // The user asked to clear all click-prompt points of the mask at `index`.
+    // MainWindow clears them and bumps cachedWeightVersion to re-rasterize.
+    void maskPromptClearRequested(int index);
 
     // User toggled the colour-range sampler button (MainWindow routes it to the
     // viewport's colour-range sampler tool, which calls setColorRangeReference
@@ -441,6 +447,11 @@ private:
     QPushButton* maskAiSubjectBtn_ = nullptr;
     QPushButton* maskAiSkyBtn_ = nullptr;
     QPushButton* maskAiBackgroundBtn_ = nullptr;
+    QPushButton* maskAiPromptBtn_ = nullptr;
+    QWidget* maskPromptRow_ = nullptr;       // fg/bg toggle + clear, shown for Prompt masks
+    QPushButton* maskPromptFgBtn_ = nullptr;
+    QPushButton* maskPromptBgBtn_ = nullptr;
+    QPushButton* maskPromptClearBtn_ = nullptr;
     QComboBox* maskCombo_ = nullptr;
     QPushButton* maskDeleteBtn_ = nullptr;
     QWidget* maskFeatherRow_ = nullptr;

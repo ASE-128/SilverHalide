@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -126,10 +127,19 @@ std::vector<float> runBuiltin(BuiltinKind kind,
 #if LRC_ENABLE_AI
 inline bool directMLAvailable() {
     try {
+        // ONNX Runtime reports the DirectML EP as "DmlExecutionProvider"
+        // (mixed case). Compare case-insensitively so detection is robust to
+        // upstream casing changes. Without this, a DirectML-capable runtime
+        // would be silently reported unavailable and fall back to CPU.
         const auto providers = Ort::GetAvailableProviders();
-        for (const auto& p : providers)
-            if (p == "DMLExecutionProvider")
-                return true;
+        for (const auto& p : providers) {
+            if (p.size() != 18) continue;               // len("DmlExecutionProvider")
+            bool same = true;
+            for (size_t i = 0; i < 18; ++i)
+                if (static_cast<char>(std::tolower((unsigned char)p[i])) !=
+                    "dmlexecutionprovider"[i]) { same = false; break; }
+            if (same) return true;
+        }
     } catch (const Ort::Exception&) {
         return false;
     }
@@ -324,6 +334,66 @@ bool AiInferenceEngine::hasModel(const std::string& modelId) const {
     return impl_->models.find(modelId) != impl_->models.end();
 }
 
+AiInferenceEngine::SessionHolder* AiInferenceEngine::getOrCreateSession(
+    const std::string& modelId) {
+    // Look up model info first (guards against unloaded ids). We copy the info
+    // before dropping the read lock so we don't hold `mutex_` while creating a
+    // session (session load is slow and run()/runImage() want the shared lock
+    // free for concurrent readers).
+    std::optional<ModelInfo> infoOpt;
+    {
+        std::shared_lock rlock(mutex_);
+        auto it = impl_->models.find(modelId);
+        if (it == impl_->models.end()) {
+            setLastError(lastError_, "run: model not loaded: " + modelId, errMutex_);
+            return nullptr;
+        }
+        infoOpt = it->second;
+    }
+    const ModelInfo& info = *infoOpt;
+
+    // Get-or-create a session for this thread.
+    const auto tid = std::this_thread::get_id();
+    std::unique_lock<std::mutex> sl(impl_->sessionsMutex);
+    auto& perModel = impl_->sessions[tid];
+    auto hIt = perModel.find(modelId);
+    if (hIt != perModel.end())
+        return &hIt->second;
+
+    // First call on this thread — lazy-init.  For builtin models this is
+    // cheap; for real ONNX models this means the first `run` pays the
+    // session-load cost (a warn-worthy but functional path).
+    const BuiltinKind bk = builtinKindForPath(info.onnxPath);
+    if (bk != BuiltinKind::None) {
+        SessionHolder h;
+        h.builtin = bk;
+        auto res = perModel.emplace(modelId, std::move(h));
+        return &res.first->second;
+    }
+#if LRC_ENABLE_AI
+    if (!impl_->env || !std::filesystem::exists(info.onnxPath)) {
+        setLastError(lastError_, "run: lazy session init failed for " + modelId, errMutex_);
+        return nullptr;
+    }
+    try {
+        Ort::SessionOptions opts = makeSessionOptions(
+            impl_->preferred == ExecutionProvider::DirectML);
+        const auto wide = info.onnxPath.wstring();
+        auto s = std::make_unique<Ort::Session>(*impl_->env, wide.c_str(), opts);
+        SessionHolder h;
+        h.session = std::move(s);
+        auto res = perModel.emplace(modelId, std::move(h));
+        return &res.first->second;
+    } catch (const Ort::Exception& e) {
+        setLastError(lastError_, std::string("ONNX lazy-load: ") + e.what(), errMutex_);
+        return nullptr;
+    }
+#else
+    setLastError(lastError_, "run: LRC_ENABLE_AI=0, cannot run " + modelId, errMutex_);
+    return nullptr;
+#endif
+}
+
 std::optional<ModelInfo> AiInferenceEngine::modelInfo(const std::string& modelId) const {
     std::shared_lock lock(mutex_);
     auto it = impl_->models.find(modelId);
@@ -354,48 +424,9 @@ std::vector<float> AiInferenceEngine::run(const std::string& modelId,
     rlock.unlock();
 
     // 2. Get-or-create a session for this thread -----------------------------
-    const auto tid = std::this_thread::get_id();
-    SessionHolder* holder = nullptr;
-    {
-        std::unique_lock<std::mutex> sl(impl_->sessionsMutex);
-        auto& perModel = impl_->sessions[tid];
-        auto hIt = perModel.find(modelId);
-        if (hIt == perModel.end()) {
-            // First call on this thread — lazy-init.  For builtin models this
-            // is cheap; for real ONNX models this means the first `run` pays
-            // the session-load cost (a warn-worthy but functional path).
-            const BuiltinKind bk = builtinKindForPath(info.onnxPath);
-            if (bk != BuiltinKind::None) {
-                SessionHolder h;
-                h.builtin = bk;
-                perModel[modelId] = std::move(h);
-            } else {
-#if LRC_ENABLE_AI
-                if (!impl_->env || !std::filesystem::exists(info.onnxPath)) {
-                    setLastError(lastError_, "run: lazy session init failed for " + modelId, errMutex_);
-                    return {};
-                }
-                try {
-                    Ort::SessionOptions opts = makeSessionOptions(
-                        impl_->preferred == ExecutionProvider::DirectML);
-                    const auto wide = info.onnxPath.wstring();
-                    auto s = std::make_unique<Ort::Session>(*impl_->env, wide.c_str(), opts);
-                    SessionHolder h;
-                    h.session = std::move(s);
-                    perModel[modelId] = std::move(h);
-                } catch (const Ort::Exception& e) {
-                    setLastError(lastError_, std::string("ONNX lazy-load: ") + e.what(), errMutex_);
-                    return {};
-                }
-#else
-                setLastError(lastError_, "run: LRC_ENABLE_AI=0, cannot run " + modelId, errMutex_);
-                return {};
-#endif
-            }
-            hIt = perModel.find(modelId);
-        }
-        holder = &hIt->second;
-    }
+    SessionHolder* holder = getOrCreateSession(modelId);
+    if (!holder)
+        return {};
 
     // 3. Builtin fast-path ----------------------------------------------------
     if (holder->builtin != BuiltinKind::None) {
@@ -545,6 +576,265 @@ ImageBufferPtr AiInferenceEngine::runImage(const std::string& modelId,
     auto buf = postprocessImage(out, ow, oh, oc, PixelFormat::F32,
                                 info.inputMean, info.inputStd);
     return buf;
+}
+
+// ---------------------------------------------------------------------------
+// runSamPoint — two-stage MobileSAM click-prompt segmentation
+// ---------------------------------------------------------------------------
+namespace {
+
+// Sigmoid activation for SAM mask logits -> [0,1] weight. MobileSAM emits raw
+// mask logits; the renderer consumes a weight field in [0,1], so we map the
+// best candidate through sigmoid (consistent with SAM's sigmoid/0.5 threshold).
+inline float sigmoid(float x) {
+    if (x >= 0.0f) { const float z = std::exp(-x); return 1.0f / (1.0f + z); }
+    const float z = std::exp(x); return z / (1.0f + z);
+}
+
+// Nearest-neighbour 1-channel resize (Hsrc x Wsrc -> Hdst x Wdst, row-major).
+inline std::vector<float> resize1Ch(const std::vector<float>& src,
+                                    int sw, int sh, int dw, int dh) {
+    std::vector<float> out(static_cast<size_t>(dw) * dh);
+    for (int y = 0; y < dh; ++y) {
+        const int sy = std::min(sh - 1, static_cast<int>(static_cast<float>(y) *
+                                 static_cast<float>(sh) / static_cast<float>(dh)));
+        for (int x = 0; x < dw; ++x) {
+            const int sx = std::min(sw - 1, static_cast<int>(static_cast<float>(x) *
+                                     static_cast<float>(sw) / static_cast<float>(dw)));
+            out[static_cast<size_t>(y) * dw + x] = src[static_cast<size_t>(sy) * sw + sx];
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+SamMaskResult AiInferenceEngine::runSamPoint(const std::string& encoderId,
+                                             const std::string& decoderId,
+                                             const ImageBuffer& input,
+                                             const std::vector<SamPoint>& points) {
+    SamMaskResult result;
+    clearLastError(lastError_, errMutex_);
+
+    const int origW = input.width(), origH = input.height();
+    if (origW <= 0 || origH <= 0 || points.empty()) {
+        setLastError(lastError_, "runSamPoint: bad input image or empty points", errMutex_);
+        return result;  // ok=false
+    }
+    if (!hasModel(encoderId) || !hasModel(decoderId)) {
+        setLastError(lastError_, "runSamPoint: encoder/decoder not loaded", errMutex_);
+        return result;
+    }
+
+    // --- 1. Encode the image (longest edge 1024, pad-to-square, NHWC) ---------
+    // MobileSAM input space: image resized so the longest edge is 1024, then
+    // zero-padded on the right/bottom to a square 1024x1024. Points map into
+    // this space by the same scale factor (padding only extends the canvas, so
+    // interior coordinates are unshifted). Pixel values are normalized with the
+    // 255-scaled ImageNet stats, in NHWC [1024,1024,3] matching the real
+    // exported encoder input_image [H,W,3] (dynamic NHWC).
+    constexpr int IMG = 1024;
+    const float scale = static_cast<float>(IMG) / static_cast<float>(std::max(origW, origH));
+    const int newW = std::max(1, static_cast<int>(static_cast<float>(origW) * scale + 0.5f));
+    const int newH = std::max(1, static_cast<int>(static_cast<float>(origH) * scale + 0.5f));
+
+    // float RGB [0,255] of original image (any input format -> F32-like copy).
+    std::vector<float> src(static_cast<size_t>(origW) * origH * 3);
+    {
+        const auto& raw = input.data();
+        if (input.format() == PixelFormat::U8) {
+            for (size_t i = 0; i < src.size(); ++i)
+                src[i] = static_cast<float>(raw[i]);
+        } else if (input.format() == PixelFormat::U16) {
+            const auto* r16 = reinterpret_cast<const uint16_t*>(raw.data());
+            for (size_t i = 0; i < src.size(); ++i)
+                src[i] = static_cast<float>(r16[i]) * (255.0f / 65535.0f);
+        } else {
+            const auto* rf = reinterpret_cast<const float*>(raw.data());
+            for (size_t i = 0; i < src.size(); ++i)
+                src[i] = rf[i] * 255.0f;
+        }
+    }
+    std::vector<float> resized = resizeFloatRGB(src.data(), origW, origH, newW, newH);
+
+    // To NHWC [1024,1024,3]: zero-pad the right/bottom and normalize with the
+    // 255-scaled ImageNet stats, interleaved (row-major HxW, RGB per pixel) to
+    // match the fixed [1024,1024,3] tensor fed to the encoder.
+    constexpr float kM0 = 123.675f, kM1 = 116.28f,  kM2 = 103.53f;
+    constexpr float kS0 = 58.395f,  kS1 = 57.12f,   kS2 = 57.375f;
+    std::vector<float> img(static_cast<size_t>(IMG) * IMG * 3);
+    for (size_t i = 0; i < img.size(); i += 3) {
+        img[i] = -kM0 / kS0;  // pre-fill from the zero-pad value
+        img[i + 1] = -kM1 / kS1;
+        img[i + 2] = -kM2 / kS2;
+    }
+    for (int y = 0; y < newH; ++y) {
+        for (int x = 0; x < newW; ++x) {
+            const size_t si = (static_cast<size_t>(y) * newW + x) * 3;
+            const size_t di = (static_cast<size_t>(y) * IMG + x) * 3;
+            img[di]     = (resized[si]     - kM0) / kS0;
+            img[di + 1] = (resized[si + 1] - kM1) / kS1;
+            img[di + 2] = (resized[si + 2] - kM2) / kS2;
+        }
+    }
+
+    std::vector<float> embedding = run(encoderId, img, {IMG, IMG, 3});
+    constexpr size_t EMB = 256ull * 64u * 64u;
+    if (embedding.size() != EMB) {
+        setLastError(lastError_, "runSamPoint: encoder output unexpected size", errMutex_);
+        return result;
+    }
+
+    // --- 2. Decode with the point prompts -------------------------------------
+    SessionHolder* holder = getOrCreateSession(decoderId);
+    if (!holder) {
+        return result;  // lastError already set
+    }
+    if (holder->builtin != BuiltinKind::None) {
+        setLastError(lastError_, "runSamPoint: builtin decoder not supported", errMutex_);
+        return result;
+    }
+#if LRC_ENABLE_AI
+    try {
+        Ort::Session& sess = *holder->session;
+        Ort::AllocatorWithDefaultOptions alloc;
+        Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator,
+                                                         OrtMemTypeDefault);
+
+        // Point tensors in the 1024-padded coordinate space.
+        const int P = static_cast<int>(points.size());
+        std::vector<float> coords(static_cast<size_t>(P) * 2);
+        std::vector<float> labels(static_cast<size_t>(P));
+        for (int p = 0; p < P; ++p) {
+            coords[static_cast<size_t>(p) * 2]     = points[p].nx * static_cast<float>(newW);
+            coords[static_cast<size_t>(p) * 2 + 1] = points[p].ny * static_cast<float>(newH);
+            labels[static_cast<size_t>(p)] = static_cast<float>(points[p].label);
+        }
+        const std::vector<int64_t> coordShape = {1, P, 2};
+        const std::vector<int64_t> labelShape = {1, P};
+        const std::vector<int64_t> embShape   = {1, 256, 64, 64};
+        const std::vector<int64_t> maskShape  = {1, 1, 256, 256};
+        const std::vector<int64_t> hasShape   = {1};
+        const std::vector<int64_t> origShape  = {2};
+        const std::vector<float> maskInput(256u * 256u, 0.0f);
+        const std::vector<float> hasMask = {0.0f};
+        const std::vector<float> origSz  = {static_cast<float>(newH),
+                                            static_cast<float>(newW)};
+
+        // Name every input/output slot (decoder has 6 inputs, 3 outputs). The
+        // name buffers (Ort::AllocatedStringPtr) must outlive the Run call.
+        std::vector<Ort::AllocatedStringPtr> inHolders, outHolders;
+        std::vector<const char*> inNames, outNames;
+        for (int i = 0; i < static_cast<int>(sess.GetInputCount()); ++i) {
+            inHolders.push_back(sess.GetInputNameAllocated(i, alloc));
+            inNames.push_back(inHolders.back().get());
+        }
+        auto tEmb   = Ort::Value::CreateTensor<float>(mem, embedding.data(), embedding.size(), embShape.data(), embShape.size());
+        auto tCoord = Ort::Value::CreateTensor<float>(mem, coords.data(), coords.size(), coordShape.data(), coordShape.size());
+        auto tLabel = Ort::Value::CreateTensor<float>(mem, labels.data(), labels.size(), labelShape.data(), labelShape.size());
+        auto tMask  = Ort::Value::CreateTensor<float>(mem, const_cast<float*>(maskInput.data()), maskInput.size(), maskShape.data(), maskShape.size());
+        auto tHas   = Ort::Value::CreateTensor<float>(mem, const_cast<float*>(hasMask.data()), hasMask.size(), hasShape.data(), hasShape.size());
+        auto tOrig  = Ort::Value::CreateTensor<float>(mem, const_cast<float*>(origSz.data()), origSz.size(), origShape.data(), origShape.size());
+
+        std::vector<Ort::Value> inVals;
+        inVals.reserve(6);
+        inVals.push_back(std::move(tEmb));
+        inVals.push_back(std::move(tCoord));
+        inVals.push_back(std::move(tLabel));
+        inVals.push_back(std::move(tMask));
+        inVals.push_back(std::move(tHas));
+        inVals.push_back(std::move(tOrig));
+        // Ort::Run requires a *contiguous* array of Ort::Value (not pointers);
+        // the vector owns the six moved-in Values, so their addresses are
+        // stable across the Run call.
+        for (int i = 0; i < static_cast<int>(sess.GetOutputCount()); ++i) {
+            outHolders.push_back(sess.GetOutputNameAllocated(i, alloc));
+            outNames.push_back(outHolders.back().get());
+        }
+        auto outT = sess.Run(Ort::RunOptions{nullptr},
+                             inNames.data(), inVals.data(), inVals.size(),
+                             outNames.data(), outNames.size());
+
+        // Identify the iou and mask outputs by scanning names.
+        int iouIdx = -1, maskIdx = -1;
+        int nOut = static_cast<int>(sess.GetOutputCount());
+        {
+            for (int i = 0; i < nOut; ++i) {
+                std::string n(outNames[i]);
+                if (n == "iou_predictions") iouIdx = i;
+                else if (n == "masks") maskIdx = i;
+            }
+        }
+        if (iouIdx < 0 || maskIdx < 0 || static_cast<size_t>(maskIdx) >= outT.size() ||
+            static_cast<size_t>(iouIdx) >= outT.size()) {
+            setLastError(lastError_, "runSamPoint: decoder missing expected outputs", errMutex_);
+            return result;
+        }
+
+        // Read iou_predictions -> choose best candidate index per point (0 here).
+        auto iouInfo = outT[static_cast<size_t>(iouIdx)].GetTensorTypeAndShapeInfo();
+        auto iouDims = iouInfo.GetShape();
+        const float* iou = outT[static_cast<size_t>(iouIdx)].GetTensorData<float>();
+        size_t iouElems = iouInfo.GetElementCount();
+        // M = number of candidate masks per point. The iou tensor is laid out
+        // as [P, M], [1, P, M] or [B, P, M] depending on export, so M is the
+        // *last* dimension (candidates are always the innermost non-batch axis).
+        int M = 2;  // fallback for full SAM
+        if (iouDims.size() >= 2)
+            M = static_cast<int>(iouDims.back());
+        if (M <= 0 && iouElems > 0)
+            M = static_cast<int>(std::max<size_t>(1, iouElems / static_cast<size_t>(P)));
+        if (M > static_cast<int>(iouElems))
+            M = static_cast<int>(iouElems);  // guard against trailing batch dims
+        int best = 0;
+        for (int j = 1; j < M; ++j) {
+            const size_t offset = std::min<size_t>(static_cast<size_t>(j), static_cast<size_t>(M) - 1);
+            if (offset < iouElems && iou[offset] > iou[static_cast<size_t>(best)])
+                best = j;
+        }
+        result.iouScore = (M > 0 && iouElems > 0) ? iou[static_cast<size_t>(best)] : 0.0f;
+
+        // Read masks ([P, M, newH, newW] expected; model resized via orig_im_size).
+        auto maskInfo = outT[static_cast<size_t>(maskIdx)].GetTensorTypeAndShapeInfo();
+        auto maskDims = maskInfo.GetShape();
+        const float* maskRaw = outT[static_cast<size_t>(maskIdx)].GetTensorData<float>();
+        const size_t maskElems = maskInfo.GetElementCount();
+        int mW = newW, mH = newH, lead = 1;
+        // Derive (mH, mW) from the trailing two dims and the candidate axis from
+        // the third-from-last. Handles [M,H,W], [1,M,H,W] and [1,P,M,H,W]
+        // layouts: M is always innermost-before the spatial dims.
+        if (maskDims.size() >= 3) {
+            lead = static_cast<int>(maskDims[maskDims.size() - 3]);  // candidate axis
+            mH   = static_cast<int>(maskDims[maskDims.size() - 2]);
+            mW   = static_cast<int>(maskDims[maskDims.size() - 1]);
+        }
+        if (mW <= 0) mW = newW;
+        if (mH <= 0) mH = newH;
+        const size_t perMask = static_cast<size_t>(std::max(1, mW)) * std::max(1, mH);
+        if (maskElems < perMask) {
+            setLastError(lastError_, "runSamPoint: masks output too small", errMutex_);
+            return result;
+        }
+        const int useIdx = (lead > 0 && best < lead) ? best : 0;
+        std::vector<float> bestMask(maskRaw + static_cast<size_t>(useIdx) * perMask,
+                                    maskRaw + static_cast<size_t>(useIdx) * perMask + perMask);
+
+        // Sigmoid + resize the selected mask to original resolution.
+        for (auto& v : bestMask) v = sigmoid(v);
+        std::vector<float> full = resize1Ch(bestMask, mW, mH, origW, origH);
+
+        result.width = origW; result.height = origH;
+        result.mask = std::move(full);
+        result.ok = true;
+        return result;
+    } catch (const Ort::Exception& e) {
+        setLastError(lastError_, std::string("runSamPoint: ") + e.what(), errMutex_);
+        return result;
+    }
+#else
+    setLastError(lastError_, "runSamPoint: LRC_ENABLE_AI=0", errMutex_);
+    return result;
+#endif
 }
 
 // ---------------------------------------------------------------------------

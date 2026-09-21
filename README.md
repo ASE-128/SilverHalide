@@ -92,6 +92,9 @@ cmake --build build_headless -j
 ctest --test-dir build_headless --output-on-failure
 ```
 
+> GPU/像素密集型阶段的可选 SIMD 快速路径（`gaussianBlur` AVX2 等）默认关闭，行为与标量基线一致。
+> 需要启用时加 `-DLRC_ENABLE_SIMD=ON`（MSVC 自动加 `/arch:AVX2`）；结果与标量路径容差相近（Δ<0.008）而非逐位一致。
+
 ### 运行 GUI
 
 ```powershell

@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "engine/AiInference.h"  // SamPoint, SamMaskResult (for Prompt click masks)
+
 namespace lrc {
 
 // A point on the tonal response curve. Coordinates are normalized to [0,1]
@@ -133,6 +135,7 @@ enum class AiMaskTarget : uint8_t {
     Subject = 0,
     Sky = 1,
     Background = 2,
+    Prompt = 3,  // click-prompt (MobileSAM): mask follows SamPoint list
 };
 
 struct AiMaskParams {
@@ -144,6 +147,10 @@ struct AiMaskParams {
     int cachedWeightVersion = 0;  // bump to invalidate any rasterised weight
     // Optional model override — defaults come from AiMaskGenerator.
     std::string modelIdOverride;
+    // Click prompts (only meaningful when target == Prompt). Normalized [0,1]
+    // image coords; label 1 = foreground (include), 0 = background (exclude).
+    // Pipeline feeds these to MobileSAM's decoder to rasterize the mask weight.
+    std::vector<SamPoint> points;
 
     bool operator==(const AiMaskParams&) const = default;
 };

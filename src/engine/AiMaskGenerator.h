@@ -40,11 +40,19 @@ namespace lrc {
 inline const char* defaultModelIdFor(AiMaskTarget t) {
     switch (t) {
         case AiMaskTarget::Subject:    return "rmbg2-subject";
-        case AiMaskTarget::Sky:        return "u2net-sky";
+        case AiMaskTarget::Sky:        return "skyseg-sky";     // dedicated SkySeg
         case AiMaskTarget::Background: return "rmbg2-subject";  // same model, invert
+        case AiMaskTarget::Prompt:     return "";               // two-model path below
     }
     return "";
 }
+
+/**
+ * @brief Default MobileSAM model ids for click-prompt masks.
+ *        Prompt masks use an encoder+decoder pair instead of a single model.
+ */
+inline const char* defaultPromptEncoderId() { return "mobilesam-encoder"; }
+inline const char* defaultPromptDecoderId() { return "mobilesam-decoder"; }
 
 class AiMaskGenerator {
 public:

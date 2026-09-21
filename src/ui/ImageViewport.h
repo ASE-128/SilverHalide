@@ -123,6 +123,11 @@ public:
     void setMaskBrushSoftness(double softness);
     double maskBrushSoftness() const { return maskBrushSoftness_; }
 
+    // Label for the next click-prompt (MobileSAM) point added by the mask tool:
+    // 1 = foreground (include), 0 = background (exclude). Defaults to foreground.
+    void setMaskPromptLabel(int label) { maskPromptLabel_ = label ? 1 : 0; }
+    int maskPromptLabel() const { return maskPromptLabel_; }
+
     // Controls whether the red weight overlay is drawn (shortcut O toggles).
     // Defaults to true.
     void setMaskOverlayVisible(bool visible);
@@ -352,6 +357,7 @@ private:
     QPointF lastMousePos_;   // current mouse pos (brush cursor)
     double maskBrushRadius_ = 0.05;
     double maskBrushSoftness_ = 0.5;  // brush dab softness (0..1)
+    int maskPromptLabel_ = 1;         // label for the next click-prompt point (1=fg,0=bg)
     size_t lastOverlayHash_ = 0;      // geometry hash of the built mask overlay
 
     // --- Spot removal / healing brush --------------------------------------

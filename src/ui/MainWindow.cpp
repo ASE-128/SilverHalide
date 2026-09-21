@@ -464,6 +464,11 @@ void MainWindow::buildUi() {
     // selection so the viewport matches the panel value (0..1).
     connect(developPanel_, &DevelopPanel::maskSoftnessChanged, viewport_,
             &ImageViewport::setMaskBrushSoftness);
+    // Click-prompt (MobileSAM) point mode follows the panel toggle.
+    connect(developPanel_, &DevelopPanel::maskPromptLabelChanged, viewport_,
+            &ImageViewport::setMaskPromptLabel);
+    connect(developPanel_, &DevelopPanel::maskPromptClearRequested, this,
+            &MainWindow::onMaskPromptClearRequested);
 
     connect(navigator_, &NavigatorWidget::allPhotosSelected, this,
             [this]() {
@@ -1788,6 +1793,25 @@ void MainWindow::onMaskEditFinished() {
     maskStrokeActive_ = false;
     if (currentImageId_ >= 0)
         commitAdjustments(currentAdjustments_);
+}
+
+void MainWindow::onMaskPromptClearRequested(int index) {
+    if (index < 0 ||
+        index >= static_cast<int>(currentAdjustments_.masks.size()))
+        return;
+    lrc::Mask& m = currentAdjustments_.masks[static_cast<size_t>(index)];
+    if (m.type != lrc::MaskType::AiMask ||
+        m.ai.target != lrc::AiMaskTarget::Prompt)
+        return;
+    // Clearing is a committed edit: snapshot for undo, drop the points, bump
+    // the version so Pipeline re-rasterizes (Prompt falls back to a zero mask
+    // with no points), then keep the viewport draft in sync.
+    undoStack_.push(currentAdjustments_);
+    m.ai.points.clear();
+    m.ai.cachedWeightVersion++;
+    commitAdjustments(currentAdjustments_);
+    if (currentMaskIndex_ == index)
+        viewport_->setMaskDraft(currentAdjustments_.masks[static_cast<size_t>(index)]);
 }
 
 // --- White-balance eyedropper (W) --------------------------------------------

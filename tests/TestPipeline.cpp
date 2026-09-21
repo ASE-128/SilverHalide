@@ -683,6 +683,42 @@ TEST_CASE("Pipeline: fast box blur approximates exact gaussian",
     }
 }
 
+#if LRC_ENABLE_SIMD
+// P2-2 acceptance (competitive-optimization spec §P2-2): the ALX2 exact-
+// separable blur reassociates FMA arithmetic, so its output must stay within
+// Δ<0.008 of the scalar reference rather than being bit-identical. This test
+// only compiles when the engine is built with LRC_ENABLE_SIMD=ON (the default
+// build uses the scalar path, which the byte-identity tests above already
+// cover); LRC_ENABLE_SIMD is a PUBLIC compile definition propagated from
+// lrc_engine, so the test TU sees it whenever the SIMD path is compiled in.
+TEST_CASE("Pipeline: SIMD gaussianBlur is tolerance-close to scalar reference",
+          "[pipeline][blur][simd]") {
+    const int w = 160, h = 96;
+    // Inline smooth diagonal gradient (same shape makeBlurGradient produces),
+    // kept here so this SIMD test is self-contained regardless of ordering.
+    std::vector<float> grad(static_cast<size_t>(w) * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            grad[static_cast<size_t>(y) * w + x] =
+                static_cast<float>(x + y) / static_cast<float>(w + h - 2);
+    // A spread of exact-path sigmas: sub-pixel radius (0.8), a mid-width kernel
+    // (2.5) and the exact/box boundary (4.0), exercising unlike tap counts.
+    const float sigmas[] = {0.8f, 2.5f, 4.0f};
+    for (const float sigma : sigmas) {
+        const std::vector<float> simd =
+            lrc::pipelineGaussianBlurTest(grad.data(), w, h, sigma);
+        const std::vector<float> ref =
+            exactGaussianRef(grad.data(), w, h, sigma);
+        REQUIRE(simd.size() == ref.size());
+        float maxDelta = 0.0f;
+        for (size_t i = 0; i < simd.size(); ++i)
+            maxDelta = std::max(maxDelta, std::abs(simd[i] - ref[i]));
+        CAPTURE(sigma, maxDelta);
+        REQUIRE(maxDelta < 0.008f);
+    }
+}
+#endif // LRC_ENABLE_SIMD
+
 // --- M1: pooled scratch buffers must not change the gaussian math ------------
 
 namespace {

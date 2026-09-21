@@ -159,6 +159,13 @@ size_t Mask::hash() const {
     h = hashCombine(h, static_cast<size_t>(ai.cachedWeightVersion));
     h = hashCombine(h, ai.modelIdOverride.size());
     for (char c : ai.modelIdOverride) h = hashCombine(h, static_cast<size_t>(c));
+    // Click-prompt points shape the Prompt mask raster.
+    h = hashCombine(h, ai.points.size());
+    for (const SamPoint& pt : ai.points) {
+        mixFloat(h, pt.nx);
+        mixFloat(h, pt.ny);
+        h = hashCombine(h, static_cast<size_t>(pt.label));
+    }
     return h;
 }
 
@@ -222,6 +229,14 @@ size_t Mask::geometryHash() const {
     h = hashCombine(h, static_cast<size_t>(ai.cachedWeightVersion));
     h = hashCombine(h, ai.modelIdOverride.size());
     for (char c : ai.modelIdOverride) h = hashCombine(h, static_cast<size_t>(c));
+    // Prompt points are geometry: adding/removing/re-labelling one invalidates
+    // the Prompt mask raster and the viewport overlay.
+    h = hashCombine(h, ai.points.size());
+    for (const SamPoint& pt : ai.points) {
+        mixFloat(h, pt.nx);
+        mixFloat(h, pt.ny);
+        h = hashCombine(h, static_cast<size_t>(pt.label));
+    }
     return h;
 }
 
