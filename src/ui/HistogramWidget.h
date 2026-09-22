@@ -5,7 +5,13 @@
  *
  * Three channels are overlaid as translucent filled curves; a luminance
  * (white) channel is drawn on top. Supports a linear / logarithmic vertical
- * scale toggle. Data source is the 8-bit preview produced by the pipeline.
+ * scale toggle.
+ *
+ * Primary data source (P3-1): bins computed by Pipeline::computeHistogramFromLinear
+ * from the adjusted linear F32 display buffer on the preview-worker thread and
+ * delivered via setHistogram -- exact counts, no sampling. setImage remains as
+ * the 8-bit fallback path (full-res 1:1 / coarse frames) and also traverses
+ * every pixel.
  */
 
 #include <QImage>

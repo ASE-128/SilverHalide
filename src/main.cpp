@@ -15,6 +15,9 @@ int main(int argc, char** argv) {
     // from MainWindow to PreviewWorker::batchExport.
     qRegisterMetaType<ExportItem>();
     qRegisterMetaType<QList<ExportItem>>();
+    // P3-1: linear-light histogram bins cross the queued preview-worker
+    // connection (worker thread -> UI thread).
+    qRegisterMetaType<lrc::HistogramBins>();
 
     Application app(argc, argv);
     MainWindow window;

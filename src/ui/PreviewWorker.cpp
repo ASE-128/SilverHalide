@@ -151,14 +151,16 @@ void PreviewWorker::loadImage(qint64 imageId, const QString& filePath,
                     fullLongEdge_ = std::max(sp->buf->width(),
                                              sp->buf->height()) * 2;
                 }
+                lrc::ImageBufferPtr linearDisplay;
                 auto out = pipeline_.renderPreview(
                     *linear_, adjustments,
                     lrc::Size{viewportSize_.width(), viewportSize_.height()},
-                    fullLongEdge_, static_cast<uint64_t>(imageId));
+                    fullLongEdge_, static_cast<uint64_t>(imageId),
+                    &linearDisplay);
                 if (abort_.load())
                     return;  // abort during render.
-                if (generation == latestGeneration_)
-                    emit previewReady(imageId, out);
+                emitPreviewWithHistogram(imageId, generation, linearDisplay,
+                                         out);
                 return;
             }
         }
@@ -196,17 +198,21 @@ void PreviewWorker::loadImage(qint64 imageId, const QString& filePath,
 
     lrc::ImageBufferPtr out;
     if (!viewportSize_.isEmpty()) {
+        lrc::ImageBufferPtr linearDisplay;
         out = pipeline_.renderPreview(
             *linear_, adjustments,
             lrc::Size{viewportSize_.width(), viewportSize_.height()},
-            fullLongEdge_, static_cast<uint64_t>(imageId));
+            fullLongEdge_, static_cast<uint64_t>(imageId),
+            &linearDisplay);
+        if (abort_.load())
+            return;  // abort during render.
+        emitPreviewWithHistogram(imageId, generation, linearDisplay, out);
     } else {
         out = pipeline_.render(imageId, *linear_, adjustments, 0);
+        if (abort_.load())
+            return;  // abort during render.
+        emitPreviewWithHistogram(imageId, generation, nullptr, out);
     }
-    if (abort_.load())
-        return;  // abort during render.
-    if (generation == latestGeneration_)
-        emit previewReady(imageId, out);
 }
 
 void PreviewWorker::setPreviewTargetSize(const QSize& size) {
@@ -228,17 +234,21 @@ void PreviewWorker::adjustPreview(qint64 imageId, qint64 generation,
     if (!viewportSize_.isEmpty()) {
         // Render at the viewport's logical resolution through the incremental
         // preview pipeline (per-stage cache reuses unchanged stages).
+        lrc::ImageBufferPtr linearDisplay;
         out = pipeline_.renderPreview(
             *linear_, adjustments,
             lrc::Size{viewportSize_.width(), viewportSize_.height()},
-            fullLongEdge_, static_cast<uint64_t>(imageId));
+            fullLongEdge_, static_cast<uint64_t>(imageId),
+            &linearDisplay);
+        if (abort_.load())
+            return;  // abort during render.
+        emitPreviewWithHistogram(imageId, generation, linearDisplay, out);
     } else {
         out = pipeline_.render(imageId, *linear_, adjustments, 0);
+        if (abort_.load())
+            return;  // abort during render.
+        emitPreviewWithHistogram(imageId, generation, nullptr, out);
     }
-    if (abort_.load())
-        return;  // abort during render.
-    if (generation == latestGeneration_)
-        emit previewReady(imageId, out);
 }
 
 void PreviewWorker::adjustPreviewCoarse(qint64 imageId, qint64 generation,
@@ -471,6 +481,25 @@ lrc::ImageBufferPtr PreviewWorker::renderPreviewFrame(
     }
     return pipeline_.render(static_cast<uint64_t>(imageId), linear, adjustments,
                             maxDim);
+}
+
+void PreviewWorker::emitPreviewWithHistogram(
+    qint64 imageId, qint64 generation,
+    const lrc::ImageBufferPtr& linearDisplay,
+    const lrc::ImageBufferPtr& rgbU8) {
+    if (abort_.load() || generation != latestGeneration_)
+        return;  // stale request superseded by a newer one.
+    emit previewReady(imageId, rgbU8);
+    // P3-1: derive the histogram from the adjusted linear F32 display buffer
+    // (full traversal, no sampling). When the incremental cache served the
+    // unchanged preview, renderPreview leaves linearDisplay null -- fall back
+    // to the U8 frame, which is also traversed in full. Both signals are
+    // emitted in this order so the UI lands on the linear-light histogram.
+    const lrc::ImageBufferPtr& src =
+        (linearDisplay && !linearDisplay->empty()) ? linearDisplay : rgbU8;
+    if (src)
+        emit histogramReady(
+            imageId, lrc::Pipeline::computeHistogramFromLinear(*src));
 }
 
 QString PreviewWorker::pathForImage(qint64 imageId) const {

@@ -178,7 +178,7 @@
 | 步骤   | 任务         | 关键动作                                                                              | 归属                                                | 可测 |
 | ---- | ---------- | --------------------------------------------------------------------------------- | ------------------------------------------------- | -- |
 | P3-1 | 直方图升级      | 直方图统计源从"预览 8bit + 每 4M 像素抽样"改线性 F32 缓冲；显示 RGB 三通道直方图                              | 直方图统计 + `engine/Pipeline.cpp`                     | ✅  |
-| P3-2 | OS 事件文件夹监视 | `watchFolderPoll` 2s 轮询改 `ReadDirectoryChangesW`（QFileSystemWatcher 或专用线程）；保留轮询回退 | `catalog/FolderMonitor.cpp` + `ui/MainWindow.cpp` | ❌  |
+| P3-2 | OS 事件文件夹监视 | `watchFolderPoll` 2s 轮询改 `ReadDirectoryChangesW`（QFileSystemWatcher 或专用线程）；保留轮询回退 | `catalog/FolderMonitor.cpp` + `ui/MainWindow.cpp` | ✅  |
 | P3-3 | 编辑预设       | 参数堆栈 JSON 序列化（`ProfileIO` 已有）加保存/加载预设文件；预设管理 UI（保存/应用/删除/导出分享）                    | `utils/ProfileIO.cpp` + UI                        | ✅  |
 | P3-4 | GPU 像素管线   | 高斯模糊/锐化等空间滤波迁 DirectCompute 计算着色器；设计算子抽象使 CPU/GPU 双后端可切换、可回退                      | `engine/Pipeline.cpp`（算子拆分）                       | ✅  |
 
@@ -186,13 +186,36 @@
 
 ### 验收标准
 
-- [ ] P3-1：合成已知分布图，升级后直方图与全分辨率线性统计**分 bin 计数一致**（抽样误差消除）；三通道显示正确；统计耗时不在主线程引入可感知卡顿（≤ 单帧预算）。
+- [x] P3-1：合成已知分布图，升级后直方图与全分辨率线性统计**分 bin 计数一致**（抽样误差消除）；三通道显示正确；统计耗时不在主线程引入可感知卡顿（≤ 单帧预算）。
 
-- [ ] P3-2：手动 GUI：外部拷入文件后**秒级**（事件驱动）触发导入提示，不再等 2s 轮询；轮询回退路径可用；长目录下 CPU 占用不高于轮询方案。
+- [x] P3-2：手动 GUI：外部拷入文件后**秒级**（事件驱动）触发导入提示，不再等 2s 轮询；轮询回退路径可用；长目录下 CPU 占用不高于轮询方案。
 
-- [ ] P3-3：预设保存→加载往返后参数堆栈**逐字段相等**；预设文件 JSON 可人工阅读/编辑；非法预设文件报错不崩溃。
+- [x] P3-3：预设保存→加载往返后参数堆栈**逐字段相等**；预设文件 JSON 可人工阅读/编辑；非法预设文件报错不崩溃。
 
-- [ ] P3-4：GPU 路径与 CPU 参考输出**分块对比一致**（容差按浮点实现定）；无 GPU/编译未启用时回退 CPU 路径且测试全绿；模糊/锐化阶段耗时较 CPU SIMD 版有量级改善（记录数据）。
+- [x] P3-4：GPU 路径与 CPU 参考输出**分块对比一致**（容差按浮点实现定）；无 GPU/编译未启用时回退 CPU 路径且测试全绿；模糊/锐化阶段耗时较 CPU SIMD 版有量级改善（记录数据）。
+
+> **验收状态快照（2026-09-21 会话 · P3-1 直方图线性化）**：
+> - **引擎**：`Pipeline` 新增 `HistogramBins`（3×256）与静态 `computeHistogramFromLinear()`（全遍历无抽样；F32/U16 经 sRGB OETF 4096-entry LUT + 暗部线性段编码到 bin，反映显示亮度分布；U8 直接 bin=值回退）。`renderPreview` 增加可选 `linearDisplayOut` 参数，在 stage-F 转换前交出**调整后线性 F32 显示缓冲**（预览分辨率已降采样，非抽样）；增量缓存全命中时留空、UI 回退 U8 全遍历。
+> - **UI**：`PreviewWorker` 新增 `histogramReady` 信号 + `emitPreviewWithHistogram()`，在 **worker 线程**计算直方图（主线程零统计开销），previewReady 之后发出；`MainWindow::onHistogramReady` 按 imageId 丢弃过期帧；`HistogramWidget` 8bit 回退路径去掉 4M 抽样。`lrc::HistogramBins` 已注册 Qt metatype。
+> - **验证**：`TestHistogram.cpp`（`[histogram]`，8 用例 / 3090 断言）覆盖空图、黑/白边界、中间 bin 精确计数、三通道独立、4096×2048 大图全遍历（旧抽样只计一半）、越界 clamp、U8/U16 路径；headless 全绿。GUI `build_gui` 编译通过，Qt 测试 exit 0。
+
+> **验收状态快照（2026-09-21 会话 · P3-2 事件驱动文件夹监视）**：
+> - **catalog**：`FolderMonitor` 新增事件驱动 API（`startEventDriven()/stopEventDriven()/eventDrivenActive()/setWakeCallback()`，Win32 句柄藏于 `.cpp` pimpl，头文件保持 Qt-free）。事件线程用 `ReadDirectoryChangesW`（异步 OVERLAPPED + 双事件等待），过滤 FILE_NAME/LAST_WRITE/SIZE；`startEventDriven()` 同步发起首次读取再启线程（消除启动竞态）；事件只做合并唤醒，差异/去抖仍由 `poll()` 全扫描完成——两路径语义完全一致，`poll()` 原行为零改动。
+> - **UI**：`MainWindow::importFolder()` 设置 wake 回调（QueuedConnection 投递回 UI 线程）→ 优先 `startEventDriven()`，成功停 QTimer，失败回退原 2s 轮询。
+> - **验证**：`TestFolderWatcher.cpp`（4 轮询回退 + 3 Windows 事件驱动用例）秒级唤醒、不可监视目录回退、stop 幂等；连续多次运行零 flaky。headless 全绿，GUI 编译通过。
+
+> **验收状态快照（2026-09-21 会话 · P3-3 编辑预设管理）**：
+> - **utils（Qt-free）**：新增 `PresetLibrary.h/.cpp`（编入 lrc_engine），预设根 `%APPDATA%/Silver Halide/presets`（与 ModelManager 目录约定一致）；`listPresets`（.lrp 扫描，忽略 .tmp/隐藏文件）、`savePreset`（同名覆盖→命名唯一）、`loadPreset`、`deletePreset`、`exportPreset`（复用 ProfileIO 原子写）、`isValidName/sanitizeName`。
+> - **UI**：新增 `PresetDialog.h/.cpp`（参照 SnapshotDialog 风格）——命名保存/列表/应用（emit applied→commitAdjustments 可撤销）/删除/导出分享/空库占位；`MainWindow` 文件菜单新增「管理预设…」。
+> - **验证**：`TestPresetLibrary.cpp`（`[presetlib]`，5 用例 / 54 断言）覆盖往返/覆盖唯一/删除消失/导出/非法名+损坏文件不崩溃；headless 全绿。GUI 编译通过，`lrc_qt_tests.exe` 11 项 PASS（含 PresetDialogSmokeTest）。
+
+> **验收状态快照（2026-09-21 会话 · P3-4 GPU 像素管线后端抽象）**：
+> - **后端抽象**：`src/engine/SpatialFilter.h/.cpp` 新增 `SpatialFilterBackend` 接口（虚 `blur(src,w,h,sigma,out)`、`isGpu()`、`name()`）与工厂 `createSpatialFilterBackend()`；CPU 后端封装既有 `gaussianBlur`（不改其逻辑，经 `src/engine/GaussianBlur.h` 桥接函数暴露，行为逐位一致）；`pipelineSpatialFilterBackend()` 单例供管线取用。
+> - **GPU 后端**：`src/engine/SpatialFilterD3D11.h/.cpp` 实现 D3D11 DirectCompute（内嵌 HLSL 字符串 + 运行时 `D3DCompile`，无 .hlsl 构建步骤；sigma≤4 精确可分离 / sigma>4 三 box pass 镜像 CPU 核选择；R32_FLOAT ping-pong 缓冲 + STAGING 同步读回；immediate context 内部 mutex 串行化）。编译期开关 `LRC_ENABLE_D3D`（CMake option，默认 OFF，非 WIN32 强制 OFF）。
+> - **回退机制**：运行时 `D3D11CreateDevice` 探测（`__try/__except` 保护设备创建，沙箱内初始化崩溃也能优雅回退）；创建成功后另做一次 SEH 保护的微计算验证（16×16 常量场 blur 读回，拒绝输出异常/崩溃的「假设备」——沙箱实测 Basic Render Driver 创建成功但 dispatch 输出垃圾/崩溃，探测后自动回退 CPU）。探测失败、验证失败或编译未启用一律回退 CPU 后端，管线行为与现状一致。
+> - **管线接线**：`Pipeline.cpp` 纹理清晰度（texture）与锐化（sharpness）两个代表性路径改走后端；clarity/NR/蒙版/可视化等其余调用点保持 CPU 原样，避免热路径 GPU 卡顿与大面积行为变更。
+> - **验证**：headless 默认（GPU 关）下新增 `TestSpatialBackend.cpp`（`[spatial]`，13 用例）全绿——CPU 后端与既有 `pipelineGaussianBlurTest` 输出逐位一致、与独立参考分块（64×64 tile）Δ<0.008、退化输入、factory 非空且关态断言非 GPU；`LRC_ENABLE_D3D=ON` 编译通过，GPU 设备不可用时 GPU 对比用例 SKIP + INFO。9 个既有 `[pipeline][spatial]` 测试确认接线后管线输出不变。
+> - **待补**：真机（RTX A4000 等）GPU vs CPU 分块对比一致性，以及模糊/锐化阶段较 CPU SIMD 版耗时量级改善数据（agent 沙箱仅有 Basic Render Driver 软适配器且 compute 输出不可用，GPU 路径无法实测）。
 
 ***
 

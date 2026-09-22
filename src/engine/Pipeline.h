@@ -34,6 +34,10 @@ struct Size {
     int height = 0;
 };
 
+// RGB histogram bins: 3 channels x 256 display-encoded bins. Values are
+// uint32 pixel counts; the whole buffer is traversed (no sampling).
+using HistogramBins = std::array<std::array<uint32_t, 256>, 3>;
+
 class Pipeline {
 public:
     explicit Pipeline(std::shared_ptr<const ColorManager> colorManager);
@@ -66,11 +70,37 @@ public:
     // to the source's own long edge. `imageId` participates in the cache identity
     // (0 for callers without a catalog id). Returns display-ready sRGB U8.
     // The input is never modified.
+    //
+    // When `linearDisplayOut` is non-null and the render recomputes the stages
+    // (i.e. not served entirely from the incremental cache), it receives the
+    // adjusted linear ProPhoto F32 display buffer (the stage-F input) so callers
+    // can derive a linear-light histogram without a second render pass. On a
+    // full cache hit it is left untouched (nullptr); callers fall back to the
+    // returned U8 buffer for the histogram.
     ImageBufferPtr renderPreview(const ImageBuffer& source,
                                  const Adjustments& adjustments,
                                  const Size& targetSize,
                                  int fullLongEdge = 0,
-                                 uint64_t imageId = 0);
+                                 uint64_t imageId = 0,
+                                 ImageBufferPtr* linearDisplayOut = nullptr);
+
+    // Computes a display-encoded RGB histogram by traversing the ENTIRE buffer
+    // (no sampling), so bin counts are exact.
+    //
+    // - F32 / U16 (linear working spaces): each channel value is sRGB-encoded
+    //   (IEC 61966-2-1 OETF) and mapped to bin = floor(encoded * 256),
+    //   clamped to 255. The encoding makes the histogram reflect the adjusted
+    //   display luminance distribution rather than raw linear light.
+    // - U8 (display-ready sRGB): the stored byte is the bin index directly,
+    //   which keeps the fallback path bit-identical to the old preview-based
+    //   histogram semantics.
+    //
+    // Returns an all-zero histogram for empty or non-3-channel buffers. Runs on
+    // the calling thread; there is no internal state or lock. Typical cost for a
+    // 1080p working buffer is a few ms (LUT-based encoding), so it must be
+    // called off the UI thread (e.g. in the preview worker) to stay within the
+    // per-frame budget.
+    static HistogramBins computeHistogramFromLinear(const ImageBuffer& buffer);
 
     // --- Incremental render-state controls ----------------------------------
     void clearIncrementalCache();

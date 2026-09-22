@@ -12,6 +12,9 @@
 
 #include <QApplication>
 #include <QEventLoop>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QSignalSpy>
 #include <QTest>
 #include <QThread>
 #include <QTimer>
@@ -34,8 +37,10 @@
 #include "engine/RawDecoder.h"
 #include "ui/ExportDialog.h"
 #include "ui/ImportDialog.h"
+#include "ui/PresetDialog.h"
 #include "ui/PreviewWorker.h"
 #include "ui/SnapshotDialog.h"
+#include "utils/PresetLibrary.h"
 
 using namespace lrc;
 
@@ -250,6 +255,68 @@ void DialogSmokeTest::snapshotDialogSmoke() {
 }
 
 // ---------------------------------------------------------------------------
+// P3-3 preset-manager dialog: save / list / apply / delete smoke
+// ---------------------------------------------------------------------------
+class PresetDialogSmokeTest : public QObject {
+    Q_OBJECT
+public:
+    explicit PresetDialogSmokeTest(const std::filesystem::path& workDir)
+        : workDir_(workDir) {}
+
+private slots:
+    void presetDialogFlow();
+
+private:
+    std::filesystem::path workDir_;
+};
+
+void PresetDialogSmokeTest::presetDialogFlow() {
+    std::error_code ec;
+    std::filesystem::create_directories(workDir_, ec);
+
+    lrc::PresetLibrary lib(workDir_ / "presets");
+    Adjustments current;
+    current.exposure = 0.5;
+    current.contrast = 25.0;
+
+    // Constructing against an empty library must not crash.
+    PresetDialog dlg(lib, current, nullptr);
+    QVERIFY(qobject_cast<QDialog*>(&dlg) != nullptr);
+
+    // Save a named preset through the dialog's name field + create slot.
+    auto* nameEdit = dlg.findChild<QLineEdit*>(QStringLiteral("presetNameEdit"));
+    QVERIFY(nameEdit != nullptr);
+    nameEdit->setText(QStringLiteral("Smoke"));
+    QMetaObject::invokeMethod(&dlg, "onCreateClicked", Qt::DirectConnection);
+    QVERIFY(lib.exists("Smoke"));
+    dlg.reload();
+
+    // The stored preset appears in the list.
+    auto* list = dlg.findChild<QListWidget*>(QStringLiteral("presetList"));
+    QVERIFY(list != nullptr);
+    QVERIFY(list->count() >= 1);
+
+    // Applying fires applied() with the round-tripped stack.
+    QSignalSpy appliedSpy(&dlg, &PresetDialog::applied);
+    list->setCurrentRow(0);
+    QMetaObject::invokeMethod(&dlg, "onApplyClicked", Qt::DirectConnection);
+    QCOMPARE(appliedSpy.count(), 1);
+    const auto adj = appliedSpy.at(0).at(0).value<lrc::Adjustments>();
+    QCOMPARE(adj.exposure, 0.5);
+    QCOMPARE(adj.contrast, 25.0);
+
+    // Delete through the library; a fresh dialog then shows only the
+    // empty-library placeholder row (no preset entries).
+    QVERIFY(lib.deletePreset("Smoke"));
+    PresetDialog dlg2(lib, current, nullptr);
+    auto* list2 = dlg2.findChild<QListWidget*>(QStringLiteral("presetList"));
+    QVERIFY(list2 != nullptr);
+    QCOMPARE(list2->count(), 1);
+    // The single row is the placeholder, not a real preset.
+    QVERIFY(list2->item(0)->data(Qt::UserRole).isNull());
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -265,6 +332,10 @@ int main(int argc, char** argv) {
     int status = 0;
     {
         DialogSmokeTest t(root / "smoke");
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        PresetDialogSmokeTest t(root / "presets");
         status |= QTest::qExec(&t, argc, argv);
     }
     {

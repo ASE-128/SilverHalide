@@ -25,6 +25,7 @@
 #include "engine/Adjustments.h"
 #include "engine/DcpProfile.h"
 #include "engine/ImageBuffer.h"
+#include "engine/Pipeline.h"  // lrc::HistogramBins for the histogramReady signal.
 
 /**
  * Export formats understood by PreviewWorker::exportImage. Index order must
@@ -277,6 +278,15 @@ signals:
      */
     void previewReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
     /**
+     * @brief Display-encoded RGB histogram for the preview just emitted.
+     *
+     * Emitted right after previewReady, computed on the worker thread from the
+     * adjusted linear F32 display buffer (full traversal, no sampling) so the
+     * UI never blocks on histogram statistics. Falls back to the U8 frame when
+     * the incremental cache served the preview unchanged.
+     */
+    void histogramReady(qint64 imageId, const lrc::HistogramBins& bins);
+    /**
      * @brief Low-res (kCoarseMaxDim) preview frame, delivered ahead of
      *        previewReady for fast drag feedback.
      */
@@ -445,6 +455,18 @@ private:
     lrc::ImageBufferPtr renderPreviewFrame(
         qint64 imageId, const lrc::ImageBuffer& linear,
         const lrc::Adjustments& adjustments, int maxDim, int fullLongEdge);
+    /**
+     * @brief Emits previewReady then histogramReady for one rendered frame.
+     *
+     * The histogram is computed here (worker thread) from the adjusted linear
+     * F32 display buffer -- a full traversal with no sampling, so the UI thread
+     * never runs the statistics. When @p linearDisplay is null/empty (the
+     * incremental cache served the unchanged preview), the U8 frame itself is
+     * used instead. Both signals are guarded by the generation token.
+     */
+    void emitPreviewWithHistogram(qint64 imageId, qint64 generation,
+                                  const lrc::ImageBufferPtr& linearDisplay,
+                                  const lrc::ImageBufferPtr& rgbU8);
     /**
      * @brief Resolves the catalog file path for an image id. Empty when unknown.
      *

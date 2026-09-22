@@ -86,9 +86,11 @@
 #include "ui/ModelManagementWidget.h"
 #include "ui/NavigatorWidget.h"
 #include "ui/PanoramaDialog.h"
+#include "ui/PresetDialog.h"
 #include "ui/PreviewWorker.h"
 #include "ui/SmartCollectionsDialog.h"
 #include "utils/MathUtils.h"
+#include "utils/PresetLibrary.h"
 #include "utils/ProfileIO.h"
 #include "utils/RenameTemplate.h"
 #include "utils/XmpProfile.h"
@@ -179,6 +181,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     }
     thumbnailCache_ = std::make_unique<lrc::ThumbnailCache>(
         toStdPath(Application::defaultCacheDir()));
+
+    // Named develop-preset store (user directory, created on demand).
+    presetLibrary_ = std::make_unique<lrc::PresetLibrary>();
 
     // Managed-library root: stored in the catalog settings so re-opening the
     // same catalog always restores the same library location. Defaults to a
@@ -551,6 +556,9 @@ void MainWindow::buildMenus() {
                         &MainWindow::importPreset);
     fileMenu->addAction(tr("导出预设…"), QKeySequence(), this,
                         &MainWindow::exportPreset);
+    fileMenu->addSeparator();
+    fileMenu->addAction(tr("管理预设…"), QKeySequence(), this,
+                        &MainWindow::onManagePresets);
     fileMenu->addAction(tr("快照…"), QKeySequence(), this,
                         &MainWindow::onManageSnapshots);
     fileMenu->addSeparator();
@@ -963,6 +971,10 @@ void MainWindow::startWorkers() {
             &QObject::deleteLater);
     connect(previewWorker_, &PreviewWorker::previewReady, this,
             &MainWindow::onPreviewReady);
+    // P3-1: linear-light histogram arrives right after each previewReady (the
+    // worker emits it second), replacing the old 8-bit sampled histogram.
+    connect(previewWorker_, &PreviewWorker::histogramReady, this,
+            &MainWindow::onHistogramReady);
     connect(previewWorker_, &PreviewWorker::previewReadyCoarse, this,
             &MainWindow::onPreviewReadyCoarse);
     connect(previewWorker_, &PreviewWorker::fullResReady, this,
@@ -1199,7 +1211,19 @@ void MainWindow::importFolder() {
             refreshFilmstrip();
         });
     folderMonitor_->start();
-    folderTimer_->start();
+    // P3-2: prefer the OS event-driven watcher (ReadDirectoryChangesW) so new
+    // files surface within seconds instead of on the 2s poll; the wake is
+    // marshalled back to this (UI) thread, where watchFolderPoll() runs the
+    // shared poll() diff. Fall back to the 2s QTimer poll when the event
+    // watcher cannot start.
+    folderMonitor_->setWakeCallback([this] {
+        QMetaObject::invokeMethod(this, &MainWindow::watchFolderPoll,
+                                  Qt::QueuedConnection);
+    });
+    if (folderMonitor_->startEventDriven())
+        folderTimer_->stop();
+    else
+        folderTimer_->start();
     // Folder imports reference files in place (Add) — nothing is copied/moved.
     startImport(files, false, lrc::ImportMode::Add, QString());
 }
@@ -1368,6 +1392,22 @@ void MainWindow::onManageSnapshots() {
                 else if (catalog_->saveAdjustments(currentImageId_, adjustments,
                                                   currentVariantId_))
                     statusBar()->showMessage(tr("编辑已保存"), 2500);
+            });
+    dlg.exec();
+}
+
+void MainWindow::onManagePresets() {
+    if (currentImageId_ < 0 || currentFilePath_.isEmpty()) {
+        QMessageBox::information(this, tr("管理预设"),
+                                 tr("先选择一张照片"));
+        return;
+    }
+    PresetDialog dlg(*presetLibrary_, currentAdjustments_, this);
+    // Applying a preset is a user edit: commit through the same panel/preview/
+    // persist path so it lands on the undo stack and can be reverted.
+    connect(&dlg, &PresetDialog::applied, this,
+            [this](const lrc::Adjustments& adjustments) {
+                commitAdjustments(adjustments);
             });
     dlg.exec();
 }
@@ -2349,6 +2389,15 @@ void MainWindow::onPreviewReady(qint64 imageId,
     updateHistogramNow(image);
 }
 
+void MainWindow::onHistogramReady(qint64 imageId,
+                                  const lrc::HistogramBins& bins) {
+    if (imageId != currentImageId_)
+        return;  // stale frame for an image that was switched away.
+    // Linear-light histogram computed off the UI thread (preview worker); this
+    // slot only copies the ~768 bins into the widget, well within one frame.
+    developPanel_->histogram()->setHistogram(bins);
+}
+
 void MainWindow::onFullResReadyCoarse(qint64 imageId,
                                       const lrc::ImageBufferPtr& rgbU8) {
     if (imageId != currentImageId_)
@@ -2383,8 +2432,9 @@ void MainWindow::onPreviewReadyCoarse(qint64 imageId,
 }
 
 void MainWindow::updateHistogramAndStatus(const QImage& image) {
-    // 全尺寸直喂直方图也便宜：统计已按 ~400 万像素子采样 (the histogram
-    // subsamples to <=~4M pixels, so full-res input stays cheap).
+    // 直方图主路径由 histogramReady（线性 F32 全遍历，worker 线程统计）驱动；
+    // 这里的 setImage 是 1:1 全尺寸 / coarse 帧的 8-bit 回退路径（同样全遍历，
+    // 无抽样），保证直方图在 preview 信号到达前不空白。
     developPanel_->histogram()->setImage(image);
     statusBar()->showMessage(
         tr("%1 — %2×%3")
@@ -2860,8 +2910,15 @@ void MainWindow::onFiltersChanged(int minRating, int flagFilter,
 }
 
 void MainWindow::watchFolderPoll() {
-    if (folderMonitor_)
-        folderMonitor_->poll();
+    if (!folderMonitor_)
+        return;
+    folderMonitor_->poll();
+    // The event-driven watcher may have stopped unexpectedly (e.g. the
+    // ReadDirectoryChangesW re-arm failed when the directory became
+    // unreadable). eventDrivenActive() goes false in that case; resume the
+    // 2s polling fallback so new files keep surfacing.
+    if (folderMonitor_->eventDrivenActive() == false && !folderTimer_->isActive())
+        folderTimer_->start();
 }
 
 void MainWindow::refreshFilmstrip() {

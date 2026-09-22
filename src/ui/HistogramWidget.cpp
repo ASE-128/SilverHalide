@@ -8,14 +8,14 @@
 
 namespace {
 
-// Builds 3 x 256 bins from an interleaved RGB8 buffer, sampled at most every
-// ~4 pixels so very large previews stay cheap.
+// Builds 3 x 256 bins from an interleaved RGB8 buffer, traversing EVERY pixel.
+// No subsampling: bin counts must be exact (P3-1 removed the old ~4M-pixel
+// sampling that skewed counts on large full-res frames).
 std::array<HistogramWidget::ChannelBins, 3> histogramFromRgb8(
     const uint8_t* data, int width, int height) {
     std::array<HistogramWidget::ChannelBins, 3> bins{};
     const int64_t pixels = static_cast<int64_t>(width) * height;
-    const int step = static_cast<int>(std::max<int64_t>(1, pixels / 4000000));
-    for (int64_t i = 0; i < pixels; i += step) {
+    for (int64_t i = 0; i < pixels; ++i) {
         const uint8_t* p = data + i * 3;
         ++bins[0][p[0]];
         ++bins[1][p[1]];

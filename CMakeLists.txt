@@ -73,6 +73,7 @@ option(LRC_USE_OPENCV "Enable OpenCV auxiliary helpers (heavy dependency)" OFF)
 option(LRC_ENABLE_AI "Enable AI features (ONNX Runtime)" ON)
 option(LRC_ENABLE_LENSFUN "Enable Lensfun lens correction profiles" ON)
 option(LRC_ENABLE_SIMD "Enable SIMD fast paths (gaussianBlur AVX2, batch passes)" OFF)
+option(LRC_ENABLE_D3D "Enable D3D11 DirectCompute GPU pixel-filter backend (Windows)" OFF)
 
 # ---------------------------------------------------------------------------
 # External dependencies. Two acquisition strategies:
@@ -328,6 +329,7 @@ set(LRC_ENGINE_SOURCES
   src/engine/LensfunProfile.cpp
   src/engine/DcpProfile.cpp
   src/engine/Pipeline.cpp
+  src/engine/SpatialFilter.cpp
   src/engine/ExportEngine.cpp
   src/engine/ImageIO.cpp
   src/engine/HdrMerge.cpp
@@ -347,6 +349,11 @@ set(LRC_ENGINE_SOURCES
   # --- PHASE_14: DuplicateDetector (pure C++, lives in app/ per spec, but
   #            must build in headless tests too: no Qt includes in it) ----
   src/app/DuplicateDetector.cpp)
+if(LRC_ENABLE_D3D AND WIN32)
+  # D3D11 DirectCompute backend (P3-4). Appended before add_library below — an
+  # append after the target exists would be silently ignored by CMake.
+  list(APPEND LRC_ENGINE_SOURCES src/engine/SpatialFilterD3D11.cpp)
+endif()
 set(LRC_CATALOG_SOURCES
   src/catalog/CatalogDatabase.cpp
   src/catalog/ThumbnailCache.cpp
@@ -357,6 +364,7 @@ set(LRC_UTILS_SOURCES
   src/utils/MathUtils.cpp
   src/utils/Json.cpp
   src/utils/ProfileIO.cpp
+  src/utils/PresetLibrary.cpp
   src/utils/XmpProfile.cpp
   src/utils/Parallel.cpp
   src/utils/Sha256.cpp)
@@ -400,6 +408,22 @@ if(LRC_ENABLE_SIMD)
   # No else branch: leave LRC_ENABLE_SIMD undefined when OFF so that all the
   # engine's `#ifdef LRC_ENABLE_SIMD` (not just `==1`) guards stay false,
   # exactly matching their pre-P2-2 default-disabled behaviour.
+endif()
+# --- Optional D3D11 DirectCompute backend (LRC_ENABLE_D3D, default OFF) ------
+# P3-4: GPU pixel pipeline. When ON, define the guard macro PUBLIC (so the
+# GPU-gated tests in TestSpatialBackend.cpp compile too), compile the
+# DirectCompute backend and link the Windows SDK D3D11 + shader compiler.
+# Windows-only: the option is forced OFF on non-MSVC/non-Windows hosts.
+if(LRC_ENABLE_D3D)
+  if(NOT WIN32)
+    message(WARNING "LRC_ENABLE_D3D requires Windows — forcing OFF")
+    set(LRC_ENABLE_D3D OFF CACHE BOOL
+        "Enable D3D11 DirectCompute GPU pixel-filter backend (Windows)" FORCE)
+  else()
+    target_compile_definitions(lrc_engine PUBLIC LRC_ENABLE_D3D=1)
+    target_link_libraries(lrc_engine PRIVATE d3d11 d3dcompiler)
+    message(STATUS "LRC_ENABLE_D3D=ON: D3D11 DirectCompute blur backend enabled")
+  endif()
 endif()
 # Path used by ModelManager.cpp to locate the shipped manifest when the
 # executable runs from a build directory (rather than the installed layout).
@@ -462,6 +486,7 @@ if(LRC_ENABLE_QT)
     src/ui/ImportWorker.cpp
     src/ui/PreviewWorker.cpp
     src/ui/SnapshotDialog.cpp
+    src/ui/PresetDialog.cpp
     src/ui/EditHistoryDialog.cpp
     src/ui/CollectionsDialog.cpp
     src/ui/SmartCollectionsDialog.cpp

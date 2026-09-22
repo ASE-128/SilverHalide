@@ -8,6 +8,7 @@
 #include "engine/ColorManager.h"
 #include "engine/LensfunProfile.h"
 #include "engine/RenderScratch.h"
+#include "engine/SpatialFilter.h"
 #include "engine/ZoneCurve.h"
 #include "utils/MathUtils.h"
 #include "utils/Parallel.h"
@@ -1615,7 +1616,12 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
 
         if (a.texture != 0.0) {
             ScratchBuffer blurred(n);
-            gaussianBlur(luma.data(), w, h, kernels.textureSigma, blurred.vec());
+            // P3-4: texture blur routes through the switchable spatial-filter
+            // backend (CPU by default; D3D11 DirectCompute when compiled in and
+            // the device probe succeeds). Output contract is identical either way.
+            pipelineSpatialFilterBackend()->blur(luma.data(), w, h,
+                                                 kernels.textureSigma,
+                                                 blurred.vec());
             const float gain =
                 static_cast<float>(a.texture) / 100.0f * 0.30f;
             lrc::parallel::parallelFor(n, lrc::parallel::defaultGrain(n),
@@ -1808,7 +1814,11 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
         ScratchBuffer luma(n);
         lumaImage(p, w, h, luma.vec());
         ScratchBuffer blurred(n);
-        gaussianBlur(luma.data(), w, h, kernels.sharpnessSigma, blurred.vec());
+        // P3-4: sharpening's luma blur routes through the switchable
+        // spatial-filter backend (see the texture branch above).
+        pipelineSpatialFilterBackend()->blur(luma.data(), w, h,
+                                             kernels.sharpnessSigma,
+                                             blurred.vec());
 
         // Sobel edge magnitude map used by the "masking" slider. Each output
         // row only writes its own pixels (neighbour reads are shared), so the
@@ -1996,7 +2006,66 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
     });
 }
 
+// --- Display-encoded histogram helpers ----------------------------------------
+
+// LUT resolution for the non-linear segment of the sRGB OETF. 4096 entries keep
+// the worst-case bin quantization far below one bin width (the OETF's max slope
+// over the covered range is < 1, so an input cell of 1/4096 maps to well under
+// 1/256 of output range); the linear near-black segment is evaluated exactly
+// instead, where the 12.92x slope would amplify LUT error.
+constexpr size_t kSrgbBinLutSize = 4096;
+
+// LUT entry i holds bin = floor(srgbEncode((i + 0.5) / kSrgbBinLutSize) * 256)
+// for the sRGB OETF (IEC 61966-2-1). Built once via thread-safe static
+// initialization; read-only afterwards. Indexed only for the gamma segment
+// (see linearToHistogramBin).
+const std::array<uint8_t, kSrgbBinLutSize>& srgbBinLut() {
+    static const std::array<uint8_t, kSrgbBinLutSize> lut = [] {
+        std::array<uint8_t, kSrgbBinLutSize> t{};
+        for (size_t i = 0; i < kSrgbBinLutSize; ++i) {
+            const float v = (static_cast<float>(i) + 0.5f) / kSrgbBinLutSize;
+            const float enc = (v <= 0.0031308f)
+                                  ? 12.92f * v
+                                  : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+            const int bin = static_cast<int>(std::floor(enc * 256.0f));
+            t[i] = static_cast<uint8_t>(std::clamp(bin, 0, 255));
+        }
+        return t;
+    }();
+    return lut;
+}
+
+// Maps one linear-light channel value in [0,1] to a display-encoded bin in
+// [0,255]. The sRGB OETF turns linear light into the display domain so the
+// histogram reflects what the user sees; bin = floor(encoded * 256) keeps the
+// bin boundaries at the same code values as the U8 fallback path.
+inline uint8_t linearToHistogramBin(float v) {
+    v = (v < 0.0f) ? 0.0f : (v > 1.0f ? 1.0f : v);
+    if (v <= 0.0031308f) {
+        const int bin = static_cast<int>(std::floor(12.92f * v * 256.0f));
+        return static_cast<uint8_t>(std::clamp(bin, 0, 255));
+    }
+    const int idx = static_cast<int>(v * kSrgbBinLutSize);
+    return srgbBinLut()[static_cast<size_t>(
+        std::clamp(idx, 0, static_cast<int>(kSrgbBinLutSize - 1)))];
+}
+
 } // namespace
+
+namespace detail {
+
+// P3-4 bridge: exposes the file-local gaussianBlur (anonymous namespace above)
+// to the spatial-filter backends through the detail::gaussianBlur contract
+// (declared in engine/GaussianBlur.h). A single call hop; the implementation
+// itself is untouched, so CPU-backend output is byte-identical to the legacy
+// path. `::lrc::gaussianBlur` is valid within this TU: unnamed-namespace
+// members are referable as members of the enclosing namespace here.
+void gaussianBlur(const float* src, int w, int h, float sigma,
+                  std::vector<float>& out) {
+    ::lrc::gaussianBlur(src, w, h, sigma, out);
+}
+
+} // namespace detail
 
 // Test hook: exposes the file-local gaussianBlur (exact for sigma <= 4, box
 // path for sigma > 4) so unit tests can verify the fast path numerically.
@@ -2006,6 +2075,44 @@ std::vector<float> pipelineGaussianBlurTest(const float* src, int w, int h,
     std::vector<float> out;
     gaussianBlur(src, w, h, sigma, out);
     return out;
+}
+
+HistogramBins Pipeline::computeHistogramFromLinear(
+    const ImageBuffer& buffer) {
+    HistogramBins bins{};
+    if (buffer.empty() || buffer.channels() < 3)
+        return bins;
+    const size_t pixelCount =
+        static_cast<size_t>(buffer.width()) * buffer.height();
+
+    if (buffer.format() == PixelFormat::F32) {
+        const float* p =
+            reinterpret_cast<const float*>(buffer.data().data());
+        for (size_t i = 0; i < pixelCount; ++i, p += 3) {
+            ++bins[0][linearToHistogramBin(p[0])];
+            ++bins[1][linearToHistogramBin(p[1])];
+            ++bins[2][linearToHistogramBin(p[2])];
+        }
+    } else if (buffer.format() == PixelFormat::U16) {
+        const uint16_t* p =
+            reinterpret_cast<const uint16_t*>(buffer.data().data());
+        for (size_t i = 0; i < pixelCount; ++i, p += 3) {
+            ++bins[0][linearToHistogramBin(p[0] / 65535.0f)];
+            ++bins[1][linearToHistogramBin(p[1] / 65535.0f)];
+            ++bins[2][linearToHistogramBin(p[2] / 65535.0f)];
+        }
+    } else if (buffer.format() == PixelFormat::U8) {
+        // Display-ready sRGB: the stored byte already is the display-encoded
+        // value, so bin = byte keeps this fallback path bit-identical to the
+        // legacy 8-bit preview histogram.
+        const uint8_t* p = buffer.data().data();
+        for (size_t i = 0; i < pixelCount; ++i, p += 3) {
+            ++bins[0][p[0]];
+            ++bins[1][p[1]];
+            ++bins[2][p[2]];
+        }
+    }
+    return bins;
 }
 
 float Pipeline::maskWeight(const Mask& m, int w, int h, float nx, float ny) {
@@ -2803,7 +2910,8 @@ float Pipeline::previewSigmaScale(int workingLongEdge, int fullLongEdge) {
 ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
                                        const Adjustments& adjustments,
                                        const Size& targetSize,
-                                       int fullLongEdge, uint64_t imageId) {
+                                       int fullLongEdge, uint64_t imageId,
+                                       ImageBufferPtr* linearDisplayOut) {
     if (source.empty() || targetSize.width <= 0 || targetSize.height <= 0)
         return {};
     std::lock_guard<std::mutex> lock(renderStateMutex_);
@@ -2908,6 +3016,11 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
         if (i == 5) {
             // Stage F: sRGB output. input holds the stage-E output (a writable
             // copy that stage E consumed); toDisplaySRGB only reads it.
+            // Hand the adjusted linear F32 display buffer (the stage-F input)
+            // to the caller before the sRGB conversion so a linear-light
+            // histogram can be derived without a second render pass.
+            if (linearDisplayOut)
+                *linearDisplayOut = input;
             ImageBufferPtr u8 = cm_->toDisplaySRGB(*input);
             if (renderState_.present[5])
                 renderState_.bytes -= renderState_.stages[5]->sizeBytes();

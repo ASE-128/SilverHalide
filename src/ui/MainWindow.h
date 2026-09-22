@@ -26,6 +26,7 @@
 #include "catalog/LibraryManager.h"
 #include "engine/Adjustments.h"
 #include "engine/ImageBuffer.h"
+#include "engine/Pipeline.h"  // lrc::HistogramBins for the histogramReady slot.
 #include "engine/RawDecoder.h"
 #include "ui/FilmstripWidget.h"
 #include "ui/ImageViewport.h"
@@ -38,6 +39,7 @@ class AiInferenceEngine;       // ONNX Runtime wrapper
 class ModelManager;            // manifest + download/cache lifecycle
 class FolderMonitor;
 class Pipeline;
+class PresetLibrary;           // named preset store (P3-3)
 class ThumbnailCache;
 } // namespace lrc
 
@@ -143,6 +145,13 @@ private slots:
     void onPreviewReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
     void onPreviewReadyCoarse(qint64 imageId,
                               const lrc::ImageBufferPtr& rgbU8);
+    /**
+     * @brief P3-1: applies the worker-computed linear-light RGB histogram.
+     *
+     * Arrives right after onPreviewReady (worker emits histogramReady second),
+     * so the histogram always reflects the adjusted linear display buffer.
+     */
+    void onHistogramReady(qint64 imageId, const lrc::HistogramBins& bins);
     void onFullResRequested(bool needed);
     void onImageMeta(qint64 imageId, int w, int h);
     void onCameraMeta(qint64 imageId, const QString& make,
@@ -190,6 +199,10 @@ private slots:
     void onConvertFinished(bool ok, const QString& message, const QString& outPath);
     void importPreset();
     void exportPreset();
+    /**
+     * @brief Opens the named-preset manager (save / apply / delete / export).
+     */
+    void onManagePresets();
     void readSidecar();
     void writeSidecar();
     void watchFolderPoll();
@@ -346,6 +359,9 @@ private:
     std::unique_ptr<lrc::CatalogDatabase> catalog_;
     std::unique_ptr<lrc::ThumbnailCache> thumbnailCache_;
     std::unique_ptr<lrc::FolderMonitor> folderMonitor_;
+    // Named develop-preset store (%APPDATA%/Silver Halide/presets). Created
+    // with the window; PresetDialog borrows it without taking ownership.
+    std::unique_ptr<lrc::PresetLibrary> presetLibrary_;
 
     // --- workers --------------------------------------------------------
     ImportWorker* importWorker_ = nullptr;

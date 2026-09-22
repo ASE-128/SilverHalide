@@ -45,7 +45,15 @@ add_executable(lrc_tests
   TestSoftProofing.cpp
   # P1 — competitive-alignment implementation (DirectML / ICC / rename /
   # watermark / snapshots).
-  TestCompetitiveP1.cpp)
+  TestCompetitiveP1.cpp
+  # P3-1 — linear-light RGB histogram (exact bin counts, no sampling).
+  TestHistogram.cpp
+  # P3-2 — folder monitoring: event-driven watcher + polling fallback.
+  TestFolderWatcher.cpp
+  # P3-3 — named develop-preset library (save/list/load/delete/export).
+  TestPresetLibrary.cpp
+  # P3-4 — CPU/GPU switchable spatial-filter backend (DirectCompute + fallback).
+  TestSpatialBackend.cpp)
 
 target_link_libraries(lrc_tests PRIVATE lrc_catalog Catch2::Catch2WithMain)
 target_include_directories(lrc_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -77,7 +85,8 @@ if(LRC_ENABLE_QT)
     ../src/ui/PreviewWorker.cpp
     ../src/ui/ExportDialog.cpp
     ../src/ui/ImportDialog.cpp
-    ../src/ui/SnapshotDialog.cpp)
+    ../src/ui/SnapshotDialog.cpp
+    ../src/ui/PresetDialog.cpp)
   target_link_libraries(lrc_qt_tests PRIVATE
     lrc_catalog lrc_engine
     Qt6::Test Qt6::Widgets)

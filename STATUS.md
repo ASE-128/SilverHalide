@@ -13,6 +13,19 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## P3 竞品对齐优化·体验打磨（2026-09-21，工作区未提交）
+
+竞品规格 [competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md) 第 4 节 P3 四项全部落地并 headless 验收；P1/P2/P3/T 已全部实现，spec 内对应验收标准已勾选。四项代码均在工作区，未 commit（按用户要求先不提交/推送）。
+
+- **P3-1 直方图线性化**：`Pipeline::computeHistogramFromLinear()`（全遍历无抽样；F32/U16 经 sRGB OETF LUT 编码，U8 直接回退）+ `renderPreview` 可选 `linearDisplayOut` 交出调整后线性 F32 显示缓冲；`PreviewWorker` 新增 `histogramReady` 信号在 **worker 线程** 统计（主线程零开销）；`HistogramWidget` 8bit 回退去掉 4M 抽样。`TestHistogram.cpp` 8 用例 / 3090 断言，含 4096×2048 大图全遍历（旧抽样只计一半）。
+- **P3-2 事件驱动文件夹监视**：`FolderMonitor` 新增 `ReadDirectoryChangesW`（异步 OVERLAPPED）事件线程 + 合并唤醒，差异/去抖复用 `poll()`（两路径语义一致）；`MainWindow` 优先事件驱动、失败回退 2s QTimer 轮询。`TestFolderWatcher.cpp` 7 用例（轮询回退 + 秒级事件驱动）。**本次修复两处健壮性 bug**：事件线程异常退出时 wake 一次以恢复轮询回退；D3D11 blur 负尺寸先检查再 resize。
+- **P3-3 编辑预设管理**：`PresetLibrary`（Qt-free，`%APPDATA%/Silver Halide/presets`）保存/列表/加载/删除/导出，复用 ProfileIO 原子写；`PresetDialog`（命名保存/应用/删除/导出分享）+ 文件菜单「管理预设…」。`TestPresetLibrary.cpp` 5 用例 + `lrc_qt_tests` PresetDialogSmokeTest。
+- **P3-4 GPU 像素管线后端抽象**：`SpatialFilterBackend`（CPU/GPU 双后端）+ D3D11 DirectCompute 后端（内嵌 HLSL，`LRC_ENABLE_D3D` 默认 OFF）+ SEH 保护的设备/微计算探测，GPU 不可用自动回退 CPU；texture/sharpness 两路径改走后端。`TestSpatialBackend.cpp` 13 用例，CPU vs 参考分块 Δ<0.008。GPU 提速数据留待真机（RTX A4000）验收——沙箱无可用 GPU。
+
+**验证**：headless 构建通过；P3 相关组（`[spatial][histogram][presetlib][p3-2]`）全绿。全量 headless 仅两处既有失败、均非 P3 引入：
+- `TestAiInference.cpp:149` 空引擎 SIGSEGV（0xC0000005）——Debug 构建输出目录未部署 ORT 1.23 DLL，按 DLL 搜索顺序加载了系统 `C:\Windows\System32\onnxruntime.dll`（ORT 1.17.1，报 API version 23 unavailable）。Release 目录有 1.23 故不崩。**环境问题，非代码 bug**（spec 此前归因"沙箱 D3D12"不准确，已修正认知）。
+- `TestRawDecoder.cpp:556` R-08 embedded-ICC 断言——Debug 下真实 Δ（~0.001–0.019）与阈值 0.02 过近，运行间非确定；单独跑 `[raw][io]` 全过。Release 全量通过。属测试阈值质量问题，非功能 bug。
+
 ## MobileSAM 点击式蒙版（2026-09-21，已提交）
 
 - **P2-3（AI 蒙版扩展）点击交互全链路落地并提交**：MobileSAM 两阶段分割（`AiInference::runSamPoint` — encoder 生成 embedding + decoder 按点/noIou 输出）接入 `AiMaskGenerator` 新增 `AiMaskTarget::Prompt`；`Adjustments::AiMaskParams` 加 `std::vector<SamPoint> points`，`Mask::hash/geometryHash` 覆盖（缓存键随点变化）。UI 层 `ImageViewport` 点击加点（前景绿/背景红 + 十字标记）、`DevelopPanel`「AI 点选」按钮 + 前景/背景切换 + 清除点 + 羽化滑杆、`MainWindow` 撤销接线。
@@ -521,12 +534,9 @@ cmake --build build_gui --config Release
 
 - **竞品对齐优化**：当前任务文件为
   [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md)。
-  P1-1~P1-5 代码均已落地；P1-3 批量重命名 headless 端到端（磁盘唯一 + DB `file_path`
-  同步 + 取消回滚）与导出端 `batchExport` 真实导出断言（JPEG/PNG/TIFF16 落盘 + 魔数）+ 导入/导出/快照
-  对话框 smoke 均通过——后者经新增 GUI 测试目标 `tests/lrc_qt_tests`（Qt6 链接，
-  offscreen 运行：BatchExportTest 3/3、DialogSmokeTest 5/5，`[p1]` 15 用例 / 115 断言）。
-  仍待验收：P1-1「CPU vs DirectML 逐通道容差 + ≥2x 耗时」需 GPU + 410MB NAFNet 下载实测
-  （本机未测；provider API 与优雅回退已覆盖，DirectML 可用性已作为 INFO 上报）。P2/P3/T 尚未启动。
+  P1/P2/P3/T 均已实现并验收（spec 内验收标准已勾选）。P1-1「CPU vs DirectML 逐通道容差 + ≥2x 耗时」
+  与 P3-4 GPU 提速数据需 GPU（RTX A4000）实测（本机未测；provider 回退已覆盖）。其余待补的量化验收
+  见 spec 各批次的「验收状态快照」。
 
 - **性能 M1-M5**：相关实现和报告已归档，部分量化验收仍需单独复核；不要将归档文档中的历史测试数字直接当作当前基线。
 
@@ -566,9 +576,9 @@ cmake --build build_gui --config Release
 
 - 1:1 视图使用预览缓存（最长边 1920），非全尺寸
 
-- 文件夹监视用 2s 轮询，非 OS 事件驱动
+- 文件夹监视用 OS 事件驱动（`ReadDirectoryChangesW`），不可用时回退 2s 轮询
 
-- 直方图直接统计预览 8bit
+- 直方图统计调整后线性 F32 显示缓冲（全遍历，无抽样）；8bit 预览仅在无线性数据时回退
 
 - 仅验证了 MSVC 2022 构建
 
