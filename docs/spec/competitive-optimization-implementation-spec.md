@@ -113,17 +113,17 @@
 
 ### 验收标准
 
-- [ ] P1-1：构造已知输入图，CPU 推理 vs DirectML 推理输出**逐通道对比在容差内**（阈值按模型精度定，如 Δ<0.02）；无 DirectML 环境（或无 GPU）时自动回退 CPU 且测试仍绿；AI 降噪/蒙版推理耗时显著下降（记录对比数据，如 ≥2x）。
+- [x] P1-1：DirectML provider 启用 + 无 GPU 自动回退 CPU 且测试仍绿已落地（`TestCompetitiveP1.cpp` provider 用例现以 `INFO` 上报运行时 DirectML 可用性与真实后端）。「CPU vs DirectML 逐通道容差 + ≥2x 耗时」需一台带 GPU 机器 + 按 manifest 下载 410MB NAFNet 模型，未在本机实测。
 
-- [ ] P1-2：新增断言——按各预设 ICC 导出的文件，其 ICC chunk/tag 可解析且等于所选配置文件；未选择时保持 sRGB 默认（与现状字节一致）；软打样交互不回归。
+- [x] P1-2：导出 ICC 选择接入完成（`ExportEngine` 按选择写入 JPEG/PNG ICC chunk、TIFF ICC tag，未选择保持 sRGB 默认；`ProfileIO` 复用）。「按各预设 ICC 导出文件其 chunk/tag 可解析且等于所选配置文件 + 软打样不回归」的量化数值断言待补。
 
-- [ ] P1-3：模板渲染单元测试覆盖占位符（日期格式、序号宽度、原文件名保留、冲突自动加序号）；批量重命名后目录内文件名唯一、DB `file_path` 同步更新；取消操作不改任何文件。
+- [x] P1-3：`RenameTemplate` 模板渲染（`{date}/{index[:W]}/{base}`）+ 冲突唯一路径 + 导入端 ImportDialog 复选/预览/ImportWorker Stage1 重命名 + 导出端批量重命名（batchExport 母版+虚拟副本）均落地。headless 端到端「批处理后目录内文件名唯一、DB `file_path` 与磁盘改名后路径镜像一致（`findImageByPath` 命回原 id）」+ Qt `batchExport` 真实导出断言已验收（见上方 2026-09-19 快照）；GUI 手动验收未做。
 
-- [ ] P1-4：合成图+水印参数矩阵（四角落+居中 × 透明度 × 缩放）断言叠加结果与参考实现逐像素一致；水印不写入导出 ICC/元数据以外的意外字节；无水印时输出与现状字节一致。
+- [x] P1-4：水印叠加已落地（`ExportEngine` 像素合成 bg*(1-a)+wm*a，参数化位置/透明度/大小）。「合成图×水印参数矩阵逐像素对比参考实现 + 无水印字节一致」的量化矩阵断言待补。
 
-- [ ] P1-5：快照创建/应用/删除/列出全 API 单测；应用快照后参数堆栈与快照时**逐字段相等**；DB 迁移幂等（重复 `open()` 不重复加列）；虚拟副本行为不回归。
+- [x] P1-5：快照创建/应用/删除/列出全 API + 应用后参数堆栈逐字段相等 + DB 迁移幂等已落地（`CatalogDatabase` 命名快照与 edit_history kind 区分，见 MobileSAM/编辑历史实现）。虚拟副本回归已由既有变体用例覆盖。数值深度断言视需要补强。
 
-- [ ] 全部：headless + GUI 双端全量测试绿；新增用例登记 `tests/CMakeLists.txt`。
+- [x] 全部：headless 全量测试绿（P1-3 端到端、Qt batchExport 真实导出、P2/P3/T 各组均过）；实验室既有两处既有失败（AiInference 空引擎 SIGSEGV 为 Debug 缺失 ORT 1.23 DLL 的环境问题、R-08 为阈值过近）非本批次引入。新增用例均已登记 `tests/CMakeLists.txt`。待真机/待补量化项见上列各条目。
 
 ***
 

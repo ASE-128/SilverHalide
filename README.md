@@ -6,6 +6,8 @@ Silver Halide 是一个基于 C++20 + Qt 6 的 RAW 摄影工作流桌面应用�
 
 ## 功能概览
 
+> **定位**：Silver Halide 对标 Lightroom Classic 功能密度，但以纯 C++ 高性能（大图零等待、常驻轻量）与本地离线 AI（隐私）为特色，数据契约自成体系、不兼容 Lightroom（[ADR-0001](docs/adr/0001-drop-lightroom-compat.md)）。
+
 - **RAW 解码与线性工作流**：libraw 后端、相机颜色矩阵、线性 ProPhoto RGB (D50) 工作空间，sRGB 伽马由 lcms 在管线末端一次性应用
 
 - **镜头/相机配置文件（集成中）**：RAW 元数据已暴露镜头厂商/型号，CMake 已声明可选 vcpkg Lensfun，DCP 文件识别入口已加入；Lensfun 校正应用、DCP 矩阵/曲线/LUT 与 UI 选择尚未验收
@@ -14,7 +16,7 @@ Silver Halide 是一个基于 C++20 + Qt 6 的 RAW 摄影工作流桌面应用�
 
 - **局部调整**：污点去除（Clone / Heal，归一化坐标 + 羽化 + 边缘亮度匹配）、蒙版局部调整
 
-- **目录与检索**：嵌入式 SQLite 目录（`Default.lrcat`），目录内嵌预览 BLOB；虚拟副本、关键字层级、智能收藏夹（多谓词规则）、元数据编辑、XMP 往返
+- **目录与检索**：嵌入式 SQLite 目录（`Default.lrcat`），目录内嵌预览 BLOB；虚拟副本、关键字层级、智能收藏夹（多谓词规则）、元数据编辑、XMP 往返（`[ADR-0001]` Lightroom 兼容将移除，目标自成体系）
 
 - **视图与比较**：胶片栏、主预览、Before / After 分屏、参考视图、1:1 全尺寸
 
@@ -136,7 +138,7 @@ src/
 
 - 开发经验与迁移：[docs/DEVELOPMENT\_EXPERIENCE.md](docs/DEVELOPMENT_EXPERIENCE.md)、[docs/MIGRATION.md](docs/MIGRATION.md)
 
-- XMP 字段映射：[docs/XMP-MAPPING.md](docs/XMP-MAPPING.md)
+- XMP 字段映射（Lightroom crs / 预设互导，按 [ADR-0001](docs/adr/0001-drop-lightroom-compat.md) 将移除、走向自有 `.lrp` 格式）：[docs/XMP-MAPPING.md](docs/XMP-MAPPING.md)
 
 - 内部开发历史归档（2.x dev 阶段）：[docs/archive](docs/archive)
 
