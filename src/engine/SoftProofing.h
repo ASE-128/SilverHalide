@@ -122,6 +122,22 @@ private:
     void rebuildTransforms(const std::filesystem::path& fallbackPath);
     void destroyAll();
 
+    /**
+     * @brief Mutable per-slot cache for the proofing transform.
+     *
+     * The transform for a given (intent, gamut) pair is rebuilt lazily and
+     * cached here.  The cache is per-instance and stamped with a generation id:
+     * loadProofProfile() bumps the generation so switching ICC profiles cannot
+     * silently reuse a transform built against the previous profile.
+     */
+    struct ProofCacheSlot {
+        std::shared_mutex mutex;
+        void* transform = nullptr;   // cmsHTRANSFORM
+        uint64_t generation = 0;
+    };
+    // Mutable so the const proofToDisplay / gamutMask can lazily build slots.
+    mutable ProofCacheSlot proofCache_[2][4]; // [gamut?0:1][intent]
+
     // Opaque cmsHPROFILE / cmsHTRANSFORM handles.
     void* proofProfile_ = nullptr;   // cmsHPROFILE (destination simulated device)
     void* prophoto_     = nullptr;   // cmsHPROFILE (cached working space)
@@ -130,6 +146,7 @@ private:
     void* proofGamut_   = nullptr;   // cmsHTRANSFORM with FLAGS_GAMUTCHECK
     std::filesystem::path proofPath_;
     mutable std::shared_mutex mutex_;
+    uint64_t cacheGeneration_ = 0;   // bumped by loadProofProfile to invalidate proofCache_
 };
 
 } // namespace lrc

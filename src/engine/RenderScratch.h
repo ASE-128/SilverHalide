@@ -10,7 +10,7 @@
 // for the cases that need a plain vector reference.
 //
 // Pure C++20, Qt-free, header-only (no .cpp, no CMake registration). Shutdown
-// contract (T-1): each thread's pool is owned by that thread and destroyed with
+// contract: each thread's pool is owned by that thread and destroyed with
 // it at thread exit; call lrc::scratchPoolDrain() to release the calling
 // thread's buffers deterministically (e.g. before a long-lived worker exits).
 // A ScratchBuffer must never outlive the thread that acquired it.

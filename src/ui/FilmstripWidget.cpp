@@ -67,8 +67,8 @@ int g_badgeCacheInserts = 0;
 // these keys from colliding with any other QPixmapCache user in the process.
 QString badgeCacheKey(int imageId, int thumbVersion, int rating, int flag,
                       int labelColor, bool inCollection, int pregradeState,
-                      int variantId) {
-    return QStringLiteral("filmstrip_badge_%1_%2_%3_%4_%5_%6_%7_%8")
+                      int variantId, bool suggestAuto) {
+    return QStringLiteral("filmstrip_badge_%1_%2_%3_%4_%5_%6_%7_%8_%9")
         .arg(imageId)
         .arg(thumbVersion)
         .arg(rating)
@@ -76,7 +76,8 @@ QString badgeCacheKey(int imageId, int thumbVersion, int rating, int flag,
         .arg(labelColor)
         .arg(inCollection ? 1 : 0)
         .arg(pregradeState)
-        .arg(variantId);
+        .arg(variantId)
+        .arg(suggestAuto ? 1 : 0);
 }
 
 void clearBadgeCache() {
@@ -159,7 +160,7 @@ void drawVariantBadge(QPainter& p, int variantId) {
 // and/or hand it to QPixmapCache.
 QPixmap makeBadgedIcon(const QImage& thumb, int rating, int flag,
                        int labelColor, bool inCollection, int pregradeState,
-                       int variantId) {
+                       bool suggestAuto, int variantId) {
     QPixmap pm;
     if (thumb.isNull()) {
         pm = QPixmap(kIconWidth, kIconHeight);
@@ -247,6 +248,15 @@ QPixmap makeBadgedIcon(const QImage& thumb, int rating, int flag,
         p.drawRoundedRect(tag, 3, 3);
         p.setPen(QColor(250, 250, 250));
         p.drawText(tag, Qt::AlignCenter, QStringLiteral("AI"));
+    }
+    // B-1 "建议自动" dot (top-centre): the pregrade statistics recommend running
+    // auto-develop on this photo. Kept clear of the collection square (top-left),
+    // the flag marker (top-right) and the "AI" tag (bottom-centre).
+    if (suggestAuto) {
+        const QRect dot(kIconWidth / 2 - 4, 4, 8, 8);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(245, 180, 40));  // amber
+        p.drawEllipse(dot);
     }
     return pm;
 }
@@ -525,9 +535,11 @@ void FilmstripWidget::setLabelColor(int imageId, int color) {
     }
 }
 
-void FilmstripWidget::setPregraded(int imageId, bool hasSubject, int score) {
+void FilmstripWidget::setPregraded(int imageId, bool hasSubject, int score,
+                                   bool suggestAuto) {
     pregradeSubjects_.insert(imageId, hasSubject);
     pregradeScores_.insert(imageId, score);
+    pregradeAuto_.insert(imageId, suggestAuto);
     const QVector<int> rows = rowsForImage(imageId);
     for (int row : rows)
         refreshIcon(row);
@@ -618,7 +630,7 @@ void FilmstripWidget::refreshIcon(int row) {
     const QString key = badgeCacheKey(
         e->imageId, thumbVersions_.value(e->imageId), e->rating, e->flag,
         e->labelColor, !e->collectionIds.isEmpty(), pregradeState(e->imageId),
-        e->variantId);
+        e->variantId, pregradeAuto_.value(e->imageId, false));
     QPixmap cached;
     if (QPixmapCache::find(key, &cached)) {
         item->setIcon(QIcon(cached));
@@ -632,7 +644,9 @@ void FilmstripWidget::refreshIcon(int row) {
     const QImage thumb = rawThumbnail(e->imageId);
     const QPixmap pm = makeBadgedIcon(thumb, e->rating, e->flag, e->labelColor,
                                       !e->collectionIds.isEmpty(),
-                                      pregradeState(e->imageId), e->variantId);
+                                      pregradeState(e->imageId),
+                                      pregradeAuto_.value(e->imageId, false),
+                                      e->variantId);
     insertBadgePixmap(key, pm);
     item->setIcon(QIcon(pm));
 }

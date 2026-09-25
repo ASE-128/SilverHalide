@@ -43,26 +43,26 @@ add_executable(lrc_tests
   TestAiMask.cpp
   TestDuplicateDetection.cpp
   TestSoftProofing.cpp
-  # P1 — competitive-alignment implementation (DirectML / ICC / rename /
+  # Competitive-alignment implementation (DirectML / ICC / rename /
   # watermark / snapshots).
   TestCompetitiveP1.cpp
-  # P3-1 — linear-light RGB histogram (exact bin counts, no sampling).
+  # Linear-light RGB histogram (exact bin counts, no sampling).
   TestHistogram.cpp
-  # P3-2 — folder monitoring: event-driven watcher + polling fallback.
+  # Folder monitoring: event-driven watcher + polling fallback.
   TestFolderWatcher.cpp
-  # P3-3 — named develop-preset library (save/list/load/delete/export).
+  # Named develop-preset library (save/list/load/delete/export).
   TestPresetLibrary.cpp
-  # P3-4 — CPU/GPU switchable spatial-filter backend (DirectCompute + fallback).
+  # CPU/GPU switchable spatial-filter backend (DirectCompute + fallback).
   TestSpatialBackend.cpp
-  # P-A (M1-M3) — engine-layer headless acceptance: synthetic-50MP render
-  # timing + process-memory sampling for the B-1/B-2/D-1/D-2 quant anchors.
+  # Engine-layer headless acceptance: synthetic-50MP render
+  # timing + process-memory sampling for the render/upscale/encode anchors.
   TestPerfAnchors.cpp
-  # P-B (offline AI) — B-1 auto-develop suggestions + B-2 batch pregrade.
+  # Offline AI: auto-develop suggestions + batch pregrade.
   TestAutoDevelop.cpp
   TestPregrade.cpp)
 
 target_link_libraries(lrc_tests PRIVATE lrc_catalog Catch2::Catch2WithMain)
-# TestPerfAnchors.cpp uses GetProcessMemoryInfo (D-1/D-2 memory sampling) on
+# TestPerfAnchors.cpp uses GetProcessMemoryInfo (process-memory sampling) on
 # Windows. psapi is provided by the MSVC/Windows SDK; not needed elsewhere.
 if(WIN32)
   target_link_libraries(lrc_tests PRIVATE psapi)

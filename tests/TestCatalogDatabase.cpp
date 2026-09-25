@@ -1,11 +1,13 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #include <sqlite3.h>
@@ -1437,4 +1439,49 @@ TEST_CASE("FolderMonitor: poll reports add/modify and defers removals",
 
     ec.clear();
     std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("Catalog: rollback never undoes a concurrent edit", "[catalog][concurrency]") {
+    const auto path = makeTempDb();
+    CatalogDatabase db(path);
+    REQUIRE(db.open());
+    const int64_t base = db.addImage("/photos/base.arw", "");
+
+    // A non-default edit, so we can tell whether it survived the rollback.
+    Adjustments edit;
+    edit.exposure = 1.5;
+    edit.vibrance = 12;
+
+    // Simulate a user edit committed on a worker thread while this (main)
+    // thread holds an import-style transaction open on the same connection.
+    // Before the fix the shared inTransaction_ flag made the editor absorb its
+    // writes into the import transaction, so the import rollback below erased
+    // the edit. The fix holds the catalog mutex for the whole transaction, so
+    // the editor waits, then commits its own transaction after the rollback.
+    std::atomic<bool> txOpen{false};
+    std::atomic<bool> writeAttempted{false};
+    std::thread editor([&] {
+        while (!txOpen.load()) {}
+        // The write starts while the import transaction is still open.
+        writeAttempted.store(true);
+        db.saveAdjustments(base, edit);
+    });
+
+    // The import batch opens a transaction, inserts a row, then is cancelled.
+    REQUIRE(db.beginTransaction());
+    REQUIRE(db.addImage("/photos/imported_cancel.arw", "") > 0);
+    txOpen.store(true);
+    // Wait until the concurrent editor has begun its write against the open
+    // transaction before rolling the import back.
+    while (!writeAttempted.load()) {}
+    REQUIRE(db.rollbackTransaction());
+    editor.join();
+
+    // The imported row the batch inserted is gone, but the concurrent edit must
+    // have survived (it was never absorbed into, and rolled back by, the import).
+    REQUIRE_FALSE(db.findImageByPath("/photos/imported_cancel.arw").has_value());
+    const auto saved = db.loadAdjustments(base);
+    REQUIRE(saved.has_value());
+    REQUIRE(saved->exposure == Approx(1.5));
+    REQUIRE(saved->vibrance == Approx(12));
 }

@@ -154,6 +154,19 @@ void ImageViewport::setDiagnosticOverlay(const QImage& overlay) {
     update();
 }
 
+void ImageViewport::setAutoCropSuggestion(const QRectF& normalizedRect) {
+    autoCropActive_ = normalizedRect.isValid();
+    autoCropNorm_ = normalizedRect;
+    update();
+}
+
+void ImageViewport::clearAutoCropSuggestion() {
+    if (autoCropActive_) {
+        autoCropActive_ = false;
+        update();
+    }
+}
+
 void ImageViewport::setSamplerActive(bool active) {
     if (active) {
         whiteBalanceActive_ = false;  // 与白平衡吸管互斥 (mutual exclusion).
@@ -792,6 +805,16 @@ void ImageViewport::paintEvent(QPaintEvent*) {
     // Subtle border to separate the image from the background.
     painter.setPen(QColor(0, 0, 0, 120));
     painter.drawRect(dst.adjusted(0, 0, -1, -1));
+
+    // B-1 content-aware crop guidance: dashed box over the suggested normalized
+    // rect. Pure guidance -- never applies a crop to the pixels.
+    if (autoCropActive_ && autoCropNorm_.isValid()) {
+        const QPointF tl = normToWidget(autoCropNorm_.topLeft());
+        const QPointF br = normToWidget(autoCropNorm_.bottomRight());
+        painter.setPen(QPen(QColor(80, 200, 255, 235), 2.0, Qt::DashLine));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(QRectF(tl, br));
+    }
 
     // Spot circles + cursor ring when the spot tool is armed.
     if (spotToolActive_)

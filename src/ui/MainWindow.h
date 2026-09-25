@@ -119,6 +119,8 @@ private slots:
     void onAdjustmentsCommitted(const lrc::Adjustments& adjustments);
     void onAutoRequested();
     void onAutoAdjustReady(const lrc::Adjustments& adjustments);
+    void onAutoCropSuggestionReady(bool hasCrop, float left, float top,
+                                   float right, float bottom);
     void onColorSamplerRequested(bool active);
     void onColorSampled(int colorRangeIndex, const QColor& color);
     void onColorAdjusted(int colorRangeIndex, double saturation,

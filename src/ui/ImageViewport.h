@@ -66,6 +66,13 @@ public:
     void setDiagnosticOverlay(const QImage& overlay);
     const QImage& diagnosticOverlay() const { return overlay_; }
 
+    // B-1 content-aware crop guidance: draws a dashed rectangle over the preview
+    // at the normalized [0,1] rect suggested by the last auto-develop run. It is
+    // pure guidance -- it never writes to the adjustment stack or alters pixels
+    // (the pipeline has no crop-rendering stage yet). Clear with clearAutoCropSuggestion.
+    void setAutoCropSuggestion(const QRectF& normalizedRect);
+    void clearAutoCropSuggestion();
+
     void setZoomMode(ZoomMode mode);
     ZoomMode zoomMode() const { return zoomMode_; }
     void zoomIn();
@@ -313,6 +320,9 @@ private:
 
     QImage image_;
     QImage overlay_;  // LR Alt-key diagnostic overlay (drawn in place of the image)
+    // B-1 content-aware crop guidance box (normalized [0,1]) and its enable flag.
+    bool autoCropActive_ = false;
+    QRectF autoCropNorm_;
     QSize nativeSize_;      // native full-res size of the current image
     QSize lastViewportResolution_;  // dedup for viewportResolutionChanged()
     bool fullResRequested_ = false;  // dedup for fullResRequested()

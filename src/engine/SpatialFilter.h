@@ -1,6 +1,6 @@
 #pragma once
 
-// P3-4 GPU pixel pipeline: CPU/GPU-switchable spatial-filter backend.
+// CPU/GPU-switchable spatial-filter backend.
 //
 // Pipeline spatial ops (gaussian blur and the sharpening that composes from it)
 // run through this abstraction instead of calling the file-local gaussianBlur
@@ -8,8 +8,8 @@
 // (D3D11) backend when the build is compiled with LRC_ENABLE_D3D=ON AND the
 // device probe succeeds; otherwise it returns the CPU backend, which wraps the
 // legacy Pipeline.cpp gaussianBlur unchanged. The pipeline therefore keeps its
-// exact pre-P3-4 behaviour unless a GPU backend was explicitly compiled in and
-// successfully initialized.
+// exact behaviour of the legacy path unless a GPU backend was explicitly
+// compiled in and successfully initialized.
 //
 // All backend methods are const / thread-safe (the GPU backend serializes
 // through an internal mutex; the CPU backend is stateless).
@@ -26,7 +26,7 @@ class D3D11SpatialFilterBackend;
 /**
  * @brief Abstract spatial-filter backend (CPU scalar/AVX2 vs D3D11 DirectCompute).
  *
- * The minimal operator surface for P3-4 is a single-channel gaussian blur;
+ * The minimal operator surface is a single-channel gaussian blur;
  * sharpening is composed in the pipeline as luma minus the blurred field, so it
  * consumes the same backend op. The contract mirrors the legacy gaussianBlur
  * exactly (see detail::gaussianBlur), so any backend is a drop-in replacement.

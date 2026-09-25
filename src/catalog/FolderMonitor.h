@@ -7,7 +7,7 @@
  * Two change-detection paths share one diff/grace logic:
  *  - Polling (default): the UI drives poll() from a QTimer; a full directory
  *    scan is diffed against the known file set.
- *  - Event-driven (P3-2, Windows only): a background thread waits on
+ *  - Event-driven (Windows only): a background thread waits on
  *    ReadDirectoryChangesW and, on any change, invokes the wake callback once
  *    so the owner runs a poll() immediately (within seconds) instead of
  *    waiting for the next timer tick. The watcher thread never scans the
@@ -69,7 +69,7 @@ public:
     /// @brief Scans the folder and reports differences since the last call.
     void poll();
 
-    /** @brief Starts the Win32 ReadDirectoryChangesW watcher thread (P3-2).
+    /** @brief Starts the Win32 ReadDirectoryChangesW watcher thread.
      *
      *  The watcher thread waits for create/delete/rename/write events in the
      *  watched folder and, on any change, coalesces a single wake notification
@@ -148,7 +148,7 @@ private:
     std::vector<std::filesystem::path> snapshot_;
     mutable std::mutex mutex_;
 
-    // --- Event-driven watcher (P3-2, Windows only) -------------------------
+    // --- Event-driven watcher (Windows only) -------------------------------------
     // All Win32 handles/buffers live in EventDrivenState (defined in the .cpp)
     // so this header stays Windows-free. Lifecycle: created in
     // startEventDriven(), consumed exclusively by the watcher thread while it

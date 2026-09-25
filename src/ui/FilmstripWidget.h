@@ -64,9 +64,20 @@ public:
     void setLabelColor(int imageId, int color);
     /**
      * @brief Records a B-2 pregrade marker for `imageId` and repaints every row
-     *        sharing it. `score` is in [0,100]; `hasSubject` colours the badge.
+     *        sharing it (a master and its virtual copies share one id).
+     *
+     * @param imageId     Catalog id of the analysed image.
+     * @param hasSubject  Whether strong foreground saliency was detected; colours
+     *                    the badge.
+     * @param score       Quality score in [0,100]; a value < 0 clears the badge.
+     * @param suggestAuto Whether the tonal statistics recommend running B-1
+     *                    auto-develop; draws a distinct "建议自动" dot on the badge.
+     *
+     * @note This map survives setImages(), so the marker stays visible across
+     *       filmstrip rebuilds once recorded (from the import-time live signal or
+     *       a catalog backfill).
      */
-    void setPregraded(int imageId, bool hasSubject, int score);
+    void setPregraded(int imageId, bool hasSubject, int score, bool suggestAuto);
     void setInCollection(int imageId, bool in);
     void setCollections(const QVector<lrc::Collection>& collections);
     void selectImage(int imageId);
@@ -148,6 +159,8 @@ private:
     // B-2 pregrade markers, keyed by imageId (a master and its virtual copies
     // share the id). Kept separate from Entry so they survive setImages().
     // score >= 0 signals a marker is present; hasSubject colours the badge.
+    // suggestAuto draws a distinct "建议自动" dot on the badge.
     QHash<int, bool> pregradeSubjects_;
     QHash<int, int> pregradeScores_;
+    QHash<int, bool> pregradeAuto_;
 };

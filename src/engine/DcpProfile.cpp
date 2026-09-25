@@ -101,6 +101,21 @@ size_t typeSize(uint16_t type) {
     }
 }
 
+// Byte step used when iterating over a run of curve samples. This MUST match
+// the read width inside readCurveSample(): UNDEFINED(7) commonly carries the
+// 16-bit DCP tone curve (see readCurveSample), so it advances by 2 bytes even
+// though logical typeSize(7) is 1. Using typeSize() here previously stepped by
+// 1 byte and misaligned every sample for UNDEFINED-typed curves.
+size_t curveSampleStep(uint16_t type) {
+    switch (type) {
+    case 3:  // SHORT (16-bit)
+    case 7:  // UNDEFINED (commonly 16-bit tone curve)
+        return 2;
+    default: // BYTE(1 / single-byte) and unknown
+        return 1;
+    }
+}
+
 size_t valueOffset(const TagValue& tag) {
     return static_cast<size_t>(tag.count) * typeSize(tag.type) <= 4
                ? tag.entry + 8
@@ -196,7 +211,7 @@ std::optional<DcpProfile> DcpProfileReader::read(
     // capacity (most profiles ship 256 points). The curve domain is implicit:
     // input x is spread uniformly across the samples from 0 to 65535.
     if (findTag(bytes, 50940, le, tag) && tag.count > 0) {
-        const size_t sample = typeSize(tag.type) ? typeSize(tag.type) : 1;
+        const size_t sample = curveSampleStep(tag.type);
         const size_t n = std::min<size_t>(tag.count, profile.toneCurve.size());
         const size_t offset = valueOffset(tag);
         for (size_t i = 0; i < n; ++i)

@@ -3714,7 +3714,16 @@ size_t Pipeline::cacheBytes() const {
 
 ImageBufferPtr Pipeline::render(uint64_t imageId, const ImageBuffer& linear,
                                 const Adjustments& adjustments, int maxDim) {
-    const CacheKey key{imageId, adjustments.hash(), maxDim};
+    // Content fingerprint so a fresh image sharing imageId + adjHash + maxDim
+    // does not hit a stale cached frame. Mirrors computeSourceKey's stride.
+    uint64_t srcHash = 1469598103934665603ull;
+    const std::vector<uint8_t>& bytes = linear.data();
+    if (!bytes.empty()) {
+        const size_t stride = std::max<size_t>(1, bytes.size() / 4096);
+        for (size_t i = 0; i < bytes.size(); i += stride)
+            srcHash = hashCombine(srcHash, static_cast<size_t>(bytes[i]));
+    }
+    const CacheKey key{imageId, adjustments.hash(), maxDim, srcHash};
     ImageBufferPtr cached;
     if (lookupCache(key, cached))
         return cached;
@@ -3755,12 +3764,16 @@ ImageBufferPtr Pipeline::renderFullDisplay(uint64_t imageId,
 // Static engine pointer (definition). Initialized to null at static-storage
 // init time; set once at app startup by MainWindow after the bundled models
 // have been loaded. See Pipeline.h for the threading / lifetime contract.
-AiInferenceEngine* Pipeline::aiEngine_ = nullptr;
+std::atomic<AiInferenceEngine*> Pipeline::aiEngine_ = nullptr;
 
-AiInferenceEngine* Pipeline::globalAiEngine() { return aiEngine_; }
+AiInferenceEngine* Pipeline::globalAiEngine() {
+    return aiEngine_.load(std::memory_order_acquire);
+}
 
 void Pipeline::setGlobalAiEngine(AiInferenceEngine* engine) {
-    aiEngine_ = engine;
+    // See Pipeline.h @warning: intended to be called once from the main thread
+    // before any render thread starts; must not be replaced at runtime.
+    aiEngine_.store(engine, std::memory_order_release);
 }
 
 } // namespace lrc

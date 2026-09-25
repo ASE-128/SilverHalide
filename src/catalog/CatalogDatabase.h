@@ -512,6 +512,15 @@ public:
     // busy_timeout replaces the historical dual-connection design) so a
     // cancelled import's rollback can never undo an edit the user saved while
     // the import ran concurrently.
+    //
+    // beginTransaction() acquires and holds the catalog mutex until the matching
+    // COMMIT/ROLLBACK, not just for the call. Every other connection operation
+    // also takes that mutex (recursive, so the owning thread's intermediate
+    // writes re-enter freely), which means no other thread can run any statement
+    // while a transaction is open. A concurrent edit therefore waits on the
+    // mutex and runs afterwards in its own transaction, instead of being absorbed
+    // into, and later rolled back by, an import batch. beginTransaction and
+    // COMMIT/ROLLBACK must be paired 1:1 on the same thread.
     bool beginTransaction();
     bool commitTransaction();
     bool rollbackTransaction();
@@ -575,6 +584,13 @@ private:
     std::filesystem::path previewDir_;  // externalized preview files root
     sqlite3* db_ = nullptr;
     bool inTransaction_ = false;
+    // Number of unclosed BEGINs issued by the thread that currently holds
+    // mutex_. Only that thread may mutate it (every access happens while mutex_
+    // is held, and mutex_ is held for the entire transaction), so it doubles as
+    // "do I own an open transaction on this connection". Balances the extra
+    // mutex_ acquisition taken by beginTransaction() and released by the
+    // matching COMMIT/ROLLBACK.
+    int txDepth_ = 0;
     mutable std::string lastError_;
     // Prepared-statement cache (key = SQL text). Statements are reset and
     // re-bound before every use and kept for the lifetime of the database,

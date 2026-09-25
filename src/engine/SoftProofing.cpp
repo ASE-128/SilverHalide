@@ -91,6 +91,9 @@ bool SoftProofing::loadProofProfile(const std::filesystem::path& iccPath) {
     if (!hp) return false;
     proofProfile_ = hp;
     proofPath_ = iccPath;
+    // Bump the generation so the per-slot transform cache (proofCache_)
+    // rebuilds against this new profile instead of reusing the previous one.
+    ++cacheGeneration_;
     rebuildTransforms(iccPath);
     return true;
 }
@@ -153,33 +156,36 @@ ImageBufferPtr SoftProofing::proofToDisplay(const ImageBuffer& input,
 
     // Build (or reuse) a cms transform for the specific (intent, gamut) pair.
     // Because lcms2 transforms are not cheap to create and immutable after,
-    // we maintain a 4-entry small cache.  We leak the handles into process
-    // lifetime (max 4) to avoid cross-thread destruction complexity.
-    struct CachedXform { std::shared_mutex m; void* xform = nullptr; };
-    static CachedXform cache[2][4]; // [gamut?0:1][intent]
-
+    // we keep a small per-instance cache indexed by (intent, gamut).  Each
+    // slot is stamped with the cache generation; loadProofProfile() bumps the
+    // generation so switching ICC profiles rebuilds the transform.  We leak
+    // superseded handles into process lifetime (bounded: one transform per
+    // loaded profile per slot) to avoid cross-thread destruction complexity.
     const int gi = withGamutCheck ? 1 : 0;
     const int ii = std::min(3, std::max(0, static_cast<int>(intent)));
-    auto& slot = cache[gi][ii];
+    const uint64_t gen = cacheGeneration_;
+    auto& slot = proofCache_[gi][ii];
     void* xform = nullptr;
     {
-        std::shared_lock<std::shared_mutex> kl(slot.m);
-        xform = slot.xform;
+        std::shared_lock<std::shared_mutex> sl(slot.mutex);
+        if (slot.transform && slot.generation == gen)
+            xform = slot.transform;
     }
     if (!xform) {
-        std::unique_lock<std::shared_mutex> kl(slot.m);
-        if (!slot.xform) {
+        std::unique_lock<std::shared_mutex> ul(slot.mutex);
+        if (!slot.transform || slot.generation != gen) {
             const cmsUInt32Number baseFlags = cmsFLAGS_NOCACHE | cmsFLAGS_BLACKPOINTCOMPENSATION |
                                               (withGamutCheck ? cmsFLAGS_GAMUTCHECK : 0);
-            slot.xform = cmsCreateProofingTransform(
+            slot.transform = cmsCreateProofingTransform(
                 reinterpret_cast<cmsHPROFILE>(prophoto_), TYPE_RGB_FLT,
                 reinterpret_cast<cmsHPROFILE>(proofProfile_), TYPE_RGB_8,
                 reinterpret_cast<cmsHPROFILE>(srgb_),
                 intentCms(intent),
                 INTENT_RELATIVE_COLORIMETRIC,
                 baseFlags);
+            slot.generation = gen;
         }
-        xform = slot.xform;
+        xform = slot.transform;
     }
     if (!xform) return nullptr;
 

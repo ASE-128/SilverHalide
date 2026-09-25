@@ -1,12 +1,13 @@
 #pragma once
 
-// P-B B-2 pregrade analyzer — pure C++ / Qt-free.
+// Pregrade analyzer — pure C++ / Qt-free.
 //
 // Produces a lightweight per-image marker for the import batch pregrade queue:
 //   • hasSubject — foreground saliency (optional rmbg2-subject model path,
 //     deterministic saliency fallback when the model is absent).
 //   • score — a deterministic quality/sharpness score in [0,100].
-//   • suggestAuto — whether the tonal statistics suggest running B-1 auto-develop.
+//   • suggestAuto — whether the tonal statistics suggest running the
+//     auto-develop recommendation.
 //
 // DESIGN RULES (enforced by this header):
 //   • No Qt includes anywhere in this header or the .cpp.
@@ -26,7 +27,7 @@ namespace lrc {
 class AiInferenceEngine;
 
 /**
- * @brief Lightweight per-image pregrade marker (B-2).
+ * @brief Lightweight per-image pregrade marker.
  *
  * Written into the catalog after a background queue pass over each imported
  * image. `processed` is false only for empty / degenerate input; a missing
@@ -36,12 +37,12 @@ class AiInferenceEngine;
 struct PregradeResult {
     bool hasSubject = false;  // strong foreground saliency detected
     int score = 0;            // deterministic quality score in [0,100]
-    bool suggestAuto = false; // tonal stats suggest B-1 auto-develop
+    bool suggestAuto = false; // tonal stats suggest the auto-develop recommendation
     bool processed = false;   // true when the input was analysable
 };
 
 /**
- * @brief Static batch-pregrade analyzer (B-2).
+ * @brief Static batch-pregrade analyzer.
  *
  * Analyzes a (preferably downsampled) linear ProPhoto buffer to derive a
  * PregradeResult without writing any pixels. Optionally uses the rmbg2-subject

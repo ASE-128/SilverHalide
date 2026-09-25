@@ -12,6 +12,7 @@
 // Previews are rendered at a bounded resolution and cached with an LRU keyed
 // by (image id, adjustment hash, target size).
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <list>
@@ -162,6 +163,12 @@ public:
     // Thread-safety: AiInferenceEngine::run / runImage are internally
     // thread-safe (per-thread ONNX sessions), so a single shared engine
     // serves both the PreviewWorker thread and the export thread.
+    //
+    // @warning The engine is stored as an atomic pointer to make concurrent
+    //          reads well-defined, but callers MUST install it via
+    //          setGlobalAiEngine() before any preview/export thread starts and
+    //          must never replace it at runtime. setGlobalAiEngine() is meant
+    //          to be called once from the main thread at startup.
     static AiInferenceEngine* globalAiEngine();
     static void setGlobalAiEngine(AiInferenceEngine* engine);
 
@@ -255,7 +262,7 @@ public:
     // low saturation boost). Returns defaults when the image is empty.
     static Adjustments autoAdjust(const ImageBuffer& linear);
 
-    // --- B-1 AI auto-develop suggestion (non-destructive, pure statistics) --
+    // --- AI auto-develop suggestion (non-destructive, pure statistics) --
     /**
      * @brief A normalized crop rectangle (values in [0,1], left<right, top<bottom).
      *
@@ -282,7 +289,7 @@ public:
     };
 
     /**
-     * @brief One-shot auto-develop suggestion (B-1).
+     * @brief One-shot auto-develop suggestion.
      *
      * Combines several lightweight statistics into a single parameter
      * recommendation: exposure (mean -> mid-gray), contrast (tonal span),
@@ -338,10 +345,14 @@ private:
         uint64_t imageId;
         uint64_t adjHash;
         int maxDim;
+        // Strided content fingerprint of the source buffer. Guards against a
+        // different image (especially one reusing imageId==0) being served a
+        // stale cached frame that happens to share imageId + adjHash + maxDim.
+        uint64_t srcHash = 0;
 
         bool operator==(const CacheKey& o) const {
             return imageId == o.imageId && adjHash == o.adjHash &&
-                   maxDim == o.maxDim;
+                   maxDim == o.maxDim && srcHash == o.srcHash;
         }
     };
     struct CacheKeyHash {
@@ -350,6 +361,7 @@ private:
             h = (h ^ k.imageId) * 1099511628211ull;
             h = (h ^ k.adjHash) * 1099511628211ull;
             h = (h ^ static_cast<size_t>(k.maxDim)) * 1099511628211ull;
+            h = (h ^ k.srcHash) * 1099511628211ull;
             return h;
         }
     };
@@ -408,7 +420,9 @@ private:
     // Non-owning pointer to the shared ONNX inference engine.
     // Defaults to null; set via setGlobalAiEngine at app startup. When null,
     // AI denoise/mask code paths degrade to their pure-C++ fallbacks.
-    static AiInferenceEngine* aiEngine_;
+    // Atomic so concurrent preview/export-thread reads are well-defined; see
+    // the @warning on setGlobalAiEngine for the install-before-threads rule.
+    static std::atomic<AiInferenceEngine*> aiEngine_;
 };
 
 } // namespace lrc

@@ -1040,6 +1040,8 @@ void MainWindow::startWorkers() {
             });
     connect(previewWorker_, &PreviewWorker::autoAdjustReady, this,
             &MainWindow::onAutoAdjustReady);
+    connect(previewWorker_, &PreviewWorker::autoCropSuggestionReady, this,
+            &MainWindow::onAutoCropSuggestionReady);
     connect(previewWorker_, &PreviewWorker::visualizationReady, this,
             &MainWindow::onVisualizationReady);
     connect(previewWorker_, &PreviewWorker::hdrProgress, this,
@@ -1514,6 +1516,7 @@ void MainWindow::loadImageState(int imageId, int variantId) {
     viewport_->setMaskTool(lrc::MaskType::None);
     viewport_->setSamplerActive(false);
     viewport_->setDiagnosticOverlay(QImage());
+    viewport_->clearAutoCropSuggestion();  // stale from the previous image
     developPanel_->setSamplerChecked(false);
     // Reset the point-colour sampler on image change.
     viewport_->setPointColorSamplerActive(false);
@@ -1732,6 +1735,21 @@ void MainWindow::onAutoAdjustReady(const lrc::Adjustments& adjustments) {
         return;
     commitAdjustments(adjustments);
     statusBar()->showMessage(tr("已应用自动调整"), 2500);
+}
+
+// B-1 content-aware crop suggestion from the last auto-develop. Drawn as a
+// pure-guidance box over the current preview; never applied to the pixels (the
+// pipeline has no crop-rendering stage yet).
+void MainWindow::onAutoCropSuggestionReady(bool hasCrop, float left, float top,
+                                           float right, float bottom) {
+    if (currentImageId_ < 0)
+        return;
+    if (!hasCrop) {
+        viewport_->clearAutoCropSuggestion();
+        return;
+    }
+    viewport_->setAutoCropSuggestion(
+        QRectF(QPointF(left, top), QPointF(right, bottom)));
 }
 
 // --- Undo / redo -------------------------------------------------------------
@@ -2596,12 +2614,11 @@ void MainWindow::onImportFinished(int addedCount) {
 
 void MainWindow::onPregradeReady(int imageId, bool hasSubject, int score,
                                  bool suggestAuto) {
-    Q_UNUSED(suggestAuto);
     // Reflect the marker on every filmstrip row sharing this image id (a master
     // and its virtual copies share one imageId). The badge is non-destructive:
     // it only tags the thumbnail, never touches the pixels or the RAW.
     if (filmstrip_)
-        filmstrip_->setPregraded(imageId, hasSubject, score);
+        filmstrip_->setPregraded(imageId, hasSubject, score, suggestAuto);
 }
 
 void MainWindow::onImportWarning(const QString& message) {
@@ -3083,6 +3100,23 @@ void MainWindow::refreshFilmstrip() {
         }
     }
     filmstrip_->setImages(entries_);
+    // P1 backfill: the B-2 pregrade marker is persisted to the catalog, so on
+    // every rebuild -- including a cold start -- the filmstrip badge must be
+    // re-read from the DB rather than relying solely on the import-time live
+    // signal, which only fires during the importing session. Dedup by imageId:
+    // a master and its virtual copies share the id and thus one marker.
+    {
+        QSet<int> pregraded;
+        for (const auto& e : entries_) {
+            const int id = e.imageId;
+            if (pregraded.contains(id))
+                continue;
+            pregraded.insert(id);
+            if (const auto pg = catalog_->getPregrade(id))
+                filmstrip_->setPregraded(id, pg->hasSubject, pg->score,
+                                         pg->suggestAuto);
+        }
+    }
     navigator_->setStatistics(entries_.size(), rated);
     navigator_->setFolders(toQStringList(catalog_->listFolders()));
     // Keep the navigator keyword counts and smart-collection list fresh.

@@ -317,6 +317,22 @@ signals:
     void batchExportFinished(int successCount, int failCount,
                              const QString& lastError);
     void autoAdjustReady(const lrc::Adjustments& adjustments);
+    /**
+     * @brief Content-aware crop suggestion from the last B-1 auto-develop run.
+     *
+     * The rectangle is normalized to [0,1] over the source image and drawn as a
+     * pure-guidance box by the viewport. It is never applied to pixels (the
+     * pipeline has no crop-rendering stage yet). hasCrop == false means "no crop
+     * recommended" and the rect values are undefined.
+     *
+     * @param hasCrop  Whether a crop box was suggested.
+     * @param left     Normalized left edge in [0,1].
+     * @param top      Normalized top edge in [0,1].
+     * @param right    Normalized right edge in [0,1].
+     * @param bottom   Normalized bottom edge in [0,1].
+     */
+    void autoCropSuggestionReady(bool hasCrop, float left, float top,
+                                 float right, float bottom);
     void visualizationReady(qint64 imageId, qint64 generation,
                             const lrc::ImageBufferPtr& overlay);
     void hdrProgress(int done, int total);
