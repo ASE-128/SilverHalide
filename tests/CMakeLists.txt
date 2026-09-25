@@ -53,9 +53,17 @@ add_executable(lrc_tests
   # P3-3 — named develop-preset library (save/list/load/delete/export).
   TestPresetLibrary.cpp
   # P3-4 — CPU/GPU switchable spatial-filter backend (DirectCompute + fallback).
-  TestSpatialBackend.cpp)
+  TestSpatialBackend.cpp
+  # P-A (M1-M3) — engine-layer headless acceptance: synthetic-50MP render
+  # timing + process-memory sampling for the B-1/B-2/D-1/D-2 quant anchors.
+  TestPerfAnchors.cpp)
 
 target_link_libraries(lrc_tests PRIVATE lrc_catalog Catch2::Catch2WithMain)
+# TestPerfAnchors.cpp uses GetProcessMemoryInfo (D-1/D-2 memory sampling) on
+# Windows. psapi is provided by the MSVC/Windows SDK; not needed elsewhere.
+if(WIN32)
+  target_link_libraries(lrc_tests PRIVATE psapi)
+endif()
 target_include_directories(lrc_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(lrc_tests PRIVATE
   "LRC_SOURCE_ROOT=\"${CMAKE_SOURCE_DIR}\"")

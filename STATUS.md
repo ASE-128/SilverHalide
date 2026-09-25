@@ -13,6 +13,25 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## P-A 性能极致 · 引擎层 headless 量化验收（2026-09-25，工作区未提交）
+
+**本轮内容**：P-A（M1 1:1 零等待 / M2 编辑手感 / M3 内存极致 / M4 大目录）原有底层能力已基本落地
+（1:1 磁盘直读、coarse-then-refine、全尺寸单缓冲+回落、worker 线程直方图、256MB LRU），缺的
+是**可二值验证的量化验收**。本次新增引擎层 headless 验收，产出可复现实测记录；真机锚点登记待真机。
+
+- **新增 [tests/TestPerfAnchors.cpp](file:///d:/Desktop/SilverHalide-src/tests/TestPerfAnchors.cpp)**（4 用例 `[performance][pa]`，D-1/D-2 另带 `[memory]`）：合成 8000×6000 F32 缓冲
+  推过引擎渲染路径 + Win32 `PagefileUsage` 私有提交采样；[tests/CMakeLists.txt](file:///d:/Desktop/SilverHalide-src/tests/CMakeLists.txt) 注册源文件并在 WIN32 下链 `psapi`。
+- **实测（Release，本机沙箱）**：
+  - B-2 1920 精帧（`renderPreview` 1920×1440，代表性主滑块×3 取稳态）：**min ≈99ms / avg ≈100ms**（引擎段）。
+  - B-1 全尺寸渲染引擎段（`renderFullDisplay`，线性→U8，不含解码/磁盘直读）：**≈514ms**。
+  - D-2 切图回落：作用域释放后 **回落 ≈688MB，两轮 688.0/688.0MB，可重复 ✓**（私有提交口径）。
+  - D-1 单图峰值：headless 无 UI 编辑流程不可复现，**标真机待验**（累计进程 working-set 峰值 ~1319MB 含历史用例残留，非单图口径）。
+- **登记**：pillars/01-pa 的 [M1](file:///d:/Desktop/SilverHalide-src/docs/spec/optimization/pillars/01-pa/M1-zero-wait.md) /
+  [M2](file:///d:/Desktop/SilverHalide-src/docs/spec/optimization/pillars/01-pa/M2-edit-feel.md) /
+  [M3](file:///d:/Desktop/SilverHalide-src/docs/spec/optimization/pillars/01-pa/M3-memory.md) 各补「验收状态」实测段。
+- **真机待验**：B-1 热≤175ms/冷≤1500ms、B-2 松手→精帧≤80ms、B-3 主线程≤16ms/帧、D-1 单图峰值≤1.2GB —— 均需独立 GPU + 真实 50MP RAW，待 GPU 环境实测。
+- **验证**：headless 全量 **482 用例转绿**（含新增 4 条 PA 用例）；仅有已知 TestRawDecoder R-08 embedded-ICC 运行间非确定（单独跑 `[raw][io]` 全过）。
+
 ## P3 竞品对齐优化·体验打磨（2026-09-21，工作区未提交）
 
 竞品规格 [competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md) 第 4 节 P3 四项全部落地并 headless 验收；P1/P2/P3/T 已全部实现，spec 内对应验收标准已勾选。四项代码均在工作区，未 commit（按用户要求先不提交/推送）。
@@ -531,6 +550,18 @@ cmake --build build_gui --config Release
 | **P1-3 批量重命名（`RenameTemplate` 模板 `{date}/{index[:W]}/{base}` + 冲突唯一路径；导入端 ImportDialog 复选/模板/预览 + ImportWorker Stage1 按选择顺序重命名；导出端 ExportDialog 批量重命名 + MainWindow 走 batchExport 导出母版+所有虚拟副本）** | ✅ headless 端到端 + Qt `batchExport` 真实导出断言 / 对话框 smoke 已验收（GUI 手动验收待做） |
 
 ### 🔄 进行中
+
+- **优化方向（对标 Lightroom Classic · 自成体系）**：定位 master 见
+  [docs/spec/optimization-positioning-spec.md](docs/spec/optimization-positioning-spec.md)，
+  阶段路线图见 [00-ROADMAP.md](docs/spec/optimization/00-ROADMAP.md)。三大支柱优先级
+  **P-A 性能极致 > P-B 离线 AI > P-D 稳定**；ADR-0001 弃 LR 兼容（读+写），数据契约 `.lrp`/`.shcat` 自洽。
+  当前 **P-A（性能极致）进行中**：Milestone 节点见
+  [pillars/01-pa/](docs/spec/optimization/pillars/01-pa/)（M1 1:1 零等待 / M2 编辑手感 / M3 内存极致 / M4 大目录），
+  **引擎层 headless 验收已落地（2026-09-25）**：新增 `tests/TestPerfAnchors.cpp`（合成 8000×6000 F32：
+  B-2 1920 精帧 min≈99ms、B-1 全尺寸渲染引擎段≈514ms、D-2 回落≈688MB 可重复），登记 M1/M2/M3 实测记录；
+  真机锚点（热/冷 1:1、真机精帧、主线程帧、单图 ≤1.2GB 峰值）登记 **真机待验**，headless 全量 482 用例转绿。
+  其余支柱节点见 [00-ROADMAP 索引](docs/spec/optimization/00-ROADMAP.md)。P-A 量化锚点：B-1 热 50MP 1:1 ≤175ms、
+  B-2 松手→精帧 ≤80ms、B-3 主线程 ≤16ms/帧、D-1 峰值 ≤1.2GB、D-2 切图回落 ≤400MB；真机锚点待 GPU 环境实测。
 
 - **竞品对齐优化**：当前任务文件为
   [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md)。
