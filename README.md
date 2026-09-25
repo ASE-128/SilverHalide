@@ -132,11 +132,11 @@ src/
 
 - 架构：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
-- AI 模型分发状态：[docs/AI\_MODEL\_DISTRIBUTION\_STATUS\_2026-08-31.md](docs/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md)
+- AI 模型分发状态：[docs/archive/AI\_MODEL\_DISTRIBUTION\_STATUS\_2026-08-31.md](docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md)
 
-- 四阶段加速报告：[docs/Speedup\_Four\_Stages\_Report.md](docs/Speedup_Four_Stages_Report.md)
+- 四阶段加速报告：[docs/archive/Speedup\_Four\_Stages\_Report.md](docs/archive/Speedup_Four_Stages_Report.md)
 
-- 开发经验与迁移：[docs/DEVELOPMENT\_EXPERIENCE.md](docs/DEVELOPMENT_EXPERIENCE.md)、[docs/MIGRATION.md](docs/MIGRATION.md)
+- 开发经验与迁移：[docs/DEVELOPMENT\_EXPERIENCE.md](docs/DEVELOPMENT_EXPERIENCE.md)、[docs/MIGRATION.md](docs/archive/MIGRATION.md)
 
 - XMP 字段映射（Lightroom crs / 预设互导，按 [ADR-0001](docs/adr/0001-drop-lightroom-compat.md) 将移除、走向自有 `.lrp` 格式）：[docs/XMP-MAPPING.md](docs/XMP-MAPPING.md)
 

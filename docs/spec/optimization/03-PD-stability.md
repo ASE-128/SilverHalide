@@ -5,7 +5,7 @@
 >
 > 本文档是 Silver Halide 三大优化支柱之一 **P-D（稳定与工程债）** 的细化实施文档。
 > 上游权威来源：[optimization-positioning-spec.md](../optimization-positioning-spec.md)（master、ALIGNED）、
-> 项目实时状态：[STATUS.md](../../STATUS.md)、术语见 [CONTEXT.md](../../CONTEXT.md)。
+> 项目实时状态：[STATUS.md](../../../STATUS.md)、术语见 [CONTEXT.md](../../../CONTEXT.md)。
 > 本文只描述 P-D 支柱，不扩展现有功能，也不改任何代码。
 
 ## 1. 支柱目标

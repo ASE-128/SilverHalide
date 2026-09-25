@@ -5,9 +5,9 @@
 > Last updated: 2026-09-24
 >
 > 本文档是 **P-B 离线 AI** 支柱下 **B-2「导入批量 AI 预分级」** 的里程碑节点细化。
-> 承接父文档：[02-PB-offline-ai.md](../02-PB-offline-ai.md)（B-2 能力定义与接线点）、
-> [00-ROADMAP.md](../00-ROADMAP.md)（Phase 3 · P-B）。上游定义一律以
-> [optimization-positioning-spec.md](../../optimization-positioning-spec.md)（master）为准。
+> 承接父文档：[02-PB-offline-ai.md](../../02-PB-offline-ai.md)（B-2 能力定义与接线点）、
+> [00-ROADMAP.md](../../00-ROADMAP.md)（Phase 3 · P-B）。上游定义一律以
+> [optimization-positioning-spec.md](../../../optimization-positioning-spec.md)（master）为准。
 
 ## 1. 能力定义（转述父文档，不新增承诺）
 

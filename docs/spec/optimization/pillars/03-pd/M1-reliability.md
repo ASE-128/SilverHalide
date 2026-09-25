@@ -25,7 +25,7 @@ M1 是 P-D 稳定支柱下两个实施节点中的**第一节点**，收敛 03-P
 | S1 崩溃 / 泄漏 | 任意 SIGSEGV / 断言触发点定位与修复；热点路径 RAII 审计；退出/异常路径释放路径复核；长跑内存单调上涨判据建立 | S-r-01（ORT DLL 误加载触发的 SIGSEGV，属构建/部署隔离，不是改测试绕过） |
 | S1 泄漏 | 热点路径（解码 / 渲染 / 缓存 / 目录写库）长跑内存曲线不再单调上涨 | — |
 | S3 flaky | 消灭运行间非确定性；阈值类断言给足余量或改确定性参考；环境隔离（DLL 部署与搜索顺序） | S-r-02（`TestRawDecoder.cpp:556` R-08 embedded-ICC 断言，Δ~0.001–0.019 与阈值 0.02 过近） |
-| 回归门槛 | 每次 S1/S3 修复的回归测试登记 [tests/CMakeLists.txt](../../../../tests/CMakeLists.txt)，纳入 headless 全量回归 | §5 新增回归测试登记 |
+| 回归门槛 | 每次 S1/S3 修复的回归测试登记 [tests/CMakeLists.txt](../../../../../tests/CMakeLists.txt)，纳入 headless 全量回归 | §5 新增回归测试登记 |
 
 ### 2.2 Out of scope（本节点不承接）
 
@@ -74,14 +74,14 @@ M1 是 P-D 稳定支柱下两个实施节点中的**第一节点**，收敛 03-P
   不得出现假卡死/退出崩溃。
 - **连续零随机失败**：被判定为稳定的 S1/S3 用例，连续 N 次（建议 ≥3）零随机失败后方可从"待稳定"转绿。
 - **新增回归测试登记**：每次 S1/S3 修复对应回归测试登记到
-  [tests/CMakeLists.txt](../../../../tests/CMakeLists.txt)，纳入 headless 全量回归。
+  [tests/CMakeLists.txt](../../../../../tests/CMakeLists.txt)，纳入 headless 全量回归。
 
 ## 6. 关联文档
 
 - 父文档（支柱细化）：[03-PD-stability.md](../../03-PD-stability.md)
 - 父文档（阶段路线图）：[00-ROADMAP.md](../../00-ROADMAP.md)
 - 上游权威来源（master 定位）：[optimization-positioning-spec.md](../../../optimization-positioning-spec.md)
-- 实时项目状态：[STATUS.md](../../../STATUS.md)
+- 实时项目状态：[STATUS.md](../../../../../STATUS.md)
 
 ## 7. Acceptance criteria（二值、可验证）
 
@@ -94,6 +94,6 @@ M1 是 P-D 稳定支柱下两个实施节点中的**第一节点**，收敛 03-P
 | M1-AC-3 | S1：S-r-01 两个输出目录（Release/Debug）均已部署 ORT 1.23.0 DLL，`TestAiInference.cpp:149` 不再误加载系统旧 DLL | 通过/未达 |
 | M1-AC-4 | S3：R-08 ICC 断言（S-r-02）改为确定性 / 有余量后，**连续 ≥3 次 headless 全量零随机失败** | 通过/未达 |
 | M1-AC-5 | 硬门槛：**全量 headless 全绿 + GUI 冒烟 `SMOKE_EXIT=0`** | 通过/未达 |
-| M1-AC-6 | 每次 S1/S3 修复的回归测试已登记 [tests/CMakeLists.txt](../../../../tests/CMakeLists.txt) | 通过/未达 |
+| M1-AC-6 | 每次 S1/S3 修复的回归测试已登记 [tests/CMakeLists.txt](../../../../../tests/CMakeLists.txt) | 通过/未达 |
 
 > 约定：N（连续绿运行次数）取 ≥3；修复项不得带出回归覆盖范围。

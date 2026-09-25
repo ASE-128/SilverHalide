@@ -26,7 +26,7 @@ M2 是 P-D 稳定支柱下两个实施节点中的**第二节点**，收敛 03-P
 | S2 并发 / 竞态 | 事件线程异常回退路径长期保持健壮；共享状态并发访问审计（`atomic` / `busy_timeout`） | S-r-04（FolderMonitor 事件线程异常退出 wake 恢复轮询 / D3D11 blur 负尺寸，已修，防回退） |
 | S2 竞态回归 | 以并发 / 切图 / 取消时序回归测试锁定生命周期契约，连续 N 次无竞态失败 | §4.1 新增/保留回归测试 |
 | S4 目录并发 / 大库 | 超万张目录并发导入/预览写库无数据漂移；智能收藏夹全表刷新后台化；UI 线程长任务剔除 | S-r-07（全景无预览 UI 线程解码 / 智能收藏夹阻塞式全表刷新） |
-| 回归门槛 | 每次 S2/S4 修复的回归测试登记 [tests/CMakeLists.txt](../../../../tests/CMakeLists.txt)，纳入 headless 全量回归 | §5 新增回归测试登记 |
+| 回归门槛 | 每次 S2/S4 修复的回归测试登记 [tests/CMakeLists.txt](../../../../../tests/CMakeLists.txt)，纳入 headless 全量回归 | §5 新增回归测试登记 |
 
 ### 2.2 Out of scope（本节点不承接）
 
@@ -76,14 +76,14 @@ M2 是 P-D 稳定支柱下两个实施节点中的**第二节点**，收敛 03-P
   不得出现假卡死/退出崩溃。
 - **连续零随机失败**：被判定为稳定的 S2/S4 用例，连续 N 次（建议 ≥3）零随机失败后方可从"待稳定"转绿。
 - **新增回归测试登记**：每次 S2/S4 修复对应回归测试登记到
-  [tests/CMakeLists.txt](../../../../tests/CMakeLists.txt)，纳入 headless 全量回归。
+  [tests/CMakeLists.txt](../../../../../tests/CMakeLists.txt)，纳入 headless 全量回归。
 
 ## 6. 关联文档
 
 - 父文档（支柱细化）：[03-PD-stability.md](../../03-PD-stability.md)
 - 父文档（阶段路线图）：[00-ROADMAP.md](../../00-ROADMAP.md)
 - 上游权威来源（master 定位）：[optimization-positioning-spec.md](../../../optimization-positioning-spec.md)
-- 实时项目状态：[STATUS.md](../../../STATUS.md)
+- 实时项目状态：[STATUS.md](../../../../../STATUS.md)
 
 ## 7. Acceptance criteria（二值、可验证）
 
@@ -96,6 +96,6 @@ M2 是 P-D 稳定支柱下两个实施节点中的**第二节点**，收敛 03-P
 | M2-AC-3 | S4：打开 ≥1 万张目录并发导入/预览场景，无明显 werror、无数据漂移 | 通过/未达 |
 | M2-AC-4 | S4：大库智能收藏夹刷新 / 全景解码不再阻塞 UI 线程（后台化/批量化落地） | 通过/未达 |
 | M2-AC-5 | 硬门槛：**全量 headless 全绿 + GUI 冒烟 `SMOKE_EXIT=0`** | 通过/未达 |
-| M2-AC-6 | 每次 S2/S4 修复的回归测试已登记 [tests/CMakeLists.txt](../../../../tests/CMakeLists.txt) | 通过/未达 |
+| M2-AC-6 | 每次 S2/S4 修复的回归测试已登记 [tests/CMakeLists.txt](../../../../../tests/CMakeLists.txt) | 通过/未达 |
 
 > 约定：N（连续绿运行次数）取 ≥3；修复项不得带出回归覆盖范围。

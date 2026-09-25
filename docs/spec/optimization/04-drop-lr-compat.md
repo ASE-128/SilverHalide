@@ -3,7 +3,7 @@
 > Status: DRAFT
 > Last updated: 2026-09-22
 >
-> 本专项落实 [ADR-0001](../adr/0001-drop-lightroom-compat.md) 的读+写均移除决策，
+> 本专项落实 [ADR-0001](../../adr/0001-drop-lightroom-compat.md) 的读+写均移除决策，
 > 是 docs/spec/optimization-positioning-spec.md（In scope / Assumptions）的执行落地文档。
 > 本文纯文档，不改任何代码。
 
@@ -14,7 +14,7 @@
 - 写侧：不再向 Lightroom 的 crs 命名空间 / XMP sidecar / LR 预设导出任何数据。
 - 读侧：不再识别 LR 预设 `.xmp` / `.lrcat` / LR sidecar / crs 字段映射。
 - 产品数据契约由自有 `.lrp` 预设与自有 sidecar / 目录体系自洽；Master 文档
-  [optimization-positioning-spec.md](optimization-positioning-spec.md) 的 Assumption 已声明
+  [optimization-positioning-spec.md](../optimization-positioning-spec.md) 的 Assumption 已声明
   "旧 LR 产物不再识别"。
 
 ## 2. 移除范围

@@ -8,7 +8,7 @@
 > - 定位 master：[optimization-positioning-spec.md](../optimization-positioning-spec.md)（P-B 章节、AC-2）
 > - 既有 AI 基建：[competitive-optimization-implementation-spec.md](../competitive-optimization-implementation-spec.md)
 >   （P1-1 DirectML、P2-3 AI 蒙版扩展、§8 编码/文档约定）
-> - 术语：[CONTEXT.md](../../CONTEXT.md)
+> - 术语：[CONTEXT.md](../../../CONTEXT.md)
 
 ## 1. 支柱目标
 

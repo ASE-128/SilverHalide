@@ -4,9 +4,9 @@
 > Milestone: LR M1
 > Last updated: 2026-09-24
 >
-> 本里程碑落实 [ADR-0001](../../adr/0001-drop-lightroom-compat.md) 与
-> [04-drop-lr-compat.md](../04-drop-lr-compat.md) 中 **读取侧（Read）** 的移除，
-> 是 [00-ROADMAP.md](../00-ROADMAP.md) Phase 4「自成体系（LR 移除落地）」在读方向上的拆解节点。
+> 本里程碑落实 [ADR-0001](../../../../adr/0001-drop-lightroom-compat.md) 与
+> [04-drop-lr-compat.md](../../04-drop-lr-compat.md) 中 **读取侧（Read）** 的移除，
+> 是 [00-ROADMAP.md](../../00-ROADMAP.md) Phase 4「自成体系（LR 移除落地）」在读方向上的拆解节点。
 > 纯文档，不改任何代码。
 
 ## 1. 结论声明
@@ -14,7 +14,7 @@
 与 ADR-0001 保持一致：**Lightroom 兼容的读取能力整体移除**。本应用不再识别任何 LR
 数据产物作为输入契约——不导入 LR 预设，不解析 crs 字段映射，不读取 LR sidecar。
 产品数据契约由自有 `.lrp` 预设与自有 sidecar / 目录体系（`.shcat` 目录即库）自洽演进
-（见 master 定位 [optimization-positioning-spec.md](../../optimization-positioning-spec.md) 的
+（见 master 定位 [optimization-positioning-spec.md](../../../optimization-positioning-spec.md) 的
 In scope / Assumptions：旧 LR 产物不再识别）。
 
 ## 2. 移除范围（读取侧）
@@ -57,11 +57,11 @@ M1 先落地读取类用例的删除点）。
 
 ## 5. 关联文档与约束
 
-- Master 定位：[optimization-positioning-spec.md](../../optimization-positioning-spec.md)
+- Master 定位：[optimization-positioning-spec.md](../../../optimization-positioning-spec.md)
   （In scope / Assumptions：旧 LR 产物不再识别）。
-- 决策：[ADR-0001](../../adr/0001-drop-lightroom-compat.md)（读+写均移除）。
-- 落点子：父文档 [04-drop-lr-compat.md](../04-drop-lr-compat.md) §2.2 / §3 表格。
-- 路线图：[00-ROADMAP.md](../00-ROADMAP.md) Phase 4 与方向级 AC-3 / AC-4。
+- 决策：[ADR-0001](../../../../adr/0001-drop-lightroom-compat.md)（读+写均移除）。
+- 落点子：父文档 [04-drop-lr-compat.md](../../04-drop-lr-compat.md) §2.2 / §3 表格。
+- 路线图：[00-ROADMAP.md](../../00-ROADMAP.md) Phase 4 与方向级 AC-3 / AC-4。
 - 配对里程碑：[M2-remove-write.md](M2-remove-write.md)（写方向并集）。
 
 ## 6. Acceptance criteria（二值、可验证）
@@ -77,6 +77,6 @@ M1 先落地读取类用例的删除点）。
 ## 7. 风险与回退
 
 - 与 04 文档一致：读完移除后旧 LR 预设/目录/sidecar 无法再被识别；一次性迁移/引导方案
-  （04 §5）/[spec Open questions](../../optimization-positioning-spec.md) 需产品决策先行。
+  （04 §5）/[spec Open questions](../../../optimization-positioning-spec.md) 需产品决策先行。
 - 回退：删除/改造的关键文件保留在 git 历史，必要时 revert 重建并重新验证 XMP/crs 匹配
   与 golden sample 测试（见 04 §6）。

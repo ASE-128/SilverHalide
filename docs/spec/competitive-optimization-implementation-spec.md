@@ -2,11 +2,11 @@
 
 > 上游输入：
 >
-> - 计划：[.trae/documents/competitive-optimization-plan.md](../../../../.trae/documents/competitive-optimization-plan.md)（Phase 1 已探查确认代码位置）
+> - 计划：[optimization-positioning-spec.md](optimization-positioning-spec.md)（定位与优化路线图；Phase 1 已探查确认代码位置）
 >
 > - 报告：`SilverHalide_竞品比较分析报告.md` v2.0（2026-09-03）第 6 节"三波改进 + 技术债"、第 5.2 节"不做项"
 >
-> - 相关：[docs/spec/perf-m1-m5-implementation-spec.md](perf-m1-m5-implementation-spec.md)（SIMD 边界交叉引用）
+> - 相关：[docs/archive/perf-m1-m5-implementation-spec.md](../archive/perf-m1-m5-implementation-spec.md)（SIMD 边界交叉引用）
 >   本文档将报告第 6 节工程化为**可执行的实施路径**与**可验证的验收标准**。
 >   编号约定：P1=第一波高性价比、P2=第二波核心能力、P3=第三波体验打磨、T=技术债（不复用 M1–M5 编号）。
 
