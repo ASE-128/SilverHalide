@@ -255,6 +255,52 @@ public:
     // low saturation boost). Returns defaults when the image is empty.
     static Adjustments autoAdjust(const ImageBuffer& linear);
 
+    // --- B-1 AI auto-develop suggestion (non-destructive, pure statistics) --
+    /**
+     * @brief A normalized crop rectangle (values in [0,1], left<right, top<bottom).
+     *
+     * It is a *suggestion* only: the pipeline currently has no crop-rendering
+     * stage, so callers that apply an auto-develop result write exposure /
+     * contrast / white-balance to the parameter stack and treat the crop box
+     * as UI guidance. Kept separate from Adjustments on purpose so this
+     * suggestion does not perturb the parameter-stack hash / serialization.
+     */
+    struct CropRect {
+        float left = 0.0f;
+        float top = 0.0f;
+        float right = 1.0f;
+        float bottom = 1.0f;
+    };
+
+    struct AutoDevelopSuggestion {
+        double exposure = 0.0;      // stops
+        double contrast = 0.0;      // -100..+100
+        double temperature = 0.0;   // -100..+100
+        double tint = 0.0;          // -100..+100
+        CropRect crop;              // suggestion only (see CropRect)
+        bool hasCrop = false;
+    };
+
+    /**
+     * @brief One-shot auto-develop suggestion (B-1).
+     *
+     * Combines several lightweight statistics into a single parameter
+     * recommendation: exposure (mean -> mid-gray), contrast (tonal span),
+     * white-balance (grey-band channel means via estimateWhiteBalance), and a
+     * conservative content-aware crop box. No new pixels are produced and the
+     * input buffer is never mutated. `temperature`/`tint` use the same
+     * -100..+100 slider domain as Adjustments.
+     *
+     * @param linear Linear ProPhoto buffer to analyse (may be downsampled by
+     *               the caller to keep analysis cheap; F32 preferred).
+     * @return The recommended fields; `hasCrop` is false when the content does
+     *         not justify a crop (or the image is empty / degenerate).
+     *
+     * @note Deterministic; callable from any thread. Non-destructive contract.
+     */
+    static AutoDevelopSuggestion autoDevelop(const ImageBuffer& linear);
+
+
     // White-balance estimate for a single linear-RGB sample (ProPhoto, [0,1]).
     // Both fields use the same units as Adjustments::temperature / tint (the
     // -100..+100 slider domain); 0 means the sample is already neutral.

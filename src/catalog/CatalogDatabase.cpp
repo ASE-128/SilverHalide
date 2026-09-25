@@ -572,7 +572,7 @@ bool registerVecModule(sqlite3* db) {
 // upgrades a catalog one step and is recorded in `schema_migrations`. All SQL
 // migrations run inside a single transaction and either fully apply or fully
 // roll back.
-constexpr int kSchemaVersion = 4;
+constexpr int kSchemaVersion = 5;
 
 } // namespace
 
@@ -819,6 +819,7 @@ bool CatalogDatabase::migrateSqlVersion(int v, std::string* errOut) {
         case 2: ok = migrateV2(errOut); break;
         case 3: ok = migrateV3(errOut); break;
         case 4: ok = migrateV4(errOut); break;
+        case 5: ok = migrateV5(errOut); break;
         default: ok = false; break;
     }
 
@@ -1203,6 +1204,15 @@ bool CatalogDatabase::migrateV4(std::string* errOut) {
     return true;
 }
 
+bool CatalogDatabase::migrateV5(std::string* errOut) {
+    // P-B B-2 import pregrade markers. `pregrade_score` defaults to -1 so
+    // "not yet pregraded" is distinguishable from a genuine 0 score.
+    migrateEnsureColumn("pregrade_has_subject", "INTEGER NOT NULL DEFAULT 0");
+    migrateEnsureColumn("pregrade_score", "INTEGER NOT NULL DEFAULT -1");
+    migrateEnsureColumn("pregrade_auto", "INTEGER NOT NULL DEFAULT 0");
+    return true;
+}
+
 // Exports remaining legacy preview rows (previews_old) to disk files and clears
 // them. Each row commits independently so an interrupted run only loses one
 // export and is resumed on the next open(); the migration is resumable.
@@ -1562,6 +1572,48 @@ bool CatalogDatabase::setManaged(int64_t id, bool isManaged) {
     sqlite3_bind_int(s.stmt, 1, isManaged ? 1 : 0);
     sqlite3_bind_int64(s.stmt, 2, id);
     return s.step() == SQLITE_DONE;
+}
+
+bool CatalogDatabase::setPregrade(int64_t id, bool hasSubject, int score,
+                                  bool suggestAuto) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return false;
+    const int sc = std::clamp(score, 0, 100);
+    Stmt s(db_, "UPDATE images SET pregrade_has_subject = ?1, pregrade_score = ?2, "
+                "pregrade_auto = ?3 WHERE id = ?4;",
+           &stmtCache_);
+    if (!s.ok()) {
+        lastError_ = sqlite3_errmsg(db_);
+        return false;
+    }
+    sqlite3_bind_int(s.stmt, 1, hasSubject ? 1 : 0);
+    sqlite3_bind_int(s.stmt, 2, sc);
+    sqlite3_bind_int(s.stmt, 3, suggestAuto ? 1 : 0);
+    sqlite3_bind_int64(s.stmt, 4, id);
+    return s.step() == SQLITE_DONE;
+}
+
+std::optional<PregradeRecord>
+CatalogDatabase::getPregrade(int64_t id) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!db_)
+        return std::nullopt;
+    Stmt s(db_, "SELECT pregrade_has_subject, pregrade_score, pregrade_auto "
+                "FROM images WHERE id = ?1;", &stmtCache_);
+    if (!s.ok())
+        return std::nullopt;
+    sqlite3_bind_int64(s.stmt, 1, id);
+    if (s.step() != SQLITE_ROW)
+        return std::nullopt;
+    const int storedScore = sqlite3_column_int(s.stmt, 1);
+    if (storedScore < 0)
+        return std::nullopt;  // not yet pregraded
+    PregradeRecord r;
+    r.hasSubject = sqlite3_column_int(s.stmt, 0) != 0;
+    r.score = storedScore;
+    r.suggestAuto = sqlite3_column_int(s.stmt, 2) != 0;
+    return r;
 }
 
 bool CatalogDatabase::removeImage(int64_t id) {

@@ -36,6 +36,7 @@
 #include "catalog/ThumbnailCache.h"
 
 namespace lrc {
+class AiInferenceEngine;
 class CatalogDatabase;
 class ColorManager;
 class Pipeline;
@@ -48,6 +49,7 @@ public:
     ImportWorker(lrc::CatalogDatabase& catalog, lrc::ThumbnailCache& cache,
                  lrc::RawDecoder& decoder, lrc::Pipeline& pipeline,
                  std::shared_ptr<const lrc::ColorManager> colorManager,
+                 lrc::AiInferenceEngine* aiEngine = nullptr,
                  QObject* parent = nullptr);
 
     /**
@@ -97,6 +99,12 @@ signals:
      * @brief Non-fatal conversion failure (the RAW is still imported as-is).
      */
     void importWarning(const QString& message);
+    /**
+     * @brief A per-image pregrade marker was produced on the worker thread and
+     *        persisted to the catalog (B-2). Delivered after `finishedImport`.
+     *        `score` is in [0,100]; `hasSubject`/`suggestAuto` are booleans.
+     */
+    void pregradeReady(int imageId, bool hasSubject, int score, bool suggestAuto);
 
 private:
     lrc::CatalogDatabase& catalog_;
@@ -104,6 +112,10 @@ private:
     lrc::RawDecoder& decoder_;
     lrc::Pipeline& pipeline_;
     std::shared_ptr<const lrc::ColorManager> cm_;
+    // Optional shared AI engine for the rmbg2-subject pregrade path. May be
+    // null: PregradeAnalyzer then uses its deterministic saliency fallback so a
+    // missing/unloadable model never blocks the batch.
+    lrc::AiInferenceEngine* aiEngine_ = nullptr;
     std::atomic<bool> abort_{false};
     // Serializes the on-disk uniqueness check + rename across the concurrent
     // Stage-1 tasks so a batch can never claim the same name twice.

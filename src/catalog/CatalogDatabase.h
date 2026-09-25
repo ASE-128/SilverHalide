@@ -57,6 +57,13 @@ struct ImageRecord {
     std::string lens;      // lens model string (empty until populated)
 };
 
+// P-B B-2 import pregrade marker (persisted on the images row).
+struct PregradeRecord {
+    bool hasSubject = false;  // foreground saliency detected
+    int score = 0;            // quality score in [0,100]
+    bool suggestAuto = false; // tonal stats recommend B-1 auto-develop
+};
+
 // A named collection (album / favorites) with a user-facing display order.
 struct Collection {
     int64_t id = 0;
@@ -216,6 +223,29 @@ public:
     bool setThumbnailPath(int64_t id, const std::string& thumbnailPath);
     bool setFullResPath(int64_t id, const std::string& fullresPath);
     bool setManaged(int64_t id, bool isManaged);
+
+    // --- P-B B-2 import pregrade markers ------------------------------------
+    /**
+     * @brief Persists the batch-pregrade marker for an image (B-2).
+     *
+     * @param id          Image row id.
+     * @param hasSubject  Foreground-saliency flag.
+     * @param score       Deterministic quality score in [0,100] (clamped).
+     * @param suggestAuto Whether tonal stats recommend B-1 auto-develop.
+     * @return true on success, false when the image is absent / write failed.
+     *
+     * @note score is clamped into [0,100]; the stored default for "not yet
+     *       pregraded" is -1 (see migrateV5).
+     */
+    bool setPregrade(int64_t id, bool hasSubject, int score, bool suggestAuto);
+    /**
+     * @brief Reads the pregrade marker for an image.
+     *
+     * @return nullopt when the image is absent or has not been pregraded
+     *         (stored score == -1).
+     */
+    std::optional<PregradeRecord> getPregrade(int64_t id) const;
+
     bool removeImage(int64_t id);
     std::vector<ImageRecord> listImages() const;
     // Filtered listing (empty/default filter returns everything).
@@ -502,6 +532,7 @@ private:
     bool migrateV2(std::string* errOut);
     bool migrateV3(std::string* errOut);
     bool migrateV4(std::string* errOut);
+    bool migrateV5(std::string* errOut);
     // Migration-scoped ALTER TABLE ADD COLUMN on images / an arbitrary table,
     // used only from within a migration transaction.
     void migrateEnsureColumn(const char* column, const char* decl);

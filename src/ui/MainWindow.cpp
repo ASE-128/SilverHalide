@@ -1041,7 +1041,7 @@ void MainWindow::startWorkers() {
 
     importThread_ = new QThread(this);
     importWorker_ = new ImportWorker(*catalog_, *thumbnailCache_, decoder_,
-                                     *pipeline_, colorManager_);
+                                     *pipeline_, colorManager_, aiEngine_.get());
     importWorker_->moveToThread(importThread_);
     connect(importThread_, &QThread::finished, importWorker_,
             &QObject::deleteLater);
@@ -1056,6 +1056,8 @@ void MainWindow::startWorkers() {
             &MainWindow::onImportFinished);
     connect(importWorker_, &ImportWorker::importWarning, this,
             &MainWindow::onImportWarning);
+    connect(importWorker_, &ImportWorker::pregradeReady, this,
+            &MainWindow::onPregradeReady);
     importThread_->start();
 
     // A tiny dedicated thread for lazy filmstrip-thumbnail decode. The hub QObject
@@ -2559,6 +2561,16 @@ void MainWindow::onImportFinished(int addedCount) {
     refreshFilmstrip();
     statusBar()->showMessage(
         tr("导入完成：%1 张图片").arg(addedCount), 4000);
+}
+
+void MainWindow::onPregradeReady(int imageId, bool hasSubject, int score,
+                                 bool suggestAuto) {
+    Q_UNUSED(suggestAuto);
+    // Reflect the marker on every filmstrip row sharing this image id (a master
+    // and its virtual copies share one imageId). The badge is non-destructive:
+    // it only tags the thumbnail, never touches the pixels or the RAW.
+    if (filmstrip_)
+        filmstrip_->setPregraded(imageId, hasSubject, score);
 }
 
 void MainWindow::onImportWarning(const QString& message) {

@@ -193,6 +193,12 @@ private slots:
     void onImportProgress(int done, int total);
     void onImportFinished(int addedCount);
     void onImportWarning(const QString& message);
+    /**
+     * @brief A B-2 pregrade marker arrived for `imageId`; update the filmstrip
+     *        badge for every row sharing that image id.
+     */
+    void onPregradeReady(int imageId, bool hasSubject, int score,
+                         bool suggestAuto);
     void onExportFinished(bool ok, const QString& message);
     void onHdrProgress(int done, int total);
     void onHdrFinished(bool ok, const QString& message, const QString& outPath);

@@ -555,13 +555,29 @@ cmake --build build_gui --config Release
   [docs/spec/optimization-positioning-spec.md](docs/spec/optimization-positioning-spec.md)，
   阶段路线图见 [00-ROADMAP.md](docs/spec/optimization/00-ROADMAP.md)。三大支柱优先级
   **P-A 性能极致 > P-B 离线 AI > P-D 稳定**；ADR-0001 弃 LR 兼容（读+写），数据契约 `.lrp`/`.shcat` 自洽。
-  当前 **P-A（性能极致）进行中**：Milestone 节点见
+  当前 **P-A（性能极致）引擎层 headless 验收已落地并提交（2026-09-25）**：Milestone 节点见
   [pillars/01-pa/](docs/spec/optimization/pillars/01-pa/)（M1 1:1 零等待 / M2 编辑手感 / M3 内存极致 / M4 大目录），
   **引擎层 headless 验收已落地（2026-09-25）**：新增 `tests/TestPerfAnchors.cpp`（合成 8000×6000 F32：
   B-2 1920 精帧 min≈99ms、B-1 全尺寸渲染引擎段≈514ms、D-2 回落≈688MB 可重复），登记 M1/M2/M3 实测记录；
   真机锚点（热/冷 1:1、真机精帧、主线程帧、单图 ≤1.2GB 峰值）登记 **真机待验**，headless 全量 482 用例转绿。
   其余支柱节点见 [00-ROADMAP 索引](docs/spec/optimization/00-ROADMAP.md)。P-A 量化锚点：B-1 热 50MP 1:1 ≤175ms、
   B-2 松手→精帧 ≤80ms、B-3 主线程 ≤16ms/帧、D-1 峰值 ≤1.2GB、D-2 切图回落 ≤400MB；真机锚点待 GPU 环境实测。
+
+- **P-B（离线 AI）实施落地（2026-09-25，工作区未提交）**：spec 见
+  [docs/spec/optimization/02-PB-offline-ai.md](docs/spec/optimization/02-PB-offline-ai.md)，
+  Milestone 节点见
+  [pillars/02-pb/](docs/spec/optimization/pillars/02-pb/)（M1 自动出片 / M2 批量预分级）。
+  本轮进入 **P-B（离线 AI）实施**：B-1 本地 AI 自动出片辅助（曝光/对比/WB/裁剪建议 + 1 键应用到参数堆栈，
+  非生成式、走非破坏性路径）+ B-2 导入批量 AI 预分级（后台跑既有模型去噪/主体/质量分 + 胶片栏标志）。
+  验收基调**能跑 + headless `[ai]` 门控单测绿**，不设吞吐/耗时性能门槛；复用 `ModelManager` manifest + SHA256、
+  `AiInference`（DirectML → CPU 回退）。B-3/B-4 为 optional，不作承诺。
+  实施进度（引擎/目录/UI 层已落地）：`Pipeline::autoDevelop`（曝光/对比/WB + 内容感知裁剪包围盒，
+  裁剪仅作建议、不写参数堆栈）+ `PregradeAnalyzer`（rmbg2-subject 主体分割，缺模型走确定性中心显著性兜底）+
+  `CatalogDatabase` V5 迁移（`pregrade_has_subject/score/auto` 三列）+ `setPregrade/getPregrade`；headless 门控单测
+  `[autodevelop]` 9 例、`[pregrade]` 7 例、catalog 预分级读回全绿。UI：ImportWorker 导入完成后再后台串行对每张图
+  解码标准预览跑预分级 → `setPregrade` 落库 + `pregradeReady` 信号 → Filmstrip 打「AI」角标（有主体青色/无灰）；
+  DevelopPanel「自动」按钮沿用既有路径，merge 了 `autoDevelop` 的 contrast 建议进参数堆栈（可撤销/进历史）。
+  裁剪字段因管线当前无实际 crop 渲染，按计划偏差仅作建议值（不扩散重构）。GUI 构建链接通过。
 
 - **竞品对齐优化**：当前任务文件为
   [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md)。

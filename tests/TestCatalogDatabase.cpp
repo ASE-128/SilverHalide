@@ -139,6 +139,33 @@ TEST_CASE("Catalog: rating and label persist", "[catalog]") {
     REQUIRE(rec->labelColor == 2);
 }
 
+TEST_CASE("Catalog: pregrade marker persists and round-trips", "[catalog]") {
+    // P-B B-2: setPregrade 落库后 getPregrade 可读回; 未预分级(默认 -1)返回 nullopt.
+    const auto path = makeTempDb();
+    CatalogDatabase db(path);
+    REQUIRE(db.open());
+    const int64_t id = db.addImage("/photos/pregrade.arw", "");
+    REQUIRE(db.getPregrade(id) == std::nullopt);  // default: not pregraded
+
+    REQUIRE(db.setPregrade(id, true, 87, true));
+    auto rec = db.getPregrade(id);
+    REQUIRE(rec.has_value());
+    REQUIRE(rec->hasSubject);
+    REQUIRE(rec->score == 87);
+    REQUIRE(rec->suggestAuto);
+
+    // score 越界被 clamp 进 [0,100].
+    REQUIRE(db.setPregrade(id, false, 500, false));
+    rec = db.getPregrade(id);
+    REQUIRE(rec.has_value());
+    REQUIRE(!rec->hasSubject);
+    REQUIRE(rec->score == 100);
+    REQUIRE(!rec->suggestAuto);
+
+    // 不存在的图片 -> nullopt.
+    REQUIRE(db.getPregrade(999999) == std::nullopt);
+}
+
 TEST_CASE("Catalog: folders are unique", "[catalog]") {
     const auto path = makeTempDb();
     CatalogDatabase db(path);

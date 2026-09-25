@@ -56,7 +56,10 @@ add_executable(lrc_tests
   TestSpatialBackend.cpp
   # P-A (M1-M3) — engine-layer headless acceptance: synthetic-50MP render
   # timing + process-memory sampling for the B-1/B-2/D-1/D-2 quant anchors.
-  TestPerfAnchors.cpp)
+  TestPerfAnchors.cpp
+  # P-B (offline AI) — B-1 auto-develop suggestions + B-2 batch pregrade.
+  TestAutoDevelop.cpp
+  TestPregrade.cpp)
 
 target_link_libraries(lrc_tests PRIVATE lrc_catalog Catch2::Catch2WithMain)
 # TestPerfAnchors.cpp uses GetProcessMemoryInfo (D-1/D-2 memory sampling) on

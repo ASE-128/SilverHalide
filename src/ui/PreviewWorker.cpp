@@ -834,7 +834,13 @@ void PreviewWorker::computeAutoAdjust(qint64 imageId,
         }
         linear = decoded->linear;
     }
-    emit autoAdjustReady(lrc::Pipeline::autoAdjust(*linear));
+    // B-1 auto-develop: exposure/WB come from autoAdjust; contrast (not part of
+    // autoAdjust) is taken from autoDevelop. The crop suggestion has no
+    // Adjustments field today, so it is intentionally not written back here.
+    const auto dev = lrc::Pipeline::autoDevelop(*linear);
+    lrc::Adjustments adj = lrc::Pipeline::autoAdjust(*linear);
+    adj.contrast = dev.contrast;
+    emit autoAdjustReady(adj);
 }
 
 void PreviewWorker::renderVisualization(qint64 imageId, qint64 generation,

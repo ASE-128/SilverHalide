@@ -344,6 +344,8 @@ set(LRC_ENGINE_SOURCES
   src/engine/AiDenoiseProcessor.cpp
   # --- PHASE_13: AI mask generator ---------------------------------------
   src/engine/AiMaskGenerator.cpp
+  # --- P-B (offline AI): B-2 batch pregrade analyzer ---------------------
+  src/engine/PregradeAnalyzer.cpp
   # --- PHASE_15: Soft proofing (lcms2, no AI dependency) -----------------
   src/engine/SoftProofing.cpp
   # --- PHASE_14: DuplicateDetector (pure C++, lives in app/ per spec, but

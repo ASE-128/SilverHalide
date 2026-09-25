@@ -61,19 +61,21 @@ int g_badgeCacheInserts = 0;
 // The cache key covers every input that changes the composite appearance:
 // imageId, thumbnail version (rotated by setThumbnail so a changed base image
 // never reuses a stale composite), rating, flag, colour label, collection
-// membership and -- for virtual copies -- the variant id. A virtual copy shares
-// the imageId of its master, so without variantId the two tiles would collide in
-// the cache. The "filmstrip_badge_" prefix keeps these keys from colliding with
-// any other QPixmapCache user in the process.
+// membership, the B-2 pregrade state and -- for virtual copies -- the variant
+// id. A virtual copy shares the imageId of its master, so without variantId the
+// two tiles would collide in the cache. The "filmstrip_badge_" prefix keeps
+// these keys from colliding with any other QPixmapCache user in the process.
 QString badgeCacheKey(int imageId, int thumbVersion, int rating, int flag,
-                      int labelColor, bool inCollection, int variantId) {
-    return QStringLiteral("filmstrip_badge_%1_%2_%3_%4_%5_%6_%7")
+                      int labelColor, bool inCollection, int pregradeState,
+                      int variantId) {
+    return QStringLiteral("filmstrip_badge_%1_%2_%3_%4_%5_%6_%7_%8")
         .arg(imageId)
         .arg(thumbVersion)
         .arg(rating)
         .arg(flag)
         .arg(labelColor)
         .arg(inCollection ? 1 : 0)
+        .arg(pregradeState)
         .arg(variantId);
 }
 
@@ -149,12 +151,15 @@ void drawVariantBadge(QPainter& p, int variantId) {
 // Composes the thumbnail with LR-style badges: star rating at bottom-left, a
 // flag marker at top-right, a colour-label square at bottom-right, a small
 // collection indicator at top-left and -- for virtual copies (variantId != 0) --
-// a page-fold copy badge at the bottom-right carrying the variant number. Falls
-// back to a dark placeholder when the thumbnail is not available yet. Returns
-// the finished tile as a QPixmap so the caller can wrap it in a QIcon and/or
-// hand it to QPixmapCache.
+// a page-fold copy badge at the bottom-right carrying the variant number. When
+// a B-2 pregrade marker is present (pregradeState != 0) a small "AI" tag is
+// drawn at the bottom-centre; cyan when a subject was detected, grey otherwise.
+// Falls back to a dark placeholder when the thumbnail is not available yet.
+// Returns the finished tile as a QPixmap so the caller can wrap it in a QIcon
+// and/or hand it to QPixmapCache.
 QPixmap makeBadgedIcon(const QImage& thumb, int rating, int flag,
-                       int labelColor, bool inCollection, int variantId) {
+                       int labelColor, bool inCollection, int pregradeState,
+                       int variantId) {
     QPixmap pm;
     if (thumb.isNull()) {
         pm = QPixmap(kIconWidth, kIconHeight);
@@ -225,6 +230,23 @@ QPixmap makeBadgedIcon(const QImage& thumb, int rating, int flag,
         p.fillRect(r, QColor(90, 150, 220));
         p.setPen(QColor(235, 235, 235));
         p.drawRect(r);
+    }
+
+    // B-2 pregrade "AI" tag (bottom-centre). Cyan for a detected subject,
+    // muted grey otherwise; kept clear of the rating (bottom-left) and the
+    // colour-label / copy badge (bottom-right).
+    if (pregradeState != 0) {
+        QFont aiFont = p.font();
+        aiFont.setPixelSize(9);
+        aiFont.setBold(true);
+        p.setFont(aiFont);
+        const bool hasSubject = (pregradeState == 2);
+        const QRect tag(kIconWidth - 34, kIconHeight - 16, 30, 12);
+        p.setPen(Qt::NoPen);
+        p.setBrush(hasSubject ? QColor(30, 190, 200) : QColor(120, 125, 132));
+        p.drawRoundedRect(tag, 3, 3);
+        p.setPen(QColor(250, 250, 250));
+        p.drawText(tag, Qt::AlignCenter, QStringLiteral("AI"));
     }
     return pm;
 }
@@ -503,6 +525,14 @@ void FilmstripWidget::setLabelColor(int imageId, int color) {
     }
 }
 
+void FilmstripWidget::setPregraded(int imageId, bool hasSubject, int score) {
+    pregradeSubjects_.insert(imageId, hasSubject);
+    pregradeScores_.insert(imageId, score);
+    const QVector<int> rows = rowsForImage(imageId);
+    for (int row : rows)
+        refreshIcon(row);
+}
+
 void FilmstripWidget::setCollections(const QVector<lrc::Collection>& collections) {
     collections_ = collections;
 }
@@ -587,7 +617,8 @@ void FilmstripWidget::refreshIcon(int row) {
     // in separate cache entries.
     const QString key = badgeCacheKey(
         e->imageId, thumbVersions_.value(e->imageId), e->rating, e->flag,
-        e->labelColor, !e->collectionIds.isEmpty(), e->variantId);
+        e->labelColor, !e->collectionIds.isEmpty(), pregradeState(e->imageId),
+        e->variantId);
     QPixmap cached;
     if (QPixmapCache::find(key, &cached)) {
         item->setIcon(QIcon(cached));
@@ -601,9 +632,18 @@ void FilmstripWidget::refreshIcon(int row) {
     const QImage thumb = rawThumbnail(e->imageId);
     const QPixmap pm = makeBadgedIcon(thumb, e->rating, e->flag, e->labelColor,
                                       !e->collectionIds.isEmpty(),
-                                      e->variantId);
+                                      pregradeState(e->imageId), e->variantId);
     insertBadgePixmap(key, pm);
     item->setIcon(QIcon(pm));
+}
+
+// Maps the stored B-2 pregrade marker to a badge state: 0 = none, 1 = pregraded
+// without a subject, 2 = pregraded with a detected subject.
+int FilmstripWidget::pregradeState(int imageId) const {
+    const int score = pregradeScores_.value(imageId, -1);
+    if (score < 0)
+        return 0;
+    return pregradeSubjects_.value(imageId, false) ? 2 : 1;
 }
 
 int FilmstripWidget::currentImageId() const {

@@ -25,9 +25,11 @@
 #include "catalog/LibraryManager.h"
 #include "catalog/StandardPreview.h"
 #include "catalog/ThumbnailCache.h"
+#include "engine/AiInference.h"
 #include "engine/ColorManager.h"
 #include "engine/DngConverter.h"
 #include "engine/Pipeline.h"
+#include "engine/PregradeAnalyzer.h"
 #include "engine/RawDecoder.h"
 #include "utils/RenameTemplate.h"
 
@@ -114,13 +116,14 @@ ImportWorker::ImportWorker(lrc::CatalogDatabase& catalog,
                            lrc::ThumbnailCache& cache,
                            lrc::RawDecoder& decoder, lrc::Pipeline& pipeline,
                            std::shared_ptr<const lrc::ColorManager> colorManager,
-                           QObject* parent)
+                           lrc::AiInferenceEngine* aiEngine, QObject* parent)
     : QObject(parent),
       catalog_(catalog),
       cache_(cache),
       decoder_(decoder),
       pipeline_(pipeline),
-      cm_(std::move(colorManager)) {}
+      cm_(std::move(colorManager)),
+      aiEngine_(aiEngine) {}
 
 void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
                                lrc::ImportMode mode, const QString& destRoot,
@@ -417,6 +420,7 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
             emit progress(done, total);
             continue;
         }
+        f.imageId = id;
 
         // Thumbnail preview + standard preview land in the same import
         // transaction so they commit atomically with the image row. The full-
@@ -504,4 +508,32 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
         emit importWarning(tr("%1 个文件无法转换为 DNG，已按原 RAW 导入。%2")
                                .arg(conversionFailures.load())
                                .arg(QString::fromStdString(firstError)));
+
+    // B-2 pregrade pass (background, serial). Runs *after* the import has been
+    // reported complete so the import main flow is never blocked: the worker
+    // thread stays busy here while the UI proceeds. Each committed image's
+    // stored standard preview is decoded back to a linear buffer and analyzed
+    // by PregradeAnalyzer; the marker is persisted via setPregrade and shipped
+    // to the UI as pregradeReady. A missing/unloadable model or a decode
+    // failure skips only that single image (PregradeAnalyzer already falls back
+    // to deterministic saliency when no model is attached).
+    for (auto& f : finals) {
+        if (abort_.load())
+            break;
+        if (!f.ok || f.imageId <= 0)
+            continue;
+        const int64_t id = f.imageId;
+        if (auto blob = catalog_.loadPreview(id, lrc::PreviewKind::Standard)) {
+            const auto dec = lrc::decodeStandardPreview(*blob);
+            if (dec.buf && !dec.buf->empty()) {
+                const lrc::PregradeResult r =
+                    lrc::PregradeAnalyzer::pregrade(*dec.buf, aiEngine_);
+                if (r.processed) {
+                    catalog_.setPregrade(id, r.hasSubject, r.score, r.suggestAuto);
+                    emit pregradeReady(static_cast<int>(id), r.hasSubject,
+                                       r.score, r.suggestAuto);
+                }
+            }
+        }
+    }
 }

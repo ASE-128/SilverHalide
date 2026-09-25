@@ -62,6 +62,11 @@ public:
     void setRating(int imageId, int rating);
     void setFlag(int imageId, int flag);
     void setLabelColor(int imageId, int color);
+    /**
+     * @brief Records a B-2 pregrade marker for `imageId` and repaints every row
+     *        sharing it. `score` is in [0,100]; `hasSubject` colours the badge.
+     */
+    void setPregraded(int imageId, bool hasSubject, int score);
     void setInCollection(int imageId, bool in);
     void setCollections(const QVector<lrc::Collection>& collections);
     void selectImage(int imageId);
@@ -107,6 +112,9 @@ private:
     // row instead of only the single row an imageId->row map could name.
     QVector<int> rowsForImage(int imageId) const;
     void refreshIcon(int row);
+    // B-2 pregrade badge state for `imageId`: 0 = none, 1 = pregraded without a
+    // subject, 2 = pregraded with a detected subject.
+    int pregradeState(int imageId) const;
 
     // Lazy loading: recompute the visible window (current viewport + one screen
     // of look-ahead/look-behind) and request thumbnails for any item in it that
@@ -137,4 +145,9 @@ private:
     // imageIds with an outstanding thumbnailRequested emission (dedupe: a given
     // imageId is never requested twice before its back-fill arrives).
     QSet<int> pendingThumbRequests_;
+    // B-2 pregrade markers, keyed by imageId (a master and its virtual copies
+    // share the id). Kept separate from Entry so they survive setImages().
+    // score >= 0 signals a marker is present; hasSubject colours the badge.
+    QHash<int, bool> pregradeSubjects_;
+    QHash<int, int> pregradeScores_;
 };

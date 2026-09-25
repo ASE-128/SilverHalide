@@ -3314,6 +3314,145 @@ Adjustments Pipeline::autoAdjust(const ImageBuffer& linear) {
     return out;
 }
 
+Pipeline::AutoDevelopSuggestion Pipeline::autoDevelop(const ImageBuffer& linear) {
+    AutoDevelopSuggestion out;
+    if (linear.empty())
+        return out;
+
+    ImageBufferPtr f32 = (linear.format() == PixelFormat::F32)
+                             ? std::make_shared<ImageBuffer>(linear)
+                             : linear.toF32();
+    const float* d = reinterpret_cast<const float*>(f32->data().data());
+    const int W = f32->width();
+    const int H = f32->height();
+    const size_t n = static_cast<size_t>(W) * H;
+    if (n == 0)
+        return out;
+
+    // ---- exposure / contrast / white-balance (shared with autoAdjust) ------
+    double sum = 0.0;
+    int hist[256] = {};
+    for (size_t i = 0; i < n; ++i) {
+        const float luma = rec709Luma(d[i * 3], d[i * 3 + 1], d[i * 3 + 2]);
+        sum += luma;
+        hist[std::clamp(static_cast<int>(luma * 255.0f), 0, 255)]++;
+    }
+    const double mean = sum / static_cast<double>(n);
+
+    const size_t p5n = std::max<size_t>(1, static_cast<size_t>(0.05 * n));
+    const size_t p95n = std::max<size_t>(1, static_cast<size_t>(0.95 * n));
+    size_t acc = 0;
+    int lo = 0;
+    for (int bin = 0; bin < 256; ++bin) {
+        acc += static_cast<size_t>(hist[bin]);
+        if (acc >= p5n) { lo = bin; break; }
+    }
+    acc = 0;
+    int hi = 255;
+    for (int bin = 0; bin < 256; ++bin) {
+        acc += static_cast<size_t>(hist[bin]);
+        if (acc >= p95n) { hi = bin; break; }
+    }
+    const double span = (hi - lo) / 255.0;
+
+    // Exposure: pull the mean toward mid-gray, dead-zone under ~0.05 stops.
+    const double desiredExp =
+        std::clamp(std::log2(0.18 / std::max(mean, 1e-6)), -3.0, 3.0);
+    if (std::abs(desiredExp) >= 0.05)
+        out.exposure = desiredExp;
+    // Contrast: compressed tonal span gets a boost, blown-out span is tamed.
+    const double desiredCont = std::clamp((0.45 - span) * 140.0, -50.0, 50.0);
+    if (std::abs(desiredCont) >= 2.0)
+        out.contrast = desiredCont;
+
+    // White balance from grey-band channel means (same path as autoAdjust).
+    double mr = 0.0, mg = 0.0, mb = 0.0;
+    size_t awbCnt = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const float luma = rec709Luma(d[i * 3], d[i * 3 + 1], d[i * 3 + 2]);
+        const int bin = std::clamp(static_cast<int>(luma * 255.0f), 0, 255);
+        if (bin >= lo && bin <= hi) {
+            mr += d[i * 3];
+            mg += d[i * 3 + 1];
+            mb += d[i * 3 + 2];
+            ++awbCnt;
+        }
+    }
+    if (awbCnt > 0) {
+        const double inv = 1.0 / static_cast<double>(awbCnt);
+        const WhiteBalanceEstimate est = estimateWhiteBalance(
+            static_cast<float>(mr * inv), static_cast<float>(mg * inv),
+            static_cast<float>(mb * inv));
+        if (std::abs(est.temperature) > 2.0)
+            out.temperature = std::clamp(est.temperature, -100.0, 100.0);
+        if (std::abs(est.tint) > 2.0)
+            out.tint = std::clamp(est.tint, -100.0, 100.0);
+    }
+
+    // ---- conservative content-aware crop box (suggestion only) -------------
+    // Downsample the luma to a coarse grid, score each cell by local gradient
+    // magnitude, and take the bounding box that contains the strong-interest
+    // cells, expanded by a small margin. A near-full box means there is nothing
+    // worth cropping, so hasCrop stays false.
+    constexpr int kGrid = 64;
+    const int gw = std::max(2, std::min(kGrid, W));
+    const int gh = std::max(2, std::min(kGrid, H));
+    const size_t gridN = static_cast<size_t>(gw) * gh;
+    std::vector<float> interest(gridN, 0.0f);
+    float maxI = 0.0f;
+    for (int cy = 0; cy < gh; ++cy) {
+        const int y = (H <= 1) ? 0 : std::min(H - 1, static_cast<int>(
+                            (cy + 0.5f) * static_cast<float>(H) / gh));
+        for (int cx = 0; cx < gw; ++cx) {
+            const int x = (W <= 1) ? 0 : std::min(W - 1, static_cast<int>(
+                            (cx + 0.5f) * static_cast<float>(W) / gw));
+            const int xm = std::max(0, x - 1), xp = std::min(W - 1, x + 1);
+            const int ym = std::max(0, y - 1), yp = std::min(H - 1, y + 1);
+            const auto lum = [&](int px, int py) {
+                const size_t pi = static_cast<size_t>(py) * W + px;
+                return rec709Luma(d[pi * 3], d[pi * 3 + 1], d[pi * 3 + 2]);
+            };
+            const float gx = lum(xp, y) - lum(xm, y);
+            const float gy = lum(x, yp) - lum(x, ym);
+            const float g = std::abs(gx) + std::abs(gy);
+            interest[static_cast<size_t>(cy) * gw + cx] = g;
+            maxI = std::max(maxI, g);
+        }
+    }
+    if (maxI > 1e-5f) {
+        const float thr = maxI * 0.5f;
+        int l = gw, t = gh, r = -1, b = -1;
+        for (int cy = 0; cy < gh; ++cy) {
+            for (int cx = 0; cx < gw; ++cx) {
+                if (interest[static_cast<size_t>(cy) * gw + cx] < thr)
+                    continue;
+                l = std::min(l, cx);
+                r = std::max(r, cx);
+                t = std::min(t, cy);
+                b = std::max(b, cy);
+            }
+        }
+        if (r >= 0) {
+            // Expand by a conservative margin and clamp to [0,1].
+            constexpr float kMargin = 0.03f;
+            const float marginX = kMargin;
+            const float marginY = kMargin;
+            out.crop.left = std::max(0.0f, (static_cast<float>(l) / gw) - marginX);
+            out.crop.right = std::min(1.0f, (static_cast<float>(r + 1) / gw) + marginX);
+            out.crop.top = std::max(0.0f, (static_cast<float>(t) / gh) - marginY);
+            out.crop.bottom = std::min(1.0f, (static_cast<float>(b + 1) / gh) + marginY);
+            // Only report a crop when it meaningfully trims the frame.
+            const float area =
+                (out.crop.right - out.crop.left) * (out.crop.bottom - out.crop.top);
+            out.hasCrop = area < 0.97f;
+            if (!out.hasCrop)
+                out.crop = CropRect{};  // reset to the neutral full frame
+        }
+    }
+
+    return out;
+}
+
 Pipeline::WhiteBalanceEstimate Pipeline::estimateWhiteBalance(float lr, float lg,
                                                               float lb) {
     WhiteBalanceEstimate e;
