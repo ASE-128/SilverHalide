@@ -53,8 +53,13 @@ public:
                  QObject* parent = nullptr);
 
     /**
-     * @brief Requests worker shutdown. Thread-safe; the running import returns
-     *        at the next loop iteration.
+     * @brief Requests that the current import abort. Thread-safe; the running
+     *        import returns at the next loop iteration.
+     *
+     * The flag is one-shot per import run: importPaths() clears it at entry,
+     * so an abort requested during a previous import (or an idle shutdown
+     * request from a deferred close) can never silently swallow the next
+     * import.
      */
     void requestAbort() { abort_.store(true); }
 
@@ -117,6 +122,17 @@ private:
     // missing/unloadable model never blocks the batch.
     lrc::AiInferenceEngine* aiEngine_ = nullptr;
     std::atomic<bool> abort_{false};
+
+    /**
+     * @brief Three-stage import body (IO/DNG -> decode/render -> DB batches).
+     *
+     * Runs inside the exception firewall of importPaths(); never called
+     * directly. See importPaths() for the failure-reporting contract.
+     */
+    void importPathsImpl(const QStringList& paths, bool convertToDng,
+                         lrc::ImportMode mode, const QString& destRoot,
+                         const QString& renameTemplate);
+
     // Serializes the on-disk uniqueness check + rename across the concurrent
     // Stage-1 tasks so a batch can never claim the same name twice.
     QMutex renameMutex_;

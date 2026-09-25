@@ -463,6 +463,22 @@ void MainWindow::buildUi() {
     // Stroke end -> commit the whole stroke as one undo entry.
     connect(viewport_, &ImageViewport::maskEditFinished, this,
             &MainWindow::onMaskEditFinished);
+    // An AI feature was used while its model is not downloaded: surface an
+    // actionable status-bar message (the panel deliberately does not open the
+    // model manager itself — the status bar tells the user where it lives).
+    connect(developPanel_, &DevelopPanel::aiModelUnavailable, this,
+            [this](const QString& feature, const QString& modelId,
+                   bool usedHeuristicFallback) {
+                statusBar()->showMessage(
+                    usedHeuristicFallback
+                        ? tr("「%1」的 AI 模型（%2）未下载，本次使用近似结果；"
+                             "可在 设置 → 模型管理 中下载")
+                              .arg(feature, modelId)
+                        : tr("「%1」需要 AI 模型（%2）才能生效，尚未下载；"
+                             "请在 设置 → 模型管理 中下载后重试")
+                              .arg(feature, modelId),
+                    8000);
+            });
     connect(developPanel_, &DevelopPanel::maskBrushSizeChanged, viewport_,
             &ImageViewport::setMaskBrushSize);
     // Brush softness follows the panel slider; also re-sent on tool arm / mask
@@ -1260,13 +1276,17 @@ void MainWindow::startImport(const QStringList& paths, bool convertToDng,
                                      .arg(paths.size()));
     else
         statusBar()->showMessage(tr("正在导入 %1 个文件…").arg(paths.size()));
-    QMetaObject::invokeMethod(importWorker_, "importPaths",
-                              Qt::QueuedConnection,
-                              Q_ARG(QStringList, paths),
-                              Q_ARG(bool, convertToDng),
-                              Q_ARG(lrc::ImportMode, mode),
-                              Q_ARG(QString, destRoot),
-                              Q_ARG(QString, renameTemplate));
+    // A false return means Qt could not queue the call (dead worker thread,
+    // unregistered metatype, ...). Previously unchecked, the import then
+    // vanished silently after the "importing..." status message.
+    const bool dispatched = QMetaObject::invokeMethod(
+        importWorker_, "importPaths", Qt::QueuedConnection,
+        Q_ARG(QStringList, paths), Q_ARG(bool, convertToDng),
+        Q_ARG(lrc::ImportMode, mode), Q_ARG(QString, destRoot),
+        Q_ARG(QString, renameTemplate));
+    if (!dispatched)
+        statusBar()->showMessage(tr("导入启动失败：无法调度后台导入任务"),
+                                 8000);
 }
 
 void MainWindow::exportImage() {
@@ -2387,7 +2407,18 @@ void MainWindow::onPreviewReady(qint64 imageId,
         updateHistogramNow(image);
         return;
     }
-    viewport_->setImage(image);
+    if (imageId != lastPreviewImageId_) {
+        // First frame of a newly selected image: establish the fresh view
+        // (fit + no pan), and re-arm the full-res request for 1:1 mode.
+        viewport_->setImage(image);
+        lastPreviewImageId_ = imageId;
+    } else {
+        // Same-image re-render (slider release, mask stroke commit, ...):
+        // swap pixels WITHOUT resetting zoom/pan. setImage() here used to
+        // resetView() on every final frame, yanking the viewport mid-gesture
+        // and snapping wheel-zoomed users back to 100%/origin.
+        viewport_->setImageKeepView(image);
+    }
     updateHistogramNow(image);
 }
 
@@ -2899,6 +2930,7 @@ void MainWindow::onRemoveImage(int imageId) {
     const bool removingCurrent = (currentImageId_ == imageId);
     if (removingCurrent) {
         currentImageId_ = -1;
+        lastPreviewImageId_ = -1;  // next frame must re-establish the view
         viewport_->setImage(QImage());
     }
     refreshFilmstrip();
@@ -3087,6 +3119,7 @@ void MainWindow::refreshFilmstrip() {
         currentImageId_ = -1;
         currentVariantId_ = 0;
         currentFilePath_.clear();
+        lastPreviewImageId_ = -1;  // next frame must re-establish the view
         viewport_->setImage(QImage());
         developPanel_->setAdjustments(lrc::Adjustments::defaults());
         // Clear the metadata/keyword panel so no stale photo's info lingers.

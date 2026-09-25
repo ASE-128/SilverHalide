@@ -26,6 +26,8 @@
 
 #include "app/Constants.h"
 #include "catalog/CatalogDatabase.h"
+#include "engine/AiMaskGenerator.h"
+#include "engine/Pipeline.h"
 #include "ui/ColorWheelWidget.h"
 #include "ui/CurveEditor.h"
 #include "ui/HistogramWidget.h"
@@ -44,6 +46,51 @@ protected:
 const char* kColorNames[8] = {
     QT_TR_NOOP("红"), QT_TR_NOOP("橙"), QT_TR_NOOP("黄"), QT_TR_NOOP("绿"),
     QT_TR_NOOP("青"), QT_TR_NOOP("蓝"), QT_TR_NOOP("紫"), QT_TR_NOOP("品红")};
+
+// --- AI model availability probes -------------------------------------------
+// Every AI feature degrades gracefully when its ONNX model is not downloaded
+// yet (manual-NR-only / heuristic segmentation), which made a missing model
+// indistinguishable from a broken feature. These probes read the process-wide
+// engine Pipeline::setGlobalAiEngine() publishes at startup; when they return
+// false the call site must emit DevelopPanel::aiModelUnavailable so the user
+// sees an actionable message instead of a silent no-op.
+bool aiModelReady(const char* id) {
+    const auto* engine = lrc::Pipeline::globalAiEngine();
+    return engine && id && id[0] != '\0' && engine->hasModel(id);
+}
+
+// Click-prompt (MobileSAM) masks need the encoder+decoder pair.
+bool aiPromptModelsReady(QString* missingIdOut) {
+    const auto* engine = lrc::Pipeline::globalAiEngine();
+    if (!engine) {
+        if (missingIdOut)
+            *missingIdOut =
+                QString::fromLatin1(lrc::defaultPromptEncoderId());
+        return false;
+    }
+    if (!engine->hasModel(lrc::defaultPromptEncoderId())) {
+        if (missingIdOut)
+            *missingIdOut = QString::fromLatin1(lrc::defaultPromptEncoderId());
+        return false;
+    }
+    if (!engine->hasModel(lrc::defaultPromptDecoderId())) {
+        if (missingIdOut)
+            *missingIdOut = QString::fromLatin1(lrc::defaultPromptDecoderId());
+        return false;
+    }
+    return true;
+}
+
+// Translated feature name for the aiModelUnavailable signal.
+QString aiFeatureName(lrc::AiMaskTarget target) {
+    switch (target) {
+        case lrc::AiMaskTarget::Subject: return DevelopPanel::tr("AI 主体");
+        case lrc::AiMaskTarget::Sky: return DevelopPanel::tr("AI 天空");
+        case lrc::AiMaskTarget::Background: return DevelopPanel::tr("AI 背景");
+        case lrc::AiMaskTarget::Prompt: return DevelopPanel::tr("AI 点选");
+    }
+    return {};
+}
 
 // Creates a labelled slider+spin row and returns the container widget.
 QWidget* makeSliderRow(QWidget* parent, QSlider*& slider,
@@ -250,6 +297,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     auto* aiNrRow = new QHBoxLayout;
     aiNrRow->setSpacing(6);
     aiDenoiseEnabledCheck_ = new QCheckBox(tr("启用"), this);
+    aiDenoiseEnabledCheck_->setObjectName(
+        QStringLiteral("aiDenoiseEnabledCheck"));
     aiDenoiseStrengthSlider_ = new NoWheelSlider(Qt::Horizontal, this);
     aiDenoiseStrengthSlider_->setRange(0, 100);
     aiDenoiseStrengthSlider_->setValue(0);
@@ -273,6 +322,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                     current_.aiDenoise.enabled = true;
                     QSignalBlocker b2(aiDenoiseEnabledCheck_);
                     aiDenoiseEnabledCheck_->setChecked(true);
+                    warnIfAiDenoiseModelMissing();
                 }
                 scheduleDebounce();
             });
@@ -298,6 +348,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                     aiDenoiseStrengthSlider_->setValue(50);
                     aiDenoiseStrengthSpin_->setValue(50.0);
                 }
+                if (checked)
+                    warnIfAiDenoiseModelMissing();
                 scheduleDebounce();
             });
 
@@ -646,6 +698,10 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     maskAiSkyBtn_ = new QPushButton(tr("AI 天空"), this);
     maskAiBackgroundBtn_ = new QPushButton(tr("AI 背景"), this);
     maskAiPromptBtn_ = new QPushButton(tr("AI 点选"), this);
+    maskAiSubjectBtn_->setObjectName(QStringLiteral("maskAiSubjectBtn"));
+    maskAiSkyBtn_->setObjectName(QStringLiteral("maskAiSkyBtn"));
+    maskAiBackgroundBtn_->setObjectName(QStringLiteral("maskAiBackgroundBtn"));
+    maskAiPromptBtn_->setObjectName(QStringLiteral("maskAiPromptBtn"));
     for (QPushButton* b : {maskAiSubjectBtn_, maskAiSkyBtn_,
                            maskAiBackgroundBtn_, maskAiPromptBtn_}) {
         b->setProperty("secondary", true);
@@ -1479,6 +1535,20 @@ void DevelopPanel::addAiMask(lrc::AiMaskTarget target) {
     // AiMaskGenerator::generate (heuristicFallback when the model is
     // unavailable). cachedWeightVersion starts at 0; bumping it later
     // forces Pipeline to regenerate the segmentation.
+    //
+    // Model availability is surfaced here, not deep in the pipeline: without
+    // the check a missing model produced a heuristic mask (or a zero mask for
+    // Prompt) with no explanation.
+    QString missingId;
+    if (target == lrc::AiMaskTarget::Prompt) {
+        if (!aiPromptModelsReady(&missingId))
+            emit aiModelUnavailable(aiFeatureName(target), missingId,
+                                    true);
+    } else if (!aiModelReady(lrc::defaultModelIdFor(target))) {
+        emit aiModelUnavailable(
+            aiFeatureName(target),
+            QString::fromLatin1(lrc::defaultModelIdFor(target)), true);
+    }
     lrc::Mask m;
     m.type = lrc::MaskType::AiMask;
     m.ai.target = target;
@@ -1501,6 +1571,18 @@ void DevelopPanel::addAiMask(lrc::AiMaskTarget target) {
     emit maskEditRequested(current_.masks[static_cast<size_t>(index)], index);
     emit maskToolActivated(lrc::MaskType::AiMask);
     scheduleDebounce();
+}
+
+void DevelopPanel::warnIfAiDenoiseModelMissing() {
+    // Without the NAFNet model the denoise branch in
+    // Pipeline::applySpatialAdjustments is a silent no-op (the manual NR
+    // sliders remain authoritative), which read as "AI 降噪坏了". Surface the
+    // real cause at the moment the user enables the feature.
+    constexpr char kNafnetId[] = "nafnet-denoise";
+    if (aiModelReady(kNafnetId))
+        return;
+    emit aiModelUnavailable(tr("AI 降噪"), QString::fromLatin1(kNafnetId),
+                            false);
 }
 
 void DevelopPanel::selectMaskTool(lrc::MaskType tool) {

@@ -13,6 +13,43 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## 导入静默失败 / 视图跳变 / AI 模型无提示 三连修（2026-09-25，工作区未提交）
+
+用户报障三例非致命运行时问题，定位结论：均为**逻辑性错误 + 失败路径静默**，无结构性病灶，未重构。
+修复 + 回归测试全部落地，`lrc_qt_tests.exe` 全绿，GUI 全量构建通过。
+
+- **症状 1 导入 RAW 不显示（根因修复）**：`ImportWorker::importPaths` Stage 1 的
+  `QtConcurrent` 任务守卫 `if (abort_.load() || !f.ok)` 中 `f.ok` 初值为 `false`，
+  条件恒真 → **每次导入全部文件被静默跳过**（`ok=false` + 空 warn 在 Stage 3 按
+  "跳过不报告"消费），表现为侧栏出现文件夹、状态栏无成功无报错、点文件夹无反应。
+  引入提交 `461300d`（2026-08-31 三段式导入重构），此后所有导入均为静默 0 张。
+  修复：守卫只判 `abort_`。
+- **症状 1 伴随的静默失败防线**（防再犯，非根因）：`abort_` 改为一次性、
+  `importPaths` 入口复位（残留 abort 不再吞掉下一次导入）；三段式主体包异常防火墙
+  （引擎异常 → 回滚 + `importWarning` + `finishedImport(0)`，不再挂死 "正在导入…"）；
+  `MainWindow::startImport` 检查 `invokeMethod` 返回值，调度失败状态栏报错。
+- **症状 3 蒙版绘图手感（视图跳变修复）**：最终帧路径 `onPreviewReady` 此前对任何
+  预览帧都走 `viewport_->setImage()`（内部 `resetView()`），蒙版拖动中每个几何提交
+  都触发最终渲染 → 视图在手势中途缩放归 1/平移归零。修复：新增
+  `lastPreviewImageId_` 分流——新图首帧仍重置视图（原行为），同图重渲染只换像素
+  不碰缩放/平移；两处清空视口路径（删图、空列表）同步重置该标记。
+  线性渐变"没有实时渲染蒙版范围"的一部分即视图重置把 overlay 锚点打掉；可视化
+  增强（线性渐变覆盖带、径向羽化过程显示）待实机体验后再定。
+- **症状 2 AI 功能全部无响应（有声化）**：模型本体不随安装包分发、需首次下载，
+  缺失时引擎全线静默回退（降噪 no-op / 蒙版启发式近似 / 预分级确定性显著性）。
+  `DevelopPanel` 新增 `aiModelUnavailable` 信号 + 使用点探测：AI 降噪启用与
+  AI 蒙版四按钮（主体/天空/背景/点选）在模型缺失时状态栏可执行提示
+  （指路「设置 → 模型管理」），蒙版仍创建但明示"近似结果"。引擎层守卫
+  （`hasModel`/`runSamPoint`）静态核查完整；"调用时直接崩溃"未复现，待模型
+  下载后端到端验证。
+- **测试**：`tests/lrc_qt_tests.cpp` 新增三个测试类 6 用例——
+  `ImportWorkerTest`（残留 abort 不吞导入 + 导入落库含双预览）、
+  `ViewportViewStabilityTest`（同图刷新保缩放 / 新图重置）、
+  `AiModelAvailabilityTest`（无引擎时点 AI 按钮/降噪的提示内容与兜底行为）；
+  `tests/CMakeLists.txt` 相应纳入 `ImportWorker/ImageViewport/DevelopPanel`
+  等 6 个 UI 源并链接 `Qt6::Concurrent`。仓库根新增 `run_qt_tests.bat`
+  （本机 System32 缺 UCRT 转发 DLL，测试 exe 需 vcvars + Qt bin 环境，脚本已封装）。
+
 ## P-A 性能极致 · 引擎层 headless 量化验收（2026-09-25，工作区未提交）
 
 **本轮内容**：P-A（M1 1:1 零等待 / M2 编辑手感 / M3 内存极致 / M4 大目录）原有底层能力已基本落地

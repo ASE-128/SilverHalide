@@ -128,13 +128,39 @@ ImportWorker::ImportWorker(lrc::CatalogDatabase& catalog,
 void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
                                lrc::ImportMode mode, const QString& destRoot,
                                const QString& renameTemplate) {
+    // The abort flag is scoped to a single import run. Clearing it here makes
+    // requestAbort() one-shot: an abort left over from a previous import (or
+    // from a deferred closeEvent that kept the app running) must never
+    // silently swallow the next import — that was the "folder appears in the
+    // navigator, then nothing, no message" failure mode.
+    abort_.store(false);
+    try {
+        importPathsImpl(paths, convertToDng, mode, destRoot, renameTemplate);
+    } catch (const std::exception& e) {
+        // Exception firewall: an engine exception escaping this worker thread
+        // used to kill the import silently, leaving the UI stuck at
+        // "importing..." with no success and no error. Roll back a possibly
+        // open batch transaction (no-op when none is open), then report
+        // through the normal signal channel so the UI can surface it.
+        catalog_.rollbackTransaction();
+        emit importWarning(tr("导入中断：%1")
+                               .arg(QString::fromUtf8(e.what())));
+        emit finishedImport(0);
+    } catch (...) {
+        catalog_.rollbackTransaction();
+        emit importWarning(tr("导入因未知错误中断"));
+        emit finishedImport(0);
+    }
+}
+
+void ImportWorker::importPathsImpl(const QStringList& paths, bool convertToDng,
+                                   lrc::ImportMode mode,
+                                   const QString& destRoot,
+                                   const QString& renameTemplate) {
     // A Copy/Move without a destination folder is meaningless; degrade to Add
     // so the catalog never loses the file.
     if (mode != lrc::ImportMode::Add && destRoot.isEmpty())
         mode = lrc::ImportMode::Add;
-
-    if (abort_.load())
-        return;  // abort requested: bail out immediately.
     const std::filesystem::path root = toStdPath(destRoot);
     const int total = paths.size();
     int done = 0;
@@ -172,10 +198,13 @@ void ImportWorker::importPaths(const QStringList& paths, bool convertToDng,
     }
 
     QtConcurrent::blockingMap(stage1, [&](PerFileStage1& f) {
-        if (abort_.load() || !f.ok) {
-            // f.ok stays false on abort; the consumer treats ok=false (with
-            // an empty warn) as "skipped, do not report" so aborted files do
-            // not emit a warning storm.
+        // Guard on abort only: f.ok starts false for every fresh element, so
+        // an additional !f.ok test here would (and did) skip every file
+        // silently — the consumer reads ok=false + empty warn as "do not
+        // report", which surfaced as "folder appears, nothing imports, no
+        // message". An aborted file simply keeps ok=false and is skipped
+        // quietly by Stage 3.
+        if (abort_.load()) {
             return;
         }
         const std::filesystem::path src = toStdPath(f.src);

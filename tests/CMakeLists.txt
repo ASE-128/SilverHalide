@@ -87,12 +87,19 @@ add_test(NAME lrc_tests COMMAND lrc_tests)
 # Run: build_gui/tests/lrc_qt_tests.exe
 # ---------------------------------------------------------------------------
 if(LRC_ENABLE_QT)
-  find_package(Qt6 REQUIRED COMPONENTS Test Widgets)
+  find_package(Qt6 REQUIRED COMPONENTS Test Widgets Concurrent)
 
   set(CMAKE_AUTOMOC ON)
 
   add_executable(lrc_qt_tests
     lrc_qt_tests.cpp
+    ../src/ui/ColorWheelWidget.cpp
+    ../src/ui/CurveEditor.cpp
+    ../src/ui/DevelopPanel.cpp
+    ../src/ui/HistogramWidget.cpp
+    ../src/ui/ImportWorker.cpp
+    ../src/ui/ImageViewport.cpp
+    ../src/ui/PanelSection.cpp
     ../src/ui/PreviewWorker.cpp
     ../src/ui/ExportDialog.cpp
     ../src/ui/ImportDialog.cpp
@@ -100,7 +107,7 @@ if(LRC_ENABLE_QT)
     ../src/ui/PresetDialog.cpp)
   target_link_libraries(lrc_qt_tests PRIVATE
     lrc_catalog lrc_engine
-    Qt6::Test Qt6::Widgets)
+    Qt6::Test Qt6::Widgets Qt6::Concurrent)
   target_include_directories(lrc_qt_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_compile_definitions(lrc_qt_tests PRIVATE
     LRC_ENABLE_QT=1

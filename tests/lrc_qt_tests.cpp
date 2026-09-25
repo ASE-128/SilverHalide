@@ -11,9 +11,11 @@
 // Unlike tests/lrc_tests (Qt-free Catch2), this uses the QtTest framework.
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QEventLoop>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPushButton>
 #include <QSignalSpy>
 #include <QTest>
 #include <QThread>
@@ -35,8 +37,11 @@
 #include "engine/ImageIO.h"
 #include "engine/Pipeline.h"
 #include "engine/RawDecoder.h"
+#include "ui/DevelopPanel.h"
 #include "ui/ExportDialog.h"
+#include "ui/ImageViewport.h"
 #include "ui/ImportDialog.h"
+#include "ui/ImportWorker.h"
 #include "ui/PresetDialog.h"
 #include "ui/PreviewWorker.h"
 #include "ui/SnapshotDialog.h"
@@ -317,6 +322,223 @@ void PresetDialogSmokeTest::presetDialogFlow() {
 }
 
 // ---------------------------------------------------------------------------
+// ImportWorker regression: silent-failure holes
+//
+// Regression coverage for the "folder shows in the navigator, then nothing,
+// no success and no error" import failure mode:
+//   • requestAbort() must be one-shot — an abort left over from a previous
+//     import (or a deferred closeEvent) must not silently swallow the next
+//     import.
+//   • A normal run must emit finishedImport with the real added count and
+//     land the image row + thumbnail preview in the catalog.
+// ---------------------------------------------------------------------------
+class ImportWorkerTest : public QObject {
+    Q_OBJECT
+public:
+    explicit ImportWorkerTest(const std::filesystem::path& workDir)
+        : workDir_(workDir) {}
+
+private slots:
+    void leftoverAbortDoesNotSilentlyKillNextImport();
+    void importAddsImageAndPreviews();
+
+private:
+    std::filesystem::path workDir_;
+};
+
+void ImportWorkerTest::leftoverAbortDoesNotSilentlyKillNextImport() {
+    std::error_code ec;
+    std::filesystem::create_directories(workDir_, ec);
+
+    // A tiny JPEG is importable without a camera RAW fixture.
+    const auto src = workDir_ / "leftover_abort.jpg";
+    auto img = ImageBuffer::create(32, 24, PixelFormat::U8);
+    QVERIFY(img && !img->empty());
+    std::fill(img->data().begin(), img->data().end(), uint8_t{128});
+    QVERIFY(ImageIO::writeJpeg(src, *img, 90));
+
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+    RawDecoder decoder;
+    decoder.setColorManager(cm);
+    const auto cacheDir = workDir_ / "cache";
+    std::filesystem::create_directories(cacheDir, ec);
+    ThumbnailCache cache(cacheDir);
+    CatalogDatabase db(workDir_ / "leftover_abort.db");
+    QVERIFY(db.open());
+
+    ImportWorker worker(db, cache, decoder, pipeline, cm);
+    QSignalSpy finishedSpy(&worker, &ImportWorker::finishedImport);
+    QSignalSpy warningSpy(&worker, &ImportWorker::importWarning);
+
+    // Simulate an abort left over from an earlier import / deferred close.
+    worker.requestAbort();
+
+    // Direct (same-thread) call: the abort flag must be reset at import entry
+    // and the import must complete. Before the fix this returned at the entry
+    // check with no signal at all.
+    worker.importPaths(QStringList(QString::fromStdWString(src.wstring())),
+                       false, ImportMode::Add, QString(), QString());
+
+    for (int i = 0; i < warningSpy.count(); ++i)
+        qInfo("import warning: %s",
+              qPrintable(warningSpy.at(i).at(0).toString()));
+    QCOMPARE(finishedSpy.count(), 1);
+    QCOMPARE(finishedSpy.at(0).at(0).toInt(), 1);
+    QCOMPARE(warningSpy.count(), 0);
+    QCOMPARE(db.listImages().size(), size_t{1});
+}
+
+void ImportWorkerTest::importAddsImageAndPreviews() {
+    std::error_code ec;
+    std::filesystem::create_directories(workDir_, ec);
+
+    const auto src = workDir_ / "plain.jpg";
+    auto img = ImageBuffer::create(48, 32, PixelFormat::U8);
+    QVERIFY(img && !img->empty());
+    std::fill(img->data().begin(), img->data().end(), uint8_t{200});
+    QVERIFY(ImageIO::writeJpeg(src, *img, 90));
+
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+    RawDecoder decoder;
+    decoder.setColorManager(cm);
+    const auto cacheDir = workDir_ / "cache";
+    std::filesystem::create_directories(cacheDir, ec);
+    ThumbnailCache cache(cacheDir);
+    CatalogDatabase db(workDir_ / "plain.db");
+    QVERIFY(db.open());
+
+    ImportWorker worker(db, cache, decoder, pipeline, cm);
+    QSignalSpy finishedSpy(&worker, &ImportWorker::finishedImport);
+    QSignalSpy thumbSpy(&worker, &ImportWorker::thumbReadyImage);
+
+    worker.importPaths(QStringList(QString::fromStdWString(src.wstring())),
+                       false, ImportMode::Add, QString(), QString());
+
+    QCOMPARE(finishedSpy.count(), 1);
+    QCOMPARE(finishedSpy.at(0).at(0).toInt(), 1);
+
+    const auto images = db.listImages();
+    QCOMPARE(images.size(), size_t{1});
+    if (!images.empty()) {
+        // Thumbnail + standard preview must land in the same import.
+        QVERIFY(db.loadPreview(images[0].id, PreviewKind::Thumbnail));
+        QVERIFY(db.loadPreview(images[0].id, PreviewKind::Standard));
+    }
+    // The worker ships the decoded thumbnail back for the filmstrip.
+    QVERIFY(thumbSpy.count() >= 1);
+}
+
+// ---------------------------------------------------------------------------
+// Viewport view-stability contract
+//
+// Regression coverage for the mask-editing "the view jumps while I draw"
+// symptom: a same-image re-render (MainWindow::onPreviewReady ->
+// setImageKeepView) must preserve the user's zoom; only a genuinely new image
+// (setImage) may reset the view.
+// ---------------------------------------------------------------------------
+class ViewportViewStabilityTest : public QObject {
+    Q_OBJECT
+private slots:
+    void keepViewPreservesZoomAcrossRefresh();
+    void setImageResetsView();
+};
+
+void ViewportViewStabilityTest::keepViewPreservesZoomAcrossRefresh() {
+    ImageViewport vp;
+    vp.resize(800, 600);
+    QImage first(400, 300, QImage::Format_RGB32);
+    first.fill(Qt::darkGray);
+    vp.setImage(first);
+    vp.zoomIn();  // zoom_ 1.0 -> 1.25
+
+    // Same-image refresh (edit re-render): zoom must survive.
+    QImage refresh(400, 300, QImage::Format_RGB32);
+    refresh.fill(Qt::lightGray);
+    vp.setImageKeepView(refresh);
+    QCOMPARE(vp.zoomFactor(), 1.25);
+}
+
+void ViewportViewStabilityTest::setImageResetsView() {
+    ImageViewport vp;
+    vp.resize(800, 600);
+    QImage first(400, 300, QImage::Format_RGB32);
+    first.fill(Qt::darkGray);
+    vp.setImage(first);
+    vp.zoomIn();  // zoom_ 1.0 -> 1.25
+
+    // A genuinely new image re-establishes the default view.
+    QImage second(500, 400, QImage::Format_RGB32);
+    second.fill(Qt::black);
+    vp.setImage(second);
+    QCOMPARE(vp.zoomFactor(), 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// AI model availability surfacing
+//
+// Regression coverage for "every AI feature silently does nothing": with no
+// engine / no models registered (the state the test process is in, since no
+// MainWindow ever ran), invoking an AI feature must emit
+// DevelopPanel::aiModelUnavailable with the missing manifest id, and the AI
+// mask must still be created (heuristic fallback) so the feature degrades
+// loudly instead of vanishing.
+// ---------------------------------------------------------------------------
+class AiModelAvailabilityTest : public QObject {
+    Q_OBJECT
+private slots:
+    void aiMaskButtonsWarnWhenModelMissing();
+    void aiDenoiseEnableWarnsWhenModelMissing();
+};
+
+void AiModelAvailabilityTest::aiMaskButtonsWarnWhenModelMissing() {
+    DevelopPanel panel;
+    QSignalSpy warnSpy(&panel, &DevelopPanel::aiModelUnavailable);
+    QSignalSpy maskSpy(&panel, &DevelopPanel::maskEditRequested);
+
+    auto* subjectBtn =
+        panel.findChild<QPushButton*>(QStringLiteral("maskAiSubjectBtn"));
+    QVERIFY(subjectBtn != nullptr);
+    subjectBtn->click();
+
+    QCOMPARE(warnSpy.count(), 1);
+    QCOMPARE(warnSpy.at(0).at(0).toString(), QStringLiteral("AI 主体"));
+    QCOMPARE(warnSpy.at(0).at(1).toString(),
+             QStringLiteral("rmbg2-subject"));
+    QCOMPARE(warnSpy.at(0).at(2).toBool(), true);
+    // The mask is still created (heuristic fallback), only the quality
+    // degrades — the warning says so explicitly.
+    QCOMPARE(maskSpy.count(), 1);
+
+    auto* promptBtn =
+        panel.findChild<QPushButton*>(QStringLiteral("maskAiPromptBtn"));
+    QVERIFY(promptBtn != nullptr);
+    promptBtn->click();
+    QCOMPARE(warnSpy.count(), 2);
+    QCOMPARE(warnSpy.at(1).at(1).toString(),
+             QStringLiteral("mobilesam-encoder"));
+}
+
+void AiModelAvailabilityTest::aiDenoiseEnableWarnsWhenModelMissing() {
+    DevelopPanel panel;
+    QSignalSpy warnSpy(&panel, &DevelopPanel::aiModelUnavailable);
+
+    auto* enableCheck =
+        panel.findChild<QCheckBox*>(QStringLiteral("aiDenoiseEnabledCheck"));
+    QVERIFY(enableCheck != nullptr);
+    enableCheck->setChecked(true);
+
+    QCOMPARE(warnSpy.count(), 1);
+    QCOMPARE(warnSpy.at(0).at(0).toString(), QStringLiteral("AI 降噪"));
+    QCOMPARE(warnSpy.at(0).at(1).toString(),
+             QStringLiteral("nafnet-denoise"));
+    // No heuristic fallback exists for denoise: the warning must say the
+    // feature did nothing.
+    QCOMPARE(warnSpy.at(0).at(2).toBool(), false);
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -340,6 +562,18 @@ int main(int argc, char** argv) {
     }
     {
         BatchExportTest t(root / "export");
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        ImportWorkerTest t(root / "import_worker");
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        ViewportViewStabilityTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        AiModelAvailabilityTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
 

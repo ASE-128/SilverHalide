@@ -421,6 +421,11 @@ private:
     bool maskStrokeActive_ = false;  // true while a mask stroke is being drawn
     bool gestureActive_ = false;     // a slider-drag gesture is in progress
     bool fullResActive_ = false;  // true while the 1:1 full-res view is live
+    // Image id of the most recent final-preview frame applied to the viewport.
+    // onPreviewReady resets the view only for the FIRST frame of a different
+    // image; same-image re-renders (slider edits, mask strokes) swap pixels
+    // without touching zoom/pan, which used to yank the view mid-gesture.
+    qint64 lastPreviewImageId_ = -1;
     QString filterFolder_;
     int filterRating_ = 0;       // 0 = any
     int filterFlag_ = 0;         // 0 = any, 1 = picked, -1 = rejected, 2 = none

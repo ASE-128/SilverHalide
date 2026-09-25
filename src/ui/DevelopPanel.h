@@ -239,6 +239,16 @@ signals:
     void visualizeSpotsToggled(bool active);
     void maskWindowRequested();
 
+    // An AI feature was invoked while its ONNX model is not downloaded yet.
+    // `featureName` is a translated, user-visible feature name; `modelId` is
+    // the missing manifest id; `usedHeuristicFallback` is true when the
+    // feature still produced an approximate result (AI masks fall back to a
+    // heuristic segmentation) and false when it did nothing at all (AI
+    // denoise without NAFNet). MainWindow surfaces this on the status bar so
+    // the missing-model state is never a silent no-op again.
+    void aiModelUnavailable(const QString& featureName, const QString& modelId,
+                            bool usedHeuristicFallback);
+
     // --- Metadata ------------------------------------------------------------
     // The user edited one of the metadata fields or the keyword list; MainWindow
     // persists the values via CatalogDatabase.
@@ -332,6 +342,10 @@ private:
     // notifies the preview. No drawing step -- segmentation runs inside
     // Pipeline::applyLocalAdjustments when the mask is rendered.
     void addAiMask(lrc::AiMaskTarget target);
+    // Emits aiModelUnavailable when the NAFNet denoise model is not downloaded;
+    // called on the disabled->enabled transition of the AI-denoise control so
+    // a missing model can never read as a silent no-op.
+    void warnIfAiDenoiseModelMissing();
     void scheduleDebounce();
     void applyDebounce();
     void applyCoarseDebounce();
