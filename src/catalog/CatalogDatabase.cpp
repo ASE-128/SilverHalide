@@ -1292,13 +1292,7 @@ void CatalogDatabase::close() {
         // in the WAL.
         if (inTransaction_) {
             (void)execOn(db_, "ROLLBACK;", &lastError_);
-            txDepth_ = 0;
             inTransaction_ = false;
-            // Close is being called on the thread that owns the open transaction
-            // (no other thread can be inside the transaction's critical section
-            // while the owner holds mutex_); release the transaction's acquisition
-            // so the mutex is unlocked before close returns.
-            mutex_.unlock();
         }
         finalizeAllCached();
         sqlite3_close(db_);
@@ -3395,55 +3389,39 @@ std::vector<int64_t> CatalogDatabase::listPanoramaSources(
 }
 
 bool CatalogDatabase::beginTransaction() {
-    // Acquire the catalog mutex and HOLD it until the matching COMMIT/ROLLBACK.
-    // Because every connection operation takes the same (recursive) mutex, no
-    // other thread can run any statement while a transaction is open; a concurrent
-    // edit blocks here and runs later in its own transaction, so an import
-    // rollback can never undo it. The recursive mutex lets the owning thread's
-    // intermediate writes re-enter without deadlock. (Performance note: import
-    // commits every kImportBatchSize rows, so the exclusive hold is bounded.)
-    mutex_.lock();
-    if (db_ && exec("BEGIN IMMEDIATE;")) {
-        ++txDepth_;
-        inTransaction_ = true;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (inTransaction_)
         return true;
-    }
-    // db_ closed or BEGIN failed; release the lock and report failure so later
-    // calls do not block on a mutex we never intended to hold.
-    mutex_.unlock();
-    return false;
+    if (!exec("BEGIN IMMEDIATE;"))
+        return false;
+    inTransaction_ = true;
+    return true;
 }
 
 bool CatalogDatabase::commitTransaction() {
-    // No transaction is owned by this thread; nothing to commit or release. This
-    // also covers unmatched COMMIT calls (e.g. a rollback-only abort path before
-    // beginTransaction ever ran).
-    if (txDepth_ <= 0)
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!inTransaction_)
         return true;
-    bool ok = exec("COMMIT;");
-    if (!ok) {
-        // A failed COMMIT (disk full / file locked) leaves the transaction open
-        // on the connection; roll it back so the connection returns to a clean
-        // state and later writes cannot be absorbed into a dangling transaction.
-        // The caller sees false and must report the failure instead of pretending
-        // the commit succeeded.
-        (void)exec("ROLLBACK;");
+    if (exec("COMMIT;")) {
+        inTransaction_ = false;
+        return true;
     }
-    --txDepth_;
-    inTransaction_ = (txDepth_ > 0);
-    // Balance the mutex acquisition taken by beginTransaction().
-    mutex_.unlock();
-    return ok;
+    // A failed COMMIT (disk full / file locked) leaves the transaction open on
+    // the connection; roll it back so the connection returns to a clean state
+    // and later writes cannot be absorbed into a dangling transaction. The
+    // caller sees false and must report the failure instead of pretending the
+    // commit succeeded.
+    (void)exec("ROLLBACK;");
+    inTransaction_ = false;
+    return false;
 }
 
 bool CatalogDatabase::rollbackTransaction() {
-    if (txDepth_ <= 0)
-        return true;  // nothing owned by this thread to roll back; no lock held
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!inTransaction_)
+        return true;
     const bool ok = exec("ROLLBACK;");
-    --txDepth_;
-    inTransaction_ = (txDepth_ > 0);
-    // Balance the mutex acquisition taken by beginTransaction().
-    mutex_.unlock();
+    inTransaction_ = false;
     return ok;
 }
 

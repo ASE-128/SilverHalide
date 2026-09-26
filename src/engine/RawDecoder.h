@@ -86,10 +86,12 @@ public:
      *  Dispatches on the file extension: RAW/DNG go through libraw, everything
      *  else (JPEG/PNG/TIFF) through stb_image + the color manager.
      *  @param dcp Optional camera colour profile. When non-null and the path is
-     *             a RAW file, its ColorMatrix1 replaces libraw's built-in camera
-     *             matrix so a user-selected DCP actually changes the rendered
-     *             colour, and its tone curve is applied afterwards. Ignored for
-     *             non-RAW files. Ownership stays with the caller for the call.
+     *             a RAW file, its (white-balance-interpolated) colour matrix
+     *             replaces libraw's built-in camera matrix, and its hue/sat
+     *             map and tone curve are applied afterwards in the linear
+     *             working space, so a user-selected DCP actually changes the
+     *             rendered colour. Ignored for non-RAW files. Ownership stays
+     *             with the caller for the call.
      *  @return nullopt on decode failure. */
     std::optional<DecodedImage> decode(const std::filesystem::path& path,
                                        const DecodeParams& params,
@@ -111,6 +113,43 @@ public:
     /** @brief True when `path` is a format the app can import (RAW or
      *  JPEG/PNG/TIFF). */
     static bool isSupported(const std::filesystem::path& path);
+
+    /**
+     * @brief White-balance-aware camera->XYZ D50 matrix from a DCP profile.
+     *
+     * When the profile carries both calibration states (ColorMatrix1/2 plus
+     * CalibrationIlluminant1/2), the matrices are interpolated by the
+     * correlated color temperature of the as-shot white balance, following
+     * the DNG dual-illuminant model. With a single state the matrix is used
+     * verbatim.
+     *
+     * @param dcp Parsed DCP profile; `hasColorMatrix1` must be true.
+     * @param camMul As-shot white balance multipliers (camera RGB gains,
+     *        relative scaling is sufficient).
+     * @return The interpolated 3x3 row-major camera->XYZ D50 matrix.
+     */
+    static std::array<float, 9> dcpColorMatrix(
+        const DcpProfile& dcp, const std::array<double, 3>& camMul);
+
+    /**
+     * @brief Applies a DCP hue/saturation/value map to a linear buffer.
+     *
+     * Implements the DNG hue/sat map in the linear working space: per pixel
+     * the RGB triplet is converted to HSV, the (hue shift, saturation scale,
+     * value scale) delta is sampled with trilinear interpolation (hue wraps,
+     * saturation/value clamp), applied, and converted back to RGB. When the
+     * profile carries a second map it is blended by the same dual-illuminant
+     * weight as the colour matrix.
+     *
+     * @param src Linear RGB buffer (F32, normalized 0..1).
+     * @param dcp Parsed DCP profile with a valid hue/sat map.
+     * @param camMul As-shot white balance multipliers (see dcpColorMatrix).
+     * @return New graded buffer, or `src` unchanged when the profile has no
+     *         usable map or the input is not F32.
+     */
+    static ImageBufferPtr applyDcpHueSatMap(
+        const ImageBufferPtr& src, const DcpProfile& dcp,
+        const std::array<double, 3>& camMul);
 
 private:
     // Decodes a display-ready sRGB file (JPEG/PNG/TIFF) into linear ProPhoto.

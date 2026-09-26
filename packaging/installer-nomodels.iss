@@ -54,15 +54,18 @@ OutputBaseFilename=Silver Halide Setup {#APP_VERSION} (No Models)
 ; SolidCompression=yes packs the whole payload into one LZMA stream, which
 ; dramatically improves the ratio for the many small DCP profile files (their
 ; similar ICC structure cross-compresses well). LZMAUseSeparateProcess moves
-; compression out-of-process so the 64 MB ultra64 dictionary does not exhaust
-; the installer's 32-bit address space, and LZMANumBlockThreads parallelizes
-; the multi-block LZMA2 pass across CPU cores. High-entropy files (ONNX
-; weights, already-compressed DLLs) are stored near-verbatim by LZMA's fast
-; incompressibility detector, so they add little size.
-Compression=lzma2/ultra64
-SolidCompression=yes
-LZMAUseSeparateProcess=yes
-LZMANumBlockThreads=4
+	; compression out-of-process so an ultra dictionary does not exhaust the
+	; installer's 32-bit address space, and LZMANumBlockThreads parallelizes
+	; the multi-block LZMA2 pass across CPU cores. High-entropy files (ONNX
+	; weights, already-compressed DLLs) are stored near-verbatim by LZMA's fast
+	; incompressibility detector, so the smaller dictionary adds almost no size.
+	; Use ultra/32 so the initial temp-extract starts displaying the wizard page
+	; sooner and the user never sees a blank window.
+	Compression=lzma2/ultra
+	LZMADictionarySize=32
+	SolidCompression=yes
+	LZMAUseSeparateProcess=yes
+	LZMANumBlockThreads=4
 ; VersionInfo embedded into the .exe (shown by Windows File > Properties).
 VersionInfoVersion={#APP_VERSION}.0
 VersionInfoProductVersion={#APP_VERSION}.0

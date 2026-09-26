@@ -10,13 +10,13 @@ Silver Halide 是一个基于 C++20 + Qt 6 的 RAW 摄影工作流桌面应用�
 
 - **RAW 解码与线性工作流**：libraw 后端、相机颜色矩阵、线性 ProPhoto RGB (D50) 工作空间，sRGB 伽马由 lcms 在管线末端一次性应用
 
-- **镜头/相机配置文件（集成中）**：RAW 元数据已暴露镜头厂商/型号，CMake 已声明可选 vcpkg Lensfun，DCP 文件识别入口已加入；Lensfun 校正应用、DCP 矩阵/曲线/LUT 与 UI 选择尚未验收
+- **镜头/相机配置文件**：DCP 相机配置已完整接入渲染管线——按白平衡色温在双校准光源间插值颜色矩阵、应用色相/饱和度映射（ProfileHueSatMapData，三线性插值）与色调曲线，UI 可选择相机配置；Lensfun 镜头校正为可选 vcpkg 依赖，尚未接入
 
 - **非破坏性编辑管线**：参数堆栈 + 缓存 + 预览 / 导出一致；曝光、对比度、高光 / 阴影、白平衡、曲线、HSL、色调分离、去朦胧、纹理 / 清晰度 / 锐化、畸变、颗粒、晕影、点颜色
 
 - **局部调整**：污点去除（Clone / Heal，归一化坐标 + 羽化 + 边缘亮度匹配）、蒙版局部调整
 
-- **目录与检索**：嵌入式 SQLite 目录（`Default.lrcat`），目录内嵌预览 BLOB；虚拟副本、关键字层级、智能收藏夹（多谓词规则）、元数据编辑、XMP 往返（`[ADR-0001]` Lightroom 兼容将移除，目标自成体系）
+- **目录与检索**：嵌入式 SQLite 目录（`Default.shcat` 目录即库），预览外置磁盘；虚拟副本、关键字层级、智能收藏夹（多谓词规则）、元数据编辑；数据契约以自有 `.lrp` 预设与 `.shcat` 目录自洽，不兼容 Lightroom
 
 - **视图与比较**：胶片栏、主预览、Before / After 分屏、参考视图、1:1 全尺寸
 
@@ -120,7 +120,7 @@ qt\6.8.3\msvc2022_64\bin\windeployqt.exe --release --no-translations --compiler-
 ```
 src/
 ├── engine/     # 纯 C++，Qt-free：RAW 解码、管线、颜色、缓存
-├── catalog/    # 纯 C++，Qt-free：SQLite 目录、预览、XMP
+├── catalog/    # 纯 C++，Qt-free：SQLite 目录、预览、检索
 ├── utils/      # 纯 C++，共享工具
 ├── app/        # 应用层（Constants、ModelManager 等）
 └── ui/         # Qt 6 Widgets：MainWindow、DevelopPanel、Filmstrip 等
@@ -138,7 +138,7 @@ src/
 
 - 开发经验与迁移：[docs/DEVELOPMENT\_EXPERIENCE.md](docs/DEVELOPMENT_EXPERIENCE.md)、[docs/MIGRATION.md](docs/archive/MIGRATION.md)
 
-- XMP 字段映射（Lightroom crs / 预设互导，按 [ADR-0001](docs/adr/0001-drop-lightroom-compat.md) 将移除、走向自有 `.lrp` 格式）：[docs/XMP-MAPPING.md](docs/XMP-MAPPING.md)
+- 数据契约：[ADR-0001](docs/adr/0001-drop-lightroom-compat.md) 已移除 Lightroom 兼容读/写路径，产品以自有 `.lrp` 预设与 `.shcat` 目录自洽
 
 - 内部开发历史归档（2.x dev 阶段）：[docs/archive](docs/archive)
 

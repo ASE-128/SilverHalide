@@ -211,8 +211,6 @@ private slots:
      * @brief Opens the named-preset manager (save / apply / delete / export).
      */
     void onManagePresets();
-    void readSidecar();
-    void writeSidecar();
     void watchFolderPoll();
 
     // --- Spot removal ------------------------------------------------------

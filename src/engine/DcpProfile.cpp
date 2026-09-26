@@ -1,5 +1,7 @@
 #include "engine/DcpProfile.h"
 
+#include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <fstream>
 #include <vector>
@@ -97,6 +99,7 @@ size_t typeSize(uint16_t type) {
     case 7: return 1;  // UNDEFINED
     case 9: return 4;  // SLONG
     case 10: return 8; // SRATIONAL
+    case 11: return 4; // FLOAT
     default: return 0;
     }
 }
@@ -153,6 +156,32 @@ bool readMatrix(const std::vector<uint8_t>& bytes, const TagValue& tag,
     return true;
 }
 
+// Reads a run of 32-bit IEEE floats (TIFF type 11), e.g. the
+// ProfileHueSatMapData tags. Returns false on a type/size mismatch so callers
+// can distinguish a corrupt map from an absent tag.
+bool readFloatArray(const std::vector<uint8_t>& bytes, const TagValue& tag,
+                    bool le, std::vector<float>& out) {
+    if (tag.type != 11 || tag.count == 0)
+        return false;
+    const size_t offset = valueOffset(tag);
+    if (offset + static_cast<size_t>(tag.count) * 4 > bytes.size())
+        return false;
+    out.resize(tag.count);
+    for (size_t i = 0; i < out.size(); ++i)
+        out[i] = std::bit_cast<float>(read32(bytes, offset + i * 4, le));
+    return true;
+}
+
+// Reads a single SHORT value (TIFF type 3). CalibrationIlluminant1/2 are
+// single SHORTs stored inline in the entry value field.
+bool readShort(const std::vector<uint8_t>& bytes, const TagValue& tag, bool le,
+               float& out) {
+    if (tag.type != 3 || tag.count < 1)
+        return false;
+    out = static_cast<float>(read16(bytes, valueOffset(tag), le));
+    return true;
+}
+
 // Reads one DCP curve sample (ToneCurve tag 50940) whose storage type varies
 // by encoder: SHORT(3) / UNDEFINED(7) are 16-bit; BYTE(1) is a single byte.
 // Values are returned as their raw numeric magnitude (DCP stores 16-bit curve
@@ -206,18 +235,80 @@ std::optional<DcpProfile> DcpProfileReader::read(
         profile.hasColorMatrix1 = readMatrix(bytes, tag, le, profile.colorMatrix1);
     if (findTag(bytes, 50722, le, tag))
         profile.hasColorMatrix2 = readMatrix(bytes, tag, le, profile.colorMatrix2);
+    // CalibrationIlluminant1/2 pair with ColorMatrix1/2 (and the hue/sat
+    // maps): their DNG LightSource codes drive the white-balance-dependent
+    // interpolation between the two calibration states.
+    if (findTag(bytes, 50778, le, tag))
+        profile.hasCalibrationIlluminant1 =
+            readShort(bytes, tag, le, profile.calibrationIlluminant[0]);
+    if (findTag(bytes, 50779, le, tag))
+        profile.hasCalibrationIlluminant2 =
+            readShort(bytes, tag, le, profile.calibrationIlluminant[1]);
+    // Hue/sat map. DCP camera profiles store the grid in tag 50981 and the
+    // delta tables in 50982/50983; the DNG-embedded equivalents (50937 ff.)
+    // are accepted as a fallback. Only a grid whose dimensions multiply to
+    // the exact data length is accepted — a mismatched table is corrupt and
+    // must not be applied half-read.
+    TagValue dimsTag;
+    if ((findTag(bytes, 50981, le, dimsTag) && dimsTag.count == 3) ||
+        (findTag(bytes, 50937, le, dimsTag) && dimsTag.count == 3)) {
+        const size_t offset = valueOffset(dimsTag);
+        if (offset + 12 <= bytes.size()) {
+            profile.hueSatDims = {
+                read32(bytes, offset, le),
+                read32(bytes, offset + 4, le),
+                read32(bytes, offset + 8, le)};
+        }
+    }
+    const uint64_t gridCells =
+        static_cast<uint64_t>(profile.hueSatDims[0]) *
+        profile.hueSatDims[1] * profile.hueSatDims[2];
+    if (profile.hueSatDims[0] >= 1 && profile.hueSatDims[1] >= 2 &&
+        profile.hueSatDims[2] >= 1 && gridCells <= (1u << 24)) {
+        if (findTag(bytes, 50982, le, tag)) {
+            std::vector<float> data;
+            if (tag.count == gridCells * 3 &&
+                readFloatArray(bytes, tag, le, data)) {
+                profile.hueSatMap1 = std::move(data);
+                profile.hasHueSatMap1 = true;
+            }
+        }
+        if (findTag(bytes, 50983, le, tag)) {
+            std::vector<float> data;
+            if (tag.count == gridCells * 3 &&
+                readFloatArray(bytes, tag, le, data)) {
+                profile.hueSatMap2 = std::move(data);
+                profile.hasHueSatMap2 = true;
+            }
+        }
+    }
+    // Encoding (DNG 51107): 0 = linear indexes (default), 1 = value index
+    // sRGB-encoded. Only meaningful for 3D tables (value divisions > 1).
+    if (findTag(bytes, 51107, le, tag) && tag.type == 4 && tag.count >= 1)
+        profile.hueSatMapEncoding =
+            static_cast<int>(read32(bytes, valueOffset(tag), le));
     // Tone curve (50940) carries the DCP output curve as a run of 16-bit
     // samples. `count` is the full sample count; we keep up to the curve array
     // capacity (most profiles ship 256 points). The curve domain is implicit:
     // input x is spread uniformly across the samples from 0 to 65535.
+    // Integer-typed curves store 0..65535 magnitudes and are normalized into
+    // the F32 working range; FLOAT curves are already normalized.
     if (findTag(bytes, 50940, le, tag) && tag.count > 0) {
         const size_t sample = curveSampleStep(tag.type);
         const size_t n = std::min<size_t>(tag.count, profile.toneCurve.size());
         const size_t offset = valueOffset(tag);
-        for (size_t i = 0; i < n; ++i)
+        float maxSample = 0.0f;
+        for (size_t i = 0; i < n; ++i) {
             profile.toneCurve[i] =
                 readCurveSample(bytes, offset + i * sample, tag.type, le);
+            maxSample = std::max(maxSample, profile.toneCurve[i]);
+        }
         profile.toneCurveSize = n;
+        if (maxSample > 2.0f) {
+            const float inv = 1.0f / 65535.0f;
+            for (size_t i = 0; i < n; ++i)
+                profile.toneCurve[i] *= inv;
+        }
     }
     if (profile.name.empty())
         profile.name = path.stem().string();

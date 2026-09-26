@@ -5,10 +5,8 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
-#include <fstream>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <unordered_map>
 
 #include <QAbstractButton>
@@ -63,8 +61,6 @@
 #include "engine/ImageIO.h"
 #include "engine/Pipeline.h"
 #include "engine/RawDecoder.h"
-#include "engine/Xmp.h"
-#include "engine/XmpSidecar.h"
 // AI inference wiring. ModelManager reads the bundled manifest
 // and probes <applicationDirPath>/models (read-only, ships with the installer)
 // before the per-user cache, so an installed copy finds its bundled models
@@ -93,7 +89,6 @@
 #include "utils/PresetLibrary.h"
 #include "utils/ProfileIO.h"
 #include "utils/RenameTemplate.h"
-#include "utils/XmpProfile.h"
 
 namespace {
 
@@ -609,11 +604,6 @@ void MainWindow::buildMenus() {
     photoMenu->addAction(tr("编辑历史…"), this, &MainWindow::showEditHistory);
     photoMenu->addAction(tr("管理收藏夹…"), this,
                          &MainWindow::onManageCollections);
-    photoMenu->addSeparator();
-    photoMenu->addAction(tr("读取 sidecar"), QKeySequence(), this,
-                         &MainWindow::readSidecar);
-    photoMenu->addAction(tr("写入 sidecar"), QKeySequence(), this,
-                         &MainWindow::writeSidecar);
 
     QMenu* viewMenu = menuBar()->addMenu(tr("视图"));
     viewMenu->addAction(tr("适合窗口"), this, [this]() {
@@ -2697,28 +2687,11 @@ void MainWindow::importPreset() {
     }
     const QString path = QFileDialog::getOpenFileName(
         this, tr("导入预设"), QString(),
-        // .xmp remains a readable legacy preset format (Lightroom compatibility);
-        // the visible name uses our own vocabulary, not the Lightroom brand.
-        tr("XMP 预设 (*.xmp);;本应用预设 (*.lrp)"));
+        tr("本应用预设 (*.lrp)"));
     if (path.isEmpty())
         return;
 
-    std::optional<lrc::Adjustments> preset;
-    if (QFileInfo(path).suffix().compare(QStringLiteral("lrp"),
-                                         Qt::CaseInsensitive) == 0) {
-        preset = lrc::ProfileIO::loadPreset(toStdPath(path));
-    } else {
-        // XMP preset: parse the crs: attributes, then map them to adjustments.
-        std::ifstream in(toStdPath(path), std::ios::binary);
-        if (in) {
-            std::ostringstream ss;
-            ss << in.rdbuf();
-            std::map<std::string, std::string> crsAttrs;
-            if (lrc::XmpDocument::parse(ss.str(), crsAttrs))
-                preset = lrc::XmpProfile::fromCrsAttrs(crsAttrs);
-        }
-    }
-
+    const auto preset = lrc::ProfileIO::loadPreset(toStdPath(path));
     if (!preset) {
         QMessageBox::warning(this, tr("导入预设"), tr("预设文件无效或无法解析。"));
         return;
@@ -2738,73 +2711,18 @@ void MainWindow::exportPreset() {
     const QString dir = QFileInfo(currentFilePath_).absolutePath();
     const QString suggested = dir + QStringLiteral("/") +
                               QFileInfo(currentFilePath_).baseName() +
-                              QStringLiteral(".xmp");
-    QString selectedFilter;
-    QString path = QFileDialog::getSaveFileName(
-        this, tr("导出预设"), suggested,
-        tr("XMP 预设 (*.xmp);;本应用预设 (*.lrp)"), &selectedFilter);
+                              QStringLiteral(".lrp");
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("导出预设"), suggested, tr("本应用预设 (*.lrp)"));
     if (path.isEmpty())
         return;
 
-    // Append the extension implied by the chosen filter when the user omitted one.
-    if (QFileInfo(path).suffix().isEmpty()) {
-        const bool wantsXmp =
-            selectedFilter.contains(QStringLiteral("*.xmp"), Qt::CaseInsensitive);
-        path += wantsXmp ? QStringLiteral(".xmp") : QStringLiteral(".lrp");
-    }
-
-    bool ok = false;
-    if (QFileInfo(path).suffix().compare(QStringLiteral("lrp"),
-                                         Qt::CaseInsensitive) == 0) {
-        ok = lrc::ProfileIO::savePreset(toStdPath(path), currentAdjustments_);
-    } else {
-        // XMP preset: map adjustments to crs: attributes, serialize, write.
-        const auto attrs = lrc::XmpProfile::toCrsAttrs(currentAdjustments_);
-        const std::string xml = lrc::XmpDocument::serialize(attrs);
-        std::ofstream os(toStdPath(path), std::ios::binary);
-        os << xml;
-        os.close();
-        ok = os.good();
-    }
-
+    const bool ok = lrc::ProfileIO::savePreset(toStdPath(path), currentAdjustments_);
     if (ok)
         statusBar()->showMessage(
             tr("已导出预设：%1").arg(QFileInfo(path).fileName()), 4000);
     else
         QMessageBox::warning(this, tr("导出预设"), tr("写入预设文件失败。"));
-}
-
-void MainWindow::readSidecar() {
-    if (currentImageId_ < 0 || currentFilePath_.isEmpty()) {
-        QMessageBox::information(this, tr("读取 sidecar"), tr("先选择一张照片"));
-        return;
-    }
-    lrc::Adjustments adj;
-    if (!lrc::XmpSidecar::readFromSidecar(toStdPath(currentFilePath_), adj)) {
-        QMessageBox::information(this, tr("读取 sidecar"),
-                                 tr("未找到可读取的 sidecar"));
-        return;
-    }
-    // Reading a sidecar is a user edit: undoable via commitAdjustments.
-    commitAdjustments(adj);
-    statusBar()->showMessage(tr("已从 sidecar 读取调整"), 4000);
-}
-
-void MainWindow::writeSidecar() {
-    if (currentImageId_ < 0 || currentFilePath_.isEmpty()) {
-        QMessageBox::information(this, tr("写入 sidecar"), tr("先选择一张照片"));
-        return;
-    }
-    const QString sidecarPath =
-        QFileInfo(currentFilePath_).absolutePath() + QStringLiteral("/") +
-        QFileInfo(currentFilePath_).completeBaseName() + QStringLiteral(".xmp");
-    if (lrc::XmpSidecar::writeToSidecar(toStdPath(currentFilePath_),
-                                        currentAdjustments_))
-        statusBar()->showMessage(
-            tr("已写入 sidecar：%1").arg(QFileInfo(sidecarPath).fileName()),
-            4000);
-    else
-        QMessageBox::warning(this, tr("写入 sidecar"), tr("写入 sidecar 失败。"));
 }
 
 void MainWindow::onSetRating(int imageId, int rating) {

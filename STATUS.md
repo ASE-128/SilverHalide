@@ -13,6 +13,27 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## P-C：移除 Lightroom 兼容（2026-09-26，工作区未提交）
+
+按 [ADR-0001](docs/adr/0001-drop-lightroom-compat.md) 与
+[docs/spec/optimization/04-drop-lr-compat.md](docs/spec/optimization/04-drop-lr-compat.md)
+落地 P-C 部分：彻底移除 Lightroom 的读/写兼容路径，产品数据契约以自有 `.lrp` 预设与 `.shcat` 目录自洽。
+
+- **删除代码**：`src/engine/Xmp.h/.cpp`、`src/engine/XmpSidecar.h/.cpp`、
+  `src/utils/XmpProfile.h/.cpp`、`tests/TestXmp*.cpp`、`docs/XMP-MAPPING.md`、
+  `third_party/pugixml`（仅用于 XMP/crs）。
+- **CMake**：`LRC_ENGINE_SOURCES` / `LRC_UTILS_SOURCES` 移除上述源文件；
+  移除 `pugixml` 静态目标与链接。
+- **UI 入口清理**：`MainWindow.cpp` 删除「读取 sidecar / 写入 sidecar」菜单与槽函数；
+  「导入预设…」「导出预设…」仅保留本应用 `.lrp` 格式（移除 `.xmp` / crs 分支）。
+- **测试迁移**：`tests/test_postcrop_vignette.cpp` 中原 XMP shape 字段往返用例改为
+  `ProfileIO::toJson/fromJson` JSON 往返，保持断言覆盖。
+- **文档更新**：`README.md`、`docs/ARCHITECTURE.md` 移除 XMP 与 Lightroom 兼容描述，
+  明确数据契约自成体系。
+
+**验证**：headless 全量构建 + ctest 全绿（469 用例 / 878718 断言，一次预存 flaky 独立重跑后通过）；
+GUI 全量构建通过（`SilverHalide.exe`、`lrc_qt_tests.exe` 均生成），`run_qt_tests.bat` 退出码 0。
+
 ## 导入静默失败 / 视图跳变 / AI 模型无提示 三连修（2026-09-25，工作区未提交）
 
 用户报障三例非致命运行时问题，定位结论：均为**逻辑性错误 + 失败路径静默**，无结构性病灶，未重构。
@@ -93,8 +114,9 @@
 ## 当前任务状态（2026-09-12）
 
 - **当前进行中的任务**：[竞品对齐优化实施规格](docs/spec/competitive-optimization-implementation-spec.md) +
-  [代码业务可用性审查](docs/archive/code-business-risk-review-2026-09-06.md)（R-01 ~ R-16）。
-- **总体状态**：竞品规格 P1/P2/P3/T 均已实现（spec 内对应验收标准已勾选，含 2026-09-19 起的 P1-3 端到端与 Qt 真实导出验收、P3-4 GPU 后端）；GPU 真机量化（P1-1 DirectML ≥2x、P3-4 提速）与部分 P1 数值矩阵断言待补（见 spec 各批次验收标准注释）。风险审查项已逐条修复，详见下。
+  [代码业务可用性审查](docs/archive/code-business-risk-review-2026-09-06.md)（R-01 ~ R-16）+
+  [P-C Lightroom 兼容移除](docs/spec/optimization/04-drop-lr-compat.md)（本批次已落地，待构建验证）。
+- **总体状态**：竞品规格 P1/P2/P3/T 均已实现（spec 内对应验收标准已勾选，含 2026-09-19 起的 P1-3 端到端与 Qt 真实导出验收、P3-4 GPU 后端）；**P-C（Lightroom 兼容移除）已按 ADR-0001 落地代码、测试与文档**。GPU 真机量化（P1-1 DirectML ≥2x、P3-4 提速）与部分 P1 数值矩阵断言待补（见 spec 各批次验收标准注释）。风险审查项已逐条修复，详见下。
 - **风险审查修复进展（工作区未提交）**：R-01（DCP 注入解码/渲染）~ R-16 均已在引擎/目录/UI 层落地并登记回归测试；R-10（标准预览缓存色彩版本）、R-11（内存导入保持 ICC）、R-16（删除清理外部缓存）为最近一批，2026-09-12 验证通过。
 - **验证（2026-09-12，headless）**：当前构建树 `cmake --build build_headless -j` 通过；`ctest --test-dir build_headless` 全绿，**444 用例 / 752,709 断言** 全部通过。期间修复一处 JPEG APP2 ICC 段长度 off-by-2 的写入错误（`ImageIO::jpegIccMarkers`），否则内嵌 ICC 无法被 `extractIccFromJpeg` 恢复，会同时影响 R-08/R-10 路径。
 - **P1-3 批量重命名（2026-09-19 端到端已验收）**：`src/utils/RenameTemplate.h` 实现模板渲染（`{date}/{index[:W]}/{base}`）与冲突唯一路径；导入端 `ImportDialog` 加重命名复选+模板+新文件名预览，`ImportWorker::importPaths` 按选择顺序+源文件修改日期在 Stage1 重命名（`renameMutex_` 串行化查重，失败回退）；导出端 `ExportDialog` 加批量重命名复选+模板+母版/副本预览，启用时 `MainWindow` 走 `PreviewWorker::batchExport` 为母版+所有虚拟副本按模板重命名输出。headless 端到端集成用例（批处理后文件名唯一、DB `file_path` 镜像一致）+ Qt `batchExport` 真实导出断言已验收；GUI 手动验收未做。
@@ -122,7 +144,7 @@
 
 - `src/app/Constants.h`：`kDefaultCatalogFile` → `Default.shcat`；新增 `kPreviewSideDir=previews.shcat`、`kCatalogDbSuffix=.shcat`。
 - `src/app/Application.{h,cpp}`：`defaultCatalogPath()` 改返回**目录**（`AppData/…/Default`，目录即库），保留 legacy `.lrcat`/`.shcat` 单文件迁移（旧文件存在且新目录未建时返回旧文件）；新增 `catalogDbFile()`（目录→`<dir>/<stem>.shcat`，文件→原样）、`catalogPreviewDir()`（目录→`<dir>/previews.shcat`）。
-- `src/ui/MainWindow.cpp`：CatalogDatabase 构造传入 dbFile+previewDir；`newCatalog` 选目录、`openCatalog` 接受 `.shcat` 目录与 legacy `.lrcat`；libraryRoot 目录在目录内、legacy 文件在文件旁。移除用户可见 lr 名称：备份 `backup.lrcat`→`.shcat`、预设对话框 `Lightroom 预设`→`XMP 预设`（保留 `.xmp`/`.lrcat`/DCP 兼容读取能力）。
+- `src/ui/MainWindow.cpp`：CatalogDatabase 构造传入 dbFile+previewDir；`newCatalog` 选目录、`openCatalog` 接受 `.shcat` 目录与 legacy `.lrcat`；libraryRoot 目录在目录内、legacy 文件在文件旁。移除用户可见 lr 名称：备份 `backup.lrcat`→`.shcat`；预设对话框仅保留本应用 `.lrp` 预设（Lightroom / XMP 兼容路径已移除）。
 - `src/catalog/CatalogDatabase.cpp` `open()`：新建目录前先 `create_directories(parent)`，目录不存在时自动创建而非报错。
 - `src/ui/ImportWorker.cpp`：改单连接批量事务（`addImage` 带指纹 / `storePreview` / `beginTransaction`）；修复 `fileFingerprint` chrono 模板 `duration` 类型错误（否则 GUI 无法编译）。
 
@@ -520,9 +542,6 @@ v2.10.0 新增 TestThumbnailCache（1:1 缓存构建/幂等/写回）与 TestCat
 | TestMaskRaster      | **蒙版引擎级性能**：brushWeightField 光栅化采样一致性、非 Brush 类型、缓存命中/失效、geometryHash 仅几何+invert、500-dab 冒烟（<2000ms）、applyLocalAdjustments 逐位一致 |
 | TestThumbnailCache  | 1:1 全分辨率缓存：ensureFullRes 构建/幂等、findFullRes 命中、writeFullRes 写回、loadImage 尺寸往返                                                    |
 | TestHdrMerge        | 曝光包围合成、EV 估计                                                                                                                    |
-| TestXmpDocument     | XMP 解析：命名空间、rdf:Description、crs 属性提取、畸形 XML 容错                                                                                  |
-| TestXmpProfile      | crs↔Adjustments 映射：往返覆盖全组、未知键容错、越界钳制、金色值                                                                                        |
-| TestXmpSidecar      | sidecar 路径（替换扩展名）、写后读往返、缺失/损坏/空 XML、deferred 内嵌读取                                                                               |
 | TestProfileIO       | 预设 JSON 完整往返、version/未知键容错、savePreset/loadPreset、ColorTarget/Mask 哈希                                                            |
 | TestUndoStack       | UndoStack 压栈/撤销/重做、redo 分支清空、limit 截断、clear、setLimit 动态生效                                                                       |
 | TestViewportMath    | 光标锚定缩放平移的 anchorPan 纯函数：中心锚定、恒等/放大/缩小、边角、视图小于图像、非整数坐标、极小图像                                                                      |
@@ -562,7 +581,7 @@ cmake --build build_gui --config Release
 | **HDR 合成菜单（选 2+ 张→合并→存 DNG→入目录）**                                                                                                                                                              | ✅ v1.4 新增       |
 | PNG/TIFF 读取 + 多 RAW 格式（libraw）                                                                                                                                                                 | ✅               |
 | DNG 读取/写出                                                                                                                                                                                      | ✅               |
-| 目录管理（SQLite .lrcat、评分/旗标/标签/备份/VACUUM）                                                                                                                                                         | ✅               |
+| 目录管理（SQLite `.shcat` 目录即库、评分/旗标/标签/备份/VACUUM）                                                                                                                                              | ✅               |
 | 蒙版引擎（线性/径向/画笔 + 局部调整）                                                                                                                                                                          | ✅ 引擎层           |
 | **UI 蒙版编辑（线性/径向/画笔绘制 + 红色权重叠加 + 羽化/不透明度/反转 + 局部调整滑块）**                                                                                                                                         | ✅ v1.5 新增       |
 | 点颜色引擎（ColorTarget 色相/饱和/明亮/范围/平滑/强度）                                                                                                                                                           | ✅ 引擎层，已序列化      |
@@ -575,9 +594,8 @@ cmake --build build_gui --config Release
 | **导航「目录图片库」分组（受管子文件夹浏览 + 过滤）**                                                                                                                                                                 | ✅ v1.9 新增       |
 | **标签颜色（7 色可设/清除 + Filmstrip 角标 + 右键菜单/快捷键 + Navigator 色标筛选）**                                                                                                                                  | ✅ v2.0 新增       |
 | **收藏夹集合（collections/collection\_images 表 + Navigator 分组过滤 + CollectionsDialog + 角标）**                                                                                                          | ✅ v2.0 新增       |
-| **XMP sidecar 读写（.xmp 与图像同名 + Lightroom 兼容 XMP 文档生成/解析）**                                                                                                                                      | ✅ v2.2 (M3) 新增  |
-| **预设导入/导出（文件菜单：.xmp Lightroom 预设 / .lrp 本应用预设）**                                                                                                                                               | ✅ v2.2 (M3) 新增  |
-| **crs 字段映射（基本/细节/效果/颗粒/曲线 PV2012 点数组/HSL 24/色调分离，未知字段容错，Temperature mired 6500K、Tint ×1.5）**                                                                                                   | ✅ v2.2 (M3) 新增  |
+| ~~XMP sidecar 读写（.xmp 与图像同名 + Lightroom 兼容 XMP 文档生成/解析）~~（按 ADR-0001 已移除）                                                                                                                            | ❌ 已移除         |
+| **本应用预设导入/导出（文件菜单：.lrp 格式）**                                                                                                                                                                    | ✅ v2.2 (M3) 新增  |
 | **预设序列化加固（TestProfileIO：完整往返/version 与未知键容错/save-load/哈希）**                                                                                                                                    | ✅ v2.2 (M3) 新增  |
 | **M1 快捷键体系（全局裸键 + Ctrl 组合）+ 撤销/重做（UndoStack，滑块一步/蒙版一笔一步）+ 白平衡吸管（W）**                                                                                                                           | ✅ v2.4.0 新增     |
 | **M2 缩放/平移体验（光标锚定滚轮缩放 + 空格/中键/方向键平移 + 适合宽度视图 Ctrl+Alt+0 + 拖动进 1:1 请求全尺寸 + Z 键记忆最后适合模式）**                                                                                                       | ✅ v2.5.0 新增     |

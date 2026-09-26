@@ -17,7 +17,7 @@ inline size_t rowBytes(const ImageBuffer& b) {
 }
 
 // Round-to-nearest quantization (truncation would bias dark).
-inline uint16_t toU16(float v) {
+inline uint16_t toU16Quant(float v) {
     return static_cast<uint16_t>(std::clamp(v, 0.0f, 1.0f) * 65535.0f + 0.5f);
 }
 
@@ -66,7 +66,7 @@ void writeRowFloats(ImageBuffer& dst, int y, const std::vector<float>& row) {
         uint16_t* p = reinterpret_cast<uint16_t*>(dst.data().data()) +
                       static_cast<size_t>(y) * w * ch;
         for (size_t i = 0; i < row.size(); ++i)
-            p[i] = toU16(row[i]);
+            p[i] = toU16Quant(row[i]);
         break;
     }
     case PixelFormat::U8: {
@@ -116,7 +116,7 @@ void ImageBuffer::setPixel(int x, int y, int channel, float value) {
     const size_t idx = (static_cast<size_t>(y) * width_ + x) * channels_ + channel;
     switch (format_) {
     case PixelFormat::U16:
-        reinterpret_cast<uint16_t*>(data_.data())[idx] = toU16(value);
+        reinterpret_cast<uint16_t*>(data_.data())[idx] = toU16Quant(value);
         break;
     case PixelFormat::F32:
         reinterpret_cast<float*>(data_.data())[idx] = value;
@@ -238,6 +238,25 @@ std::shared_ptr<ImageBuffer> ImageBuffer::toF32() const {
     // Each source row maps to exactly one output row, so rows can be converted
     // independently across the thread pool. Every chunk owns its row buffer --
     // scratch is never shared between chunks.
+    const size_t grain =
+        lrc::parallel::defaultGrain(static_cast<size_t>(height_));
+    lrc::parallel::parallelFor(static_cast<size_t>(height_), grain,
+                               [&](size_t by, size_t ey) {
+        std::vector<float> row;
+        for (int y = static_cast<int>(by); y < static_cast<int>(ey); ++y) {
+            loadRowFloats(*this, y, row);
+            writeRowFloats(*out, y, row);
+        }
+    });
+    return out;
+}
+
+std::shared_ptr<ImageBuffer> ImageBuffer::toU16() const {
+    if (format_ == PixelFormat::U16)
+        return std::make_shared<ImageBuffer>(*this);
+    auto out = ImageBuffer::create(width_, height_, PixelFormat::U16);
+    // Row-parallel for the same reason as toF32: each output row depends on
+    // exactly one input row and scratch buffers stay chunk-local.
     const size_t grain =
         lrc::parallel::defaultGrain(static_cast<size_t>(height_));
     lrc::parallel::parallelFor(static_cast<size_t>(height_), grain,

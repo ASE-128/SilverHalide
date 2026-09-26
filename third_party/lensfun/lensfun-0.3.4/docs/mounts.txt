@@ -1,0 +1,63 @@
+Canon:
+    FL - Introduced in 1964
+    FD - Another mount (incompatible with FL) feat. automatic aperture
+    EF - Another incompatible mount, EF stands for electro-focus
+    EF-S - A newer variant of EF with shorter flange depth, allowing
+           for manufacturing of less expensive wide-angle lenses. Not useable
+           on cameras with crop 1.0 and on EF-only cameras.
+
+Contax:
+    N - ?
+    Contax/Yashica - ?
+    G - Rangefinder mount with autofocus
+
+Generic:
+    M42 - First used in Zeiss Contax S (1949) and then adopted by many
+          other manufacturers due to patent-less nature.
+    T2 - Introduced by Tamron in 1957, with adaptors for virtually all other
+         mounts (due to large flange distance).  Used in astronomical
+         devices and some mirror lenses.
+    C - Intended for cinematographic lenses on very different viewframe sizes
+        (often smaller that µFT), it can be adapted to most mirrorless systems.
+        It has a very short flange distance, but due to the small radius of
+        most C mount lenses, the adapter can be realised as a ring around the
+        lens.  In photography, most C mount lenses must be considered fun
+        lenses.
+
+Leica:
+    M - Classical Leica rangefinder mount
+    R - SLR mount, discontinued since 2009
+    S - Medium-format mount
+
+Hasselblad:
+    H - Current medium format mount of this brand
+
+Minolta:
+    MC - Older Minolta mount for manual lenses
+    MD - Newer version of MC with aperture information to the camera
+    AF - (1985) features autofocus, several generations.
+
+Nikon:
+    F - Introduced in 1959
+    F AI - (1977) - Added electrical interface for automatic aperture control.
+    F AI-S - (1979) - Added a mean to tell camera current focal length.
+    F AF - (1986) - Added screwdriver AF coupling, compatible with older mounts
+
+Olympus:
+    4/3 System - (2002), the new "digital" mount together with Kodak
+
+Pentax:
+    K - the original mount as introduced in 1975
+    KF - the world's first autofocus mount, 1981. Abandoned.
+    KA - the K mount plus electrical contacts to detect the min/max lens
+         aperture and also whether the 'A' aperture mode is enabled.
+    KAF - the KA mount plus autofocus
+    KAF2 - in addition to KAF features implements power zooming and
+           adds MTF information to the lens data
+
+Samsung:
+    NX - mirrorless APS-C mount introduced in 2010
+    NX mini - mirrorless 1" mount introduced in 2014
+
+Voigtländer:
+    DKL - the "Deckel" mount used in the Bessamatic

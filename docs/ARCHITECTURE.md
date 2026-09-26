@@ -15,20 +15,19 @@
 │  engine/   (纯 C++，无 Qt)   RawDecoder · ImageBuffer ·      │
 │             Pipeline · Adjustments · ColorManager · Export   │
 │             Engine · ImageIO · HdrMerge · DngConverter ·     │
-│             ZoneCurve · Xmp · XmpSidecar · ImageFormats ·    │
-│             LensfunProfile · DcpProfile                     │
+│             ZoneCurve · ImageFormats · LensfunProfile ·      │
+│             DcpProfile                                       │
 ├─────────────────────────────────────────────────────────────┤
-│  utils/    Json · ProfileIO · XmpProfile · MathUtils ·      │
+│  utils/    Json · ProfileIO · PresetLibrary · MathUtils ·   │
 │             Parallel · UndoStack · ViewportMath             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 - `engine/` 与 `catalog/` 的头文件**禁止包含任何 Qt 头文件**，因此整个管线可在
   无 Qt 的环境下编译、单测（`ctest`）。
-- **XMP / Lightroom 兼容路径（`Xmp` / `XmpSidecar` / `XmpProfile`）**：按
-  [ADR-0001](adr/0001-drop-lightroom-compat.md)，Lightroom 兼容（读 + 写）将移除，
-  产品数据契约走向自有 `.lrp` / `.shcat` 自洽；上表中的这些模块属历史兼容路径、待剥离，
-  不再作为兼容卖点。
+- **Lightroom 兼容路径（`Xmp` / `XmpSidecar` / `XmpProfile`）已移除**：按
+  [ADR-0001](adr/0001-drop-lightroom-compat.md)，Lightroom 的读与写均不再支持，
+  产品数据契约以自有 `.lrp` 预设与 `.shcat` 目录自洽。
 - 跨层数据用引擎自有的 `ImageBuffer`（U16/F32/U8 RGB 交错布局）传递；UI 层在
   `toQImage()` 处一次性拷贝为 `QImage`。
 
@@ -162,20 +161,21 @@ UI 通过 `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` 下发请求，
 │   ├── app/                # Application、Constants（版本/缓存容量/应用名）
 │   ├── engine/             # RawDecoder ImageBuffer Pipeline Adjustments
 │   │                       # ColorManager ExportEngine ImageIO ImageFormats
-│   │                       # HdrMerge DngConverter ZoneCurve Xmp XmpSidecar
+│   │                       # HdrMerge DngConverter ZoneCurve
 │   ├── catalog/            # CatalogDatabase ThumbnailCache FolderMonitor LibraryManager
 │   ├── ui/                 # MainWindow + 自绘控件（CurveEditor/Histogram/Filmstrip/
 │   │                       # Navigator/DevelopPanel/ImageViewport/ColorWheel/PanelSection）
 │   │                       # + 5 对话框 + ImportWorker/PreviewWorker + MetaTypes
-│   └── utils/              # ProfileIO XmpProfile Json MathUtils Parallel
+│   └── utils/              # ProfileIO PresetLibrary Json MathUtils Parallel
 │                           # UndoStack(头文件) ViewportMath(头文件)
 ├── tests/                  # Catch2 单测（无 Qt，25 个 Test*.cpp）
 ├── resources/styles/       # 暗色主题 QSS（dark.qss）
 ├── resources/icons/        # 应用/ exe 图标（make_icons.py 生成）
 ├── packaging/              # NSIS 安装脚本 installer.nsi + welcome.bmp/make_bmp.py
-├── docs/                   # 架构、XMP 映射、当前任务规格；历史归档在 archive/
-└── third_party/            # vendored 依赖（libraw/lcms2/sqlite3/Catch2/pugixml/stb）
+├── docs/                   # 架构、当前任务规格；历史归档在 archive/
+└── third_party/            # vendored 依赖（libraw/lcms2/sqlite3/Catch2/stb）
 ```
 
-> 注：`engine/Xmp*`、`utils/XmpProfile` 与 `docs/XMP-MAPPING.md`（crs 字段映射）属 Lightroom
-> 兼容路线，按 [ADR-0001](adr/0001-drop-lightroom-compat.md) 将移除，定位为待剥离的历史兼容路径。
+> 注：`engine/Xmp*`、`utils/XmpProfile` 与 `docs/XMP-MAPPING.md`（crs 字段映射）已按
+> [ADR-0001](adr/0001-drop-lightroom-compat.md) 移除，产品数据契约以自有 `.lrp` 预设与 `.shcat`
+> 目录自洽。

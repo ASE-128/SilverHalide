@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,7 +25,7 @@
 #include "engine/ColorManager.h"
 #include "engine/ImageBuffer.h"
 #include "engine/Pipeline.h"
-#include "utils/XmpProfile.h"
+#include "utils/ProfileIO.h"
 
 using namespace Catch;
 using namespace lrc;
@@ -183,7 +182,8 @@ TEST_CASE("post-crop vignette: highlights protects bright pixels from the "
     }
 }
 
-TEST_CASE("post-crop vignette: XMP shape fields round-trip", "[vignette][xmp]") {
+TEST_CASE("post-crop vignette: ProfileIO JSON shape fields round-trip",
+          "[vignette]") {
     Adjustments a;
     a.vignette = -30.0;
     a.vignetteMidpoint = 35.0;
@@ -191,26 +191,19 @@ TEST_CASE("post-crop vignette: XMP shape fields round-trip", "[vignette][xmp]") 
     a.vignetteFeather = 70.0;
     a.vignetteHighlights = 25.0;
 
-    const auto attrs = XmpProfile::toCrsAttrs(a);
-    REQUIRE(attrs.count("PostCropVignetteMidpoint") == 1);
-    REQUIRE(attrs.count("PostCropVignetteRoundness") == 1);
-    REQUIRE(attrs.count("PostCropVignetteFeather") == 1);
-    REQUIRE(attrs.count("PostCropVignetteHighlightContrast") == 1);
+    const auto value = ProfileIO::toJson(a);
+    REQUIRE(value.contains("vignette"));
+    REQUIRE(value.contains("vignetteMidpoint"));
+    REQUIRE(value.contains("vignetteRoundness"));
+    REQUIRE(value.contains("vignetteFeather"));
+    REQUIRE(value.contains("vignetteHighlights"));
 
-    const Adjustments r = XmpProfile::fromCrsAttrs(attrs);
+    const Adjustments r = ProfileIO::fromJson(value);
     REQUIRE(r.vignette == Approx(-30.0).margin(1e-6));
     REQUIRE(r.vignetteMidpoint == Approx(35.0).margin(1e-6));
     REQUIRE(r.vignetteRoundness == Approx(40.0).margin(1e-6));
     REQUIRE(r.vignetteFeather == Approx(70.0).margin(1e-6));
     REQUIRE(r.vignetteHighlights == Approx(25.0).margin(1e-6));
-
-    // Defaults are not emitted (keeps the default export to just the
-    // always-on ToneCurveName2012).
-    const auto defAttrs = XmpProfile::toCrsAttrs(Adjustments::defaults());
-    REQUIRE(defAttrs.count("PostCropVignetteMidpoint") == 0);
-    REQUIRE(defAttrs.count("PostCropVignetteRoundness") == 0);
-    REQUIRE(defAttrs.count("PostCropVignetteFeather") == 0);
-    REQUIRE(defAttrs.count("PostCropVignetteHighlightContrast") == 0);
 }
 
 TEST_CASE("post-crop vignette: all-default parameters are a no-op",

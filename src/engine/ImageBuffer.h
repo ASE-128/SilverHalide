@@ -106,6 +106,14 @@ public:
      */
     std::shared_ptr<ImageBuffer> toF32() const;
 
+    /**
+     * @brief Converts this buffer to an equal-sized U16 buffer.
+     *
+     * F32/U8 channel values are clamped to [0,1] and scaled to the U16
+     * range; an already-U16 source is copied unchanged.
+     */
+    std::shared_ptr<ImageBuffer> toU16() const;
+
 private:
     // Shared area-average core; `format` selects the output storage type.
     std::shared_ptr<ImageBuffer> resizeToFormat(int newWidth, int newHeight,

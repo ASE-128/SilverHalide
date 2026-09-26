@@ -21,9 +21,6 @@ add_executable(lrc_tests
   TestMaskRaster.cpp
   TestHdrMerge.cpp
   TestZoneCurve.cpp
-  TestXmpDocument.cpp
-  TestXmpProfile.cpp
-  TestXmpSidecar.cpp
   TestProfileIO.cpp
   TestParallel.cpp
   TestUndoStack.cpp

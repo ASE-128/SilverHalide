@@ -229,15 +229,6 @@ else()
   message(STATUS "sqlite-vec: omitted (third_party/sqlitevec/sqlite-vec.c missing)")
 endif()
 
-# --- pugixml (vendored single-header-pair XML parser, XMP sidecars) ---------
-if(NOT TARGET pugixml)
-  add_library(pugixml STATIC third_party/pugixml/pugixml.cpp)
-  target_include_directories(pugixml PUBLIC third_party/pugixml)
-  if(MSVC)
-    target_compile_options(pugixml PRIVATE /W4 /wd4100 /wd4244 /wd4996)
-  endif()
-endif()
-
 # --- catch2 (tests only) ---------------------------------------------------
 if(LRC_BUILD_TESTS)
   if(TARGET Catch2::Catch2)
@@ -335,8 +326,6 @@ set(LRC_ENGINE_SOURCES
   src/engine/HdrMerge.cpp
   src/engine/DngConverter.cpp
   src/engine/ZoneCurve.cpp
-  src/engine/Xmp.cpp
-  src/engine/XmpSidecar.cpp
   src/engine/PanoramaStitcher.cpp
   # --- PHASE_11: AI inference infrastructure (pure C++, Qt-free) ---------
   src/engine/AiInference.cpp
@@ -367,14 +356,13 @@ set(LRC_UTILS_SOURCES
   src/utils/Json.cpp
   src/utils/ProfileIO.cpp
   src/utils/PresetLibrary.cpp
-  src/utils/XmpProfile.cpp
   src/utils/Parallel.cpp
   src/utils/Sha256.cpp)
 
 # engine: pure C++, Qt-free core
 add_library(lrc_engine STATIC ${LRC_ENGINE_SOURCES} ${LRC_UTILS_SOURCES})
 target_include_directories(lrc_engine PUBLIC src)
-target_link_libraries(lrc_engine PUBLIC raw lcms2 sqlite3 stb_image_write pugixml Threads::Threads)
+target_link_libraries(lrc_engine PUBLIC raw lcms2 sqlite3 stb_image_write Threads::Threads)
 if(TARGET sqlite_vec AND LRC_HAS_SQLITE_VEC)
   # vec0 KNN for photo_features embeddings (goal 6). PRIVATE is enough here —
   # catalog links lrc_engine so the vec symbols resolve transitively.
