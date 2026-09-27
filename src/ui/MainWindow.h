@@ -15,6 +15,7 @@
 
 #include <QColor>
 #include <QElapsedTimer>
+#include <QFutureWatcher>
 #include <QHash>
 #include <QImage>
 #include <QMainWindow>
@@ -22,14 +23,19 @@
 #include <QStringList>
 #include <QVector>
 
+#include "app/DuplicateDetector.h"
 #include "catalog/CatalogDatabase.h"
 #include "catalog/LibraryManager.h"
 #include "engine/Adjustments.h"
 #include "engine/ImageBuffer.h"
 #include "engine/Pipeline.h"  // lrc::HistogramBins for the histogramReady slot.
 #include "engine/RawDecoder.h"
+#include "engine/SoftProofing.h"  // lrc::SoftProofParams for the proof slots.
 #include "ui/FilmstripWidget.h"
 #include "ui/ImageViewport.h"
+// The slots below carry engine types (Adjustments, ImageBufferPtr, HistogramBins,
+// SoftProofParams): their metatypes must be declared before moc uses them.
+#include "ui/MetaTypes.h"
 #include "utils/UndoStack.h"
 
 namespace lrc {
@@ -41,6 +47,7 @@ class FolderMonitor;
 class Pipeline;
 class PresetLibrary;           // named preset store (P3-3)
 class ThumbnailCache;
+class SoftProofingDialog;      // modeless proofing dialog (视图 → 软打样…)
 } // namespace lrc
 
 class CollectionsDialog;
@@ -161,6 +168,36 @@ private slots:
                       const QString& lensModel, float focalLengthMm,
                       float aperture, float cropFactor);
     void onDcpProfileSelected(const QString& path);
+    // The develop panel's Lensfun enable checkbox was toggled. The adjustment
+    // stack is persisted by onAdjustmentsCommitted; this slot only surfaces
+    // user feedback so the toggle is not silent.
+    void onLensfunEnabledChanged(bool enabled);
+
+    // --- Soft proofing (视图 → 软打样…) --------------------------------------
+    // Opens (or re-raises) the modeless soft-proofing dialog.
+    void openSoftProofing();
+    // The dialog's parameters changed: re-render the current preview through
+    // SoftProofing. `enabled == false` restores the unproofed frame.
+    void onSoftProofParamsChanged(const lrc::SoftProofParams& params,
+                                  bool enabled);
+    // Proofed frame from the preview worker (swapped into the viewport without
+    // resetting zoom/pan).
+    void onProofReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
+    // Soft proofing could not run; the message says why.
+    void onProofFailed(const QString& message);
+    // The dialog asked for an out-of-gamut report PNG.
+    void onExportGamutReport();
+    // The worker finished the gamut mask; write it to the path the user picked.
+    void onGamutReportReady(const lrc::ImageBufferPtr& rgbU8);
+
+    // --- Duplicate detection (照片 → 查找重复项…) ----------------------------
+    // Starts a background scan (one at a time) over the catalog's cached
+    // thumbnails and shows DuplicateResultsDialog when it finishes.
+    void onFindDuplicates();
+    void onDuplicateScanFinished();
+    // The dialog asked to focus one or more members; jump to the first one that
+    // is present in the current filmstrip listing.
+    void onDuplicateFocusImages(const QVector<int64_t>& imageIds);
     void openMaskWindow();
     void onFullResReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
     /**
@@ -320,6 +357,31 @@ private:
     // Unchecks the spot-tool toolbar button without emitting (used when a mask
     // tool or sampler disarms the spot tool inside the viewport).
     void disarmSpotToolButton();
+
+    // --- Duplicate detection helpers -----------------------------------------
+    /**
+     * @brief Result of a background duplicate scan.
+     *
+     * Plain data so it can travel through QFutureWatcher; `error` is non-empty
+     * when the scan could not run at all (no catalog / too few thumbnails).
+     */
+    struct DuplicateScanResult {
+        std::vector<lrc::DuplicateGroup> groups;
+        size_t photosScanned = 0;
+        size_t embeddedCount = 0;
+        QString error;
+    };
+    /**
+     * @brief Scans the catalog for duplicates. Runs on a worker thread.
+     *
+     * Loads each photo's catalog thumbnail into an ImageBuffer (never touches
+     * widgets), seeds DuplicateDetector with the cached phash/embedding rows, and
+     * writes the newly computed features back through storePhotoFeatures() so the
+     * next scan is cheaper.
+     */
+    DuplicateScanResult scanForDuplicates();
+    // Non-null while a scan is in flight (also gates re-entrant scans).
+    QFutureWatcher<DuplicateScanResult>* duplicateWatcher_ = nullptr;
     // Linear F32 -> linear U16 (panorama DNG writer needs U16).
     lrc::ImageBufferPtr f32ToU16(const lrc::ImageBufferPtr& f32) const;
 
@@ -388,6 +450,16 @@ private:
     FilmstripWidget* filmstrip_ = nullptr;
     QScrollArea* developScroll_ = nullptr;  // scroll area wrapping developPanel_
     QDialog* maskWindow_ = nullptr;
+    // Modeless soft-proofing dialog (视图 → 软打样…). Parented to the window so
+    // it is destroyed with it. Lives in namespace lrc, hence the qualification.
+    lrc::SoftProofingDialog* softProofDialog_ = nullptr;
+    // Last parameters pushed by the dialog + whether proofing is on. Kept on the
+    // UI thread so a freshly rendered preview can be re-proofed (see
+    // onPreviewReady).
+    lrc::SoftProofParams softProofParams_;
+    bool softProofEnabled_ = false;
+    // Destination PNG for the in-flight gamut report request (empty = none).
+    QString pendingGamutReportPath_;
     QTimer* folderTimer_ = nullptr;
     // One-shot throttle (150ms) that guarantees the last coarse frame's
     // histogram/status update lands after the throttle window ends.

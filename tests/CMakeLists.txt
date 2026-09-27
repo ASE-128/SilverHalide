@@ -101,7 +101,12 @@ if(LRC_ENABLE_QT)
     ../src/ui/ExportDialog.cpp
     ../src/ui/ImportDialog.cpp
     ../src/ui/SnapshotDialog.cpp
-    ../src/ui/PresetDialog.cpp)
+    ../src/ui/PresetDialog.cpp
+    # Dialogs whose worker/main-window wiring is covered by the smoke tests:
+    # the soft-proofing dialog (视图 → 软打样…) and the duplicate-results dialog
+    # (照片 → 查找重复项…).
+    ../src/ui/SoftProofingDialog.cpp
+    ../src/ui/DuplicateResultsDialog.cpp)
   target_link_libraries(lrc_qt_tests PRIVATE
     lrc_catalog lrc_engine
     Qt6::Test Qt6::Widgets Qt6::Concurrent)

@@ -12,11 +12,16 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QColor>
+#include <QColorSpace>
 #include <QEventLoop>
+#include <QImage>
+#include <QImageReader>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QSignalSpy>
+#include <QTableWidget>
 #include <QTest>
 #include <QThread>
 #include <QTimer>
@@ -38,6 +43,7 @@
 #include "engine/Pipeline.h"
 #include "engine/RawDecoder.h"
 #include "ui/DevelopPanel.h"
+#include "ui/DuplicateResultsDialog.h"
 #include "ui/ExportDialog.h"
 #include "ui/ImageViewport.h"
 #include "ui/ImportDialog.h"
@@ -45,6 +51,12 @@
 #include "ui/PresetDialog.h"
 #include "ui/PreviewWorker.h"
 #include "ui/SnapshotDialog.h"
+#include "ui/SoftProofingDialog.h"
+
+// ui/ImportWorker.h pulls in ui/MetaTypes.h, the single declaration point for
+// every cross-thread engine type (ImportMode, SoftProofParams, ...), so this file
+// needs no Q_DECLARE_METATYPE of its own -- and must not add one: a second
+// QMetaTypeId<T> specialization in the same translation unit is C2766.
 #include "utils/PresetLibrary.h"
 
 using namespace lrc;
@@ -70,6 +82,39 @@ bool startsWith(const std::vector<uint8_t>& hay,
         if (hay[i++] != b)
             return false;
     return true;
+}
+
+void writeFile(const std::filesystem::path& p, const std::vector<uint8_t>& b) {
+    std::ofstream os(p, std::ios::binary);
+    os.write(reinterpret_cast<const char*>(b.data()),
+             static_cast<std::streamsize>(b.size()));
+}
+
+// Deletes the start-of-scan marker from a JPEG byte stream, reproducing the
+// exact shape of the R-08 defect (ICC payload intact, "FF DA" gone). Walks the
+// length-prefixed segments itself so it cannot agree with the engine's parser by
+// accident. Returns an empty vector when no SOS marker is found.
+std::vector<uint8_t> stripJpegSos(std::vector<uint8_t> jpg) {
+    if (jpg.size() < 2 || jpg[0] != 0xFF || jpg[1] != 0xD8)
+        return {};
+    size_t i = 2;
+    while (i + 1 < jpg.size()) {
+        if (jpg[i] != 0xFF)
+            return {};
+        const uint8_t m = jpg[i + 1];
+        if (m == 0xDA) {
+            jpg.erase(jpg.begin() + static_cast<std::ptrdiff_t>(i),
+                      jpg.begin() + static_cast<std::ptrdiff_t>(i + 2));
+            return jpg;
+        }
+        if (m == 0xD9 || i + 4 > jpg.size())
+            return {};
+        const size_t len = (static_cast<size_t>(jpg[i + 2]) << 8) | jpg[i + 3];
+        if (len < 2 || i + 2 + len > jpg.size())
+            return {};
+        i += 2 + len;
+    }
+    return {};
 }
 }
 
@@ -539,6 +584,450 @@ void AiModelAvailabilityTest::aiDenoiseEnableWarnsWhenModelMissing() {
 }
 
 // ---------------------------------------------------------------------------
+// Independent colour-range sampler (regression).
+//
+// The panel's own "取样" button used to emit colorRangeSamplerRequested with no
+// receiver anywhere, so clicking it did nothing and only the C shortcut armed
+// the viewport sampler. These tests pin both halves of the contract MainWindow
+// now wires up: the button emits the request, and the state mirror used by the
+// C/W handlers updates the button without re-emitting.
+// ---------------------------------------------------------------------------
+class ColorRangeSamplerTest : public QObject {
+    Q_OBJECT
+private slots:
+    void panelEmitsSamplerRequest();
+    void checkedMirrorIsSilent();
+    void subSamplerMirrorIsSilent();
+};
+
+void ColorRangeSamplerTest::panelEmitsSamplerRequest() {
+    DevelopPanel panel;
+    auto* button = panel.findChild<QPushButton*>(
+        QStringLiteral("colorRangeSampleButton"));
+    QVERIFY(button != nullptr);
+    QSignalSpy spy(&panel, &DevelopPanel::colorRangeSamplerRequested);
+
+    button->setChecked(true);
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toBool(), true);
+
+    button->setChecked(false);
+    QCOMPARE(spy.count(), 2);
+    QCOMPARE(spy.at(1).at(0).toBool(), false);
+}
+
+void ColorRangeSamplerTest::checkedMirrorIsSilent() {
+    DevelopPanel panel;
+    auto* button = panel.findChild<QPushButton*>(
+        QStringLiteral("colorRangeSampleButton"));
+    QVERIFY(button != nullptr);
+    QSignalSpy spy(&panel, &DevelopPanel::colorRangeSamplerRequested);
+
+    panel.setColorRangeSamplerChecked(true);
+    QCOMPARE(button->isChecked(), true);
+    QCOMPARE(spy.count(), 0);
+    panel.setColorRangeSamplerChecked(false);
+    QCOMPARE(button->isChecked(), false);
+    QCOMPARE(spy.count(), 0);
+}
+
+void ColorRangeSamplerTest::subSamplerMirrorIsSilent() {
+    DevelopPanel panel;
+    auto* subColor = panel.findChild<QPushButton*>(
+        QStringLiteral("subColorRangeSampleButton"));
+    auto* subLuma = panel.findChild<QPushButton*>(
+        QStringLiteral("subLuminanceSampleButton"));
+    QVERIFY(subColor != nullptr);
+    QVERIFY(subLuma != nullptr);
+    QSignalSpy colorSpy(&panel, &DevelopPanel::colorRangeSubSamplerRequested);
+    QSignalSpy lumaSpy(&panel, &DevelopPanel::luminanceSamplerRequested);
+
+    panel.setRangeSubSamplerChecked(true);
+    QCOMPARE(subColor->isChecked(), true);
+    QCOMPARE(subLuma->isChecked(), true);
+    QCOMPARE(colorSpy.count(), 0);
+    QCOMPARE(lumaSpy.count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Soft proofing dialog (视图 → 软打样…).
+//
+// The dialog used to be unreachable dead code. MainWindow now opens it modeless
+// and forwards paramsChanged to the preview worker, so the contract worth
+// pinning is: a control change emits paramsChanged carrying a usable
+// destination key, and the enable state is reported separately.
+// ---------------------------------------------------------------------------
+class SoftProofingDialogSmokeTest : public QObject {
+    Q_OBJECT
+private slots:
+    void emitsParamsChangedOnToggle();
+    void reportsEnableState();
+};
+
+void SoftProofingDialogSmokeTest::emitsParamsChangedOnToggle() {
+    // The dialog only stores the ColorManager (its profile list is static), so a
+    // null manager is fine here and avoids building a real colour pipeline.
+    lrc::SoftProofingDialog dlg(nullptr);
+    QSignalSpy spy(&dlg, &lrc::SoftProofingDialog::paramsChanged);
+
+    auto* enable = dlg.findChild<QCheckBox*>();
+    QVERIFY(enable != nullptr);
+    enable->setChecked(true);
+
+    QCOMPARE(spy.count(), 1);
+    const lrc::SoftProofParams params = dlg.currentParams();
+    QVERIFY(!params.destinationProfilePath.empty());
+    QVERIFY(params.useBlackPointCompensation);
+}
+
+void SoftProofingDialogSmokeTest::reportsEnableState() {
+    lrc::SoftProofingDialog dlg(nullptr);
+    QVERIFY(!dlg.proofingEnabled());
+    auto* enable = dlg.findChild<QCheckBox*>();
+    QVERIFY(enable != nullptr);
+    enable->setChecked(true);
+    QVERIFY(dlg.proofingEnabled());
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate results dialog (照片 → 查找重复项…).
+//
+// Also previously unreachable. The scan feeds it a group list and the catalog;
+// passing a null catalog must still render the report (stacking disabled).
+// ---------------------------------------------------------------------------
+class DuplicateResultsDialogSmokeTest : public QObject {
+    Q_OBJECT
+private slots:
+    void rendersGroupWithoutCatalog();
+};
+
+void DuplicateResultsDialogSmokeTest::rendersGroupWithoutCatalog() {
+    std::vector<lrc::DuplicateGroup> groups;
+    lrc::DuplicateGroup g;
+    g.memberIds = {7, 8};
+    g.meanSimilarity = 0.97f;
+    groups.push_back(g);
+
+    lrc::DuplicateResultsDialog dlg(groups, nullptr);
+    QCOMPARE(dlg.findChildren<QListWidget*>().size(), 1);
+    QCOMPARE(dlg.findChildren<QTableWidget*>().size(), 1);
+    // Both members must be listed for the single group.
+    auto* table = dlg.findChild<QTableWidget*>();
+    QVERIFY(table != nullptr);
+    QCOMPARE(table->rowCount(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Exported JPEG decodability (R-08).
+//
+// The engine's own loader goes through stb_image, which is permissive enough to
+// "decode" a structurally broken JPEG into a partially written buffer — so it
+// cannot tell us whether writeJpeg() produced a valid file. Qt's JPEG plugin is
+// an independent judge (bundled libjpeg), and this is the contract that matters
+// to the user: an exported ICC JPEG must open in a normal application.
+// ---------------------------------------------------------------------------
+class IccJpegDecodabilityTest : public QObject {
+    Q_OBJECT
+private slots:
+    void exportedIccJpegIsReadableByQt();
+    void jpegWithoutSosMarkerIsNotDecodable();
+};
+
+void IccJpegDecodabilityTest::exportedIccJpegIsReadableByQt() {
+    QVERIFY2(QImageReader::supportedImageFormats().contains("jpeg"),
+             "Qt JPEG plugin missing from the test environment");
+
+    // Flat patch: a constant colour survives a q95 JPEG round-trip to within a
+    // few LSBs, so the pixel check below is about the ICC splice and not about
+    // encoder rounding.
+    auto src = ImageBuffer::create(32, 24, PixelFormat::U8);
+    for (int y = 0; y < 24; ++y)
+        for (int x = 0; x < 32; ++x) {
+            auto* px = src->data().data() + (static_cast<size_t>(y) * 32 + x) * 3;
+            px[0] = 60;
+            px[1] = 160;
+            px[2] = 100;
+        }
+    const auto icc =
+        ColorManager::exportProfileBytes(ColorManager::ExportColorProfile::SRGB);
+    QVERIFY(!icc.empty());
+
+    const auto p = std::filesystem::temp_directory_path() / "lrc_qt_r08_icc.jpg";
+    QVERIFY(ImageIO::writeJpeg(p, *src, 95, icc));
+
+    QImageReader reader(QString::fromStdString(p.string()));
+    QVERIFY2(reader.canRead(), qPrintable(reader.errorString()));
+    const QImage img = reader.read();
+    QVERIFY2(!img.isNull(), qPrintable(reader.errorString()));
+    QCOMPARE(img.size(), QSize(32, 24));
+
+    const QColor c = img.pixelColor(16, 12);
+    QVERIFY2(std::abs(c.red() - 60) <= 4 && std::abs(c.green() - 160) <= 4 &&
+                 std::abs(c.blue() - 100) <= 4,
+             qPrintable(QString("decoded pixel rgb(%1,%2,%3) is not the written "
+                                "flat patch")
+                            .arg(c.red())
+                            .arg(c.green())
+                            .arg(c.blue())));
+
+    // The embedded profile must survive the round trip intact, not merely be
+    // present as bytes: Qt's JPEG reader drops any ICC_PROFILE chunk with a
+    // payload of 146 bytes or fewer, so a needlessly small chunk size used to
+    // truncate the profile (588 -> 510 bytes) and this parse silently failed.
+    QVERIFY2(img.colorSpace().isValid(),
+             "Qt did not recognise the embedded ICC profile");
+    QCOMPARE(img.colorSpace().iccProfile().size(), int(icc.size()));
+
+    std::error_code ec;
+    std::filesystem::remove(p, ec);
+}
+
+void IccJpegDecodabilityTest::jpegWithoutSosMarkerIsNotDecodable() {
+    // Negative control: proves Qt is sensitive to the exact defect (a missing
+    // "FF DA"), so the positive test above would have caught it.
+    QVERIFY2(QImageReader::supportedImageFormats().contains("jpeg"),
+             "Qt JPEG plugin missing from the test environment");
+
+    auto src = ImageBuffer::create(32, 24, PixelFormat::U8);
+    for (int y = 0; y < 24; ++y)
+        for (int x = 0; x < 32; ++x) {
+            auto* px = src->data().data() + (static_cast<size_t>(y) * 32 + x) * 3;
+            px[0] = 60;
+            px[1] = 160;
+            px[2] = 100;
+        }
+    const auto icc =
+        ColorManager::exportProfileBytes(ColorManager::ExportColorProfile::SRGB);
+    const auto valid = std::filesystem::temp_directory_path() / "lrc_qt_r08_ok.jpg";
+    QVERIFY(ImageIO::writeJpeg(valid, *src, 95, icc));
+
+    auto corrupted = stripJpegSos(readFile(valid));
+    QVERIFY2(!corrupted.empty(), "test helper failed to locate the SOS marker");
+    const auto bad = std::filesystem::temp_directory_path() / "lrc_qt_r08_nosos.jpg";
+    writeFile(bad, corrupted);
+
+    QImageReader reader(QString::fromStdString(bad.string()));
+    const QImage img = reader.read();
+    QVERIFY2(img.isNull(),
+             "a JPEG with no SOS marker must not decode; Qt returned a "
+             "non-null image");
+
+    std::error_code ec;
+    std::filesystem::remove(valid, ec);
+    std::filesystem::remove(bad, ec);
+}
+
+// ---------------------------------------------------------------------------
+// Soft proofing on the view's own render paths.
+//
+// requestProof() only proofed the preview-resolution frame, so the two frames it
+// cannot reach stayed unproofed: the coarse drag frame (the image visibly jumped
+// colour on release) and the 1:1 full-res frame (the viewport drops the
+// preview-sized proof frame while showing full resolution). Both are covered
+// here end-to-end through the real worker.
+//
+// The alarm colour is the observable: it is set to magenta, which no input in the
+// fixture contains, and only the gamut-check leg paints it. So "does this frame
+// carry proofing?" is an exact pixel count rather than a statistical question.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr uint8_t kAlarmR = 255;
+constexpr uint8_t kAlarmG = 0;
+constexpr uint8_t kAlarmB = 255;
+
+// Saturated Adobe RGB colours. Interpreting them through the embedded wide-gamut
+// profile is what puts them outside the sRGB proof destination — an sRGB-sourced
+// image is inside it by construction, so it would give the gamut check nothing to
+// mark.
+bool writeWideGamutFixture(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    auto src = ImageBuffer::create(64, 48, PixelFormat::U8);
+    if (!src || src->empty())
+        return false;
+    for (int y = 0; y < 48; ++y)
+        for (int x = 0; x < 64; ++x) {
+            uint8_t r = 0, g = 0, b = 0;
+            if (y < 24 && x < 32)      r = 255;              // red
+            else if (y < 24)           g = 255;              // green
+            else if (x < 32)           { g = 255; b = 255; } // cyan
+            else                       { r = 255; g = 255; } // yellow
+            auto* px = src->data().data() + (static_cast<size_t>(y) * 64 + x) * 3;
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+        }
+    const auto icc = ColorManager::exportProfileBytes(
+        ColorManager::ExportColorProfile::AdobeRGB);
+    return !icc.empty() && ImageIO::writePng(path, *src, icc);
+}
+
+// Number of pixels painted with the proofing alarm colour.
+int countAlarmPixels(const lrc::ImageBufferPtr& frame) {
+    if (!frame || frame->format() != lrc::PixelFormat::U8 || frame->empty())
+        return -1;
+    int n = 0;
+    const uint8_t* p = frame->data().data();
+    for (size_t i = 0; i + 2 < frame->data().size(); i += 3)
+        if (p[i] == kAlarmR && p[i + 1] == kAlarmG && p[i + 2] == kAlarmB)
+            ++n;
+    return n;
+}
+
+lrc::SoftProofParams alarmProofParams() {
+    lrc::SoftProofParams params;
+    params.destinationProfilePath = "srgb";  // built-in preset key
+    params.showOutOfGamut = true;
+    params.outOfGamutR = static_cast<float>(kAlarmR) / 255.0f;
+    params.outOfGamutG = static_cast<float>(kAlarmG) / 255.0f;
+    params.outOfGamutB = static_cast<float>(kAlarmB) / 255.0f;
+    return params;
+}
+
+// Engine objects + a running worker thread for one render-path case.
+struct ProofHarness {
+    std::filesystem::path dir;
+    std::shared_ptr<ColorManager> cm;
+    std::unique_ptr<Pipeline> pipeline;
+    std::unique_ptr<RawDecoder> decoder;
+    std::unique_ptr<ThumbnailCache> cache;
+    std::unique_ptr<CatalogDatabase> db;
+    QThread thread;
+    PreviewWorker* worker = nullptr;
+    bool ok = false;
+
+    ~ProofHarness() { stop(); }
+
+    void start(const std::filesystem::path& root,
+               const std::filesystem::path& imagePath) {
+        std::error_code ec;
+        dir = root;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir / "cache", ec);
+        if (!writeWideGamutFixture(imagePath))
+            return;
+        cm = std::make_shared<ColorManager>();
+        pipeline = std::make_unique<Pipeline>(cm);
+        decoder = std::make_unique<RawDecoder>();
+        decoder->setColorManager(cm);
+        cache = std::make_unique<ThumbnailCache>(dir / "cache");
+        db = std::make_unique<CatalogDatabase>(dir / "proof.db");
+        if (!db->open())
+            return;
+        thread.setObjectName(QStringLiteral("softproof_paths"));
+        worker = new PreviewWorker(*decoder, *pipeline, *cache, *db, cm);
+        worker->moveToThread(&thread);
+        thread.start();
+        ok = true;
+    }
+
+    void stop() {
+        if (!worker)
+            return;
+        thread.quit();
+        thread.wait();
+        delete worker;
+        worker = nullptr;
+    }
+};
+
+} // namespace
+
+class SoftProofRenderPathsTest : public QObject {
+    Q_OBJECT
+private slots:
+    void coarseDragFrameIsProofed();
+    void fullResFrameIsProofed();
+};
+
+void SoftProofRenderPathsTest::coarseDragFrameIsProofed() {
+    const auto root = std::filesystem::temp_directory_path() / "lrc_proof_coarse";
+    const auto image = root / "wide.png";
+    ProofHarness h;
+    h.start(root, image);
+    QVERIFY(h.ok);
+
+    const auto adj = Adjustments::defaults();
+    const QString path = QString::fromStdWString(image.wstring());
+
+    // Decode the fixture into the worker's working linear buffer (no catalog row
+    // is needed: the standard-preview fast path just misses and it decodes).
+    QSignalSpy previewSpy(h.worker, &PreviewWorker::previewReady);
+    QMetaObject::invokeMethod(h.worker, "loadImage", Qt::QueuedConnection,
+                              Q_ARG(qint64, 1), Q_ARG(QString, path),
+                              Q_ARG(qint64, 1), Q_ARG(lrc::Adjustments, adj));
+    QTRY_COMPARE_WITH_TIMEOUT(previewSpy.count(), 1, 60000);
+
+    QSignalSpy coarseSpy(h.worker, &PreviewWorker::previewReadyCoarse);
+
+    // Baseline: an unarmed coarse frame carries no alarm colour.
+    QMetaObject::invokeMethod(h.worker, "adjustPreviewCoarse",
+                              Qt::QueuedConnection, Q_ARG(qint64, 1),
+                              Q_ARG(qint64, 2), Q_ARG(lrc::Adjustments, adj));
+    QTRY_COMPARE_WITH_TIMEOUT(coarseSpy.count(), 1, 60000);
+    auto plain = coarseSpy.at(0).at(1).value<lrc::ImageBufferPtr>();
+    QVERIFY(plain && !plain->empty());
+    QCOMPARE(countAlarmPixels(plain), 0);
+
+    // Arm proofing, then ask for another coarse frame: it must come out proofed.
+    // Both calls are queued to the same worker thread, so the state is recorded
+    // before the frame is rendered.
+    QMetaObject::invokeMethod(h.worker, "setProofState", Qt::QueuedConnection,
+                              Q_ARG(lrc::SoftProofParams, alarmProofParams()),
+                              Q_ARG(bool, true));
+    QMetaObject::invokeMethod(h.worker, "adjustPreviewCoarse",
+                              Qt::QueuedConnection, Q_ARG(qint64, 1),
+                              Q_ARG(qint64, 3), Q_ARG(lrc::Adjustments, adj));
+    QTRY_COMPARE_WITH_TIMEOUT(coarseSpy.count(), 2, 60000);
+    auto proofed = coarseSpy.at(1).at(1).value<lrc::ImageBufferPtr>();
+    QVERIFY(proofed && !proofed->empty());
+    QVERIFY2(countAlarmPixels(proofed) > 0,
+             "the coarse drag frame did not carry the soft proof");
+}
+
+void SoftProofRenderPathsTest::fullResFrameIsProofed() {
+    const auto root =
+        std::filesystem::temp_directory_path() / "lrc_proof_fullres";
+    const auto image = root / "wide.png";
+    ProofHarness h;
+    h.start(root, image);
+    QVERIFY(h.ok);
+
+    const auto adj = Adjustments::defaults();
+    const QString path = QString::fromStdWString(image.wstring());
+    QSignalSpy fullSpy(h.worker, &PreviewWorker::fullResReady);
+
+    // Armed: the 1:1 frame itself must be proofed (MainWindow drops the
+    // preview-sized proofReady while the viewport shows full resolution).
+    QMetaObject::invokeMethod(h.worker, "setProofState", Qt::QueuedConnection,
+                              Q_ARG(lrc::SoftProofParams, alarmProofParams()),
+                              Q_ARG(bool, true));
+    QMetaObject::invokeMethod(h.worker, "loadFullRes", Qt::QueuedConnection,
+                              Q_ARG(qint64, 1), Q_ARG(QString, path),
+                              Q_ARG(qint64, 1), Q_ARG(lrc::Adjustments, adj));
+    QTRY_COMPARE_WITH_TIMEOUT(fullSpy.count(), 1, 120000);
+    auto proofed = fullSpy.at(0).at(1).value<lrc::ImageBufferPtr>();
+    QVERIFY(proofed && !proofed->empty());
+    QVERIFY2(countAlarmPixels(proofed) > 0,
+             "the 1:1 full-res frame did not carry the soft proof");
+
+    // Switching proofing off must invalidate the frame for the same adjustment
+    // stack (the dedup key includes the proof state) and bring the plain frame
+    // back.
+    QMetaObject::invokeMethod(h.worker, "setProofState", Qt::QueuedConnection,
+                              Q_ARG(lrc::SoftProofParams, alarmProofParams()),
+                              Q_ARG(bool, false));
+    QMetaObject::invokeMethod(h.worker, "adjustFullRes", Qt::QueuedConnection,
+                              Q_ARG(qint64, 1), Q_ARG(qint64, 2),
+                              Q_ARG(lrc::Adjustments, adj));
+    QTRY_COMPARE_WITH_TIMEOUT(fullSpy.count(), 2, 120000);
+    auto plain = fullSpy.at(1).at(1).value<lrc::ImageBufferPtr>();
+    QVERIFY(plain && !plain->empty());
+    QCOMPARE(countAlarmPixels(plain), 0);
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -546,6 +1035,9 @@ int main(int argc, char** argv) {
 
     // Register the metatype used across the queued worker connection.
     qRegisterMetaType<QList<ExportItem>>("QList<ExportItem>");
+    // Soft proofing parameters cross the UI -> preview-worker queued invocation
+    // and are captured by QSignalSpy in the dialog smoke test.
+    qRegisterMetaType<lrc::SoftProofParams>();
 
     const auto root = std::filesystem::temp_directory_path() / "lrc_qt_tests";
     std::error_code ec;
@@ -574,6 +1066,26 @@ int main(int argc, char** argv) {
     }
     {
         AiModelAvailabilityTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        ColorRangeSamplerTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        SoftProofingDialogSmokeTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        DuplicateResultsDialogSmokeTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        IccJpegDecodabilityTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        SoftProofRenderPathsTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
 

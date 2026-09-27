@@ -34,6 +34,7 @@
 
 #include "catalog/LibraryManager.h"
 #include "catalog/ThumbnailCache.h"
+#include "ui/MetaTypes.h"
 
 namespace lrc {
 class AiInferenceEngine;
@@ -168,6 +169,11 @@ private:
     };
 };
 
-// Registered in main() so the enum can cross a queued connection (ImportWorker
-// thread -> UI thread) as part of the importPaths invocation arguments.
-Q_DECLARE_METATYPE(lrc::ImportMode)
+// lrc::ImportMode crosses the queued importPaths invocation (worker thread -> UI
+// thread) and is registered in main(), so its metatype declaration must be
+// visible here — it comes from ui/MetaTypes.h, included above, which is the
+// single declaration point for every cross-thread engine type.
+//
+// Do NOT redeclare it in this header: Q_DECLARE_METATYPE expands to an explicit
+// QMetaTypeId<T> specialization, and a second one in the same translation unit
+// is a hard error (MSVC C2766) for any file that includes both headers.

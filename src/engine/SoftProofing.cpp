@@ -32,8 +32,16 @@ static cmsUInt32Number intentCms(RenderingIntent i) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 SoftProofing::SoftProofing() {
+    // Private lcms context for the whole instance. Everything below (profiles,
+    // transforms, and the gamut alarm codes) is created on this context, which
+    // is what keeps proofing state from leaking into unrelated transforms: the
+    // alarm codes live in an lcms "client chunk" that a transform reads on every
+    // run, so using the process-global context would recolour any concurrent
+    // transform and race with it.
+    ctx_ = cmsCreateContext(nullptr, nullptr);
+
     // One-time profile construction for the fixed working/display legs.
-    prophoto_ = cmsCreate_sRGBProfile();  // placeholder only, replaced below.
+    prophoto_ = cmsCreate_sRGBProfileTHR(reinterpret_cast<cmsContext>(ctx_));
     // Actually: build correct ProPhoto (D50, linear) & sRGB profiles via the
     // same APIs ColorManager uses; this keeps the proof path gamma-matched
     // to the main pipeline.
@@ -53,22 +61,42 @@ SoftProofing::SoftProofing() {
     cmsToneCurve* linearTrc[3];
     linearTrc[0] = linearTrc[1] = linearTrc[2] = cmsBuildGamma(nullptr, 1.0);
     if (prophoto_) { cmsCloseProfile(reinterpret_cast<cmsHPROFILE>(prophoto_)); prophoto_ = nullptr; }
-    prophoto_ = cmsCreateRGBProfile(&whitePoint, &primaries, linearTrc);
+    prophoto_ = cmsCreateRGBProfileTHR(reinterpret_cast<cmsContext>(ctx_),
+                                       &whitePoint, &primaries, linearTrc);
     cmsFreeToneCurve(linearTrc[0]);
 
-    srgb_ = cmsCreate_sRGBProfile();
+    srgb_ = cmsCreate_sRGBProfileTHR(reinterpret_cast<cmsContext>(ctx_));
 
-    // Default alarms: pure red (1.0, 0, 0 in display space → U8 255,0,0)
-    cmsUInt16Number alarms[16];
-    alarms[0] = 0xFFFF; alarms[1] = 0; alarms[2] = 0;
-    for (int i = 3; i < 16; ++i) alarms[i] = 0;
-    cmsSetAlarmCodes(alarms);
+    // Default alarm: pure red (1.0, 0, 0 in display space → U8 255,0,0).
+    setGamutAlarmCodes(alarm_.r, alarm_.g, alarm_.b);
 }
 
 SoftProofing::~SoftProofing() {
     destroyAll();
     if (prophoto_) { cmsCloseProfile(reinterpret_cast<cmsHPROFILE>(prophoto_)); prophoto_ = nullptr; }
     if (srgb_)     { cmsCloseProfile(reinterpret_cast<cmsHPROFILE>(srgb_));     srgb_     = nullptr; }
+    // Must outlive every profile/transform created on it.
+    if (ctx_)      { cmsDeleteContext(reinterpret_cast<cmsContext>(ctx_));      ctx_      = nullptr; }
+}
+
+void SoftProofing::setGamutAlarmCodes(uint8_t r, uint8_t g, uint8_t b) {
+    std::unique_lock<std::shared_mutex> lk(mutex_);
+    alarm_ = GamutAlarmCodes{r, g, b};
+    if (!ctx_)
+        return;
+    // lcms reads the codes from the context on every cmsDoTransform, so no
+    // transform has to be rebuilt; the exclusive lock is what keeps this from
+    // interleaving with a transform that is currently running.
+    cmsUInt16Number codes[cmsMAXCHANNELS] = {};
+    codes[0] = static_cast<cmsUInt16Number>(static_cast<uint32_t>(r) * 257u);
+    codes[1] = static_cast<cmsUInt16Number>(static_cast<uint32_t>(g) * 257u);
+    codes[2] = static_cast<cmsUInt16Number>(static_cast<uint32_t>(b) * 257u);
+    cmsSetAlarmCodesTHR(reinterpret_cast<cmsContext>(ctx_), codes);
+}
+
+GamutAlarmCodes SoftProofing::gamutAlarmCodes() const {
+    std::shared_lock<std::shared_mutex> lk(mutex_);
+    return alarm_;
 }
 
 void SoftProofing::destroyAll() {
@@ -87,7 +115,8 @@ bool SoftProofing::loadProofProfile(const std::filesystem::path& iccPath) {
     if (iccPath.empty()) return true;   // "clear profile" success
     if (!std::filesystem::exists(iccPath)) return false;
 
-    cmsHPROFILE hp = cmsOpenProfileFromFile(iccPath.string().c_str(), "r");
+    cmsHPROFILE hp = cmsOpenProfileFromFileTHR(
+        reinterpret_cast<cmsContext>(ctx_), iccPath.string().c_str(), "r");
     if (!hp) return false;
     proofProfile_ = hp;
     proofPath_ = iccPath;
@@ -95,6 +124,24 @@ bool SoftProofing::loadProofProfile(const std::filesystem::path& iccPath) {
     // rebuilds against this new profile instead of reusing the previous one.
     ++cacheGeneration_;
     rebuildTransforms(iccPath);
+    return true;
+}
+
+bool SoftProofing::loadProofProfileFromMemory(
+    const std::vector<uint8_t>& iccBytes) {
+    std::unique_lock<std::shared_mutex> lk(mutex_);
+    destroyAll();
+    proofPath_.clear();
+    if (iccBytes.empty()) return true;   // "clear profile" success
+    cmsHPROFILE hp = cmsOpenProfileFromMemTHR(
+        reinterpret_cast<cmsContext>(ctx_), iccBytes.data(),
+        static_cast<cmsUInt32Number>(iccBytes.size()));
+    if (!hp) return false;
+    proofProfile_ = hp;
+    // No path: the transform cache is still invalidated so a subsequent
+    // proofToDisplay() rebuilds against the in-memory profile.
+    ++cacheGeneration_;
+    rebuildTransforms(std::filesystem::path{});
     return true;
 }
 
@@ -113,7 +160,8 @@ void SoftProofing::rebuildTransforms(const std::filesystem::path& /*iccPath*/) {
     const auto dp = reinterpret_cast<cmsHPROFILE>(srgb_);
     if (!p || !pf || !dp) return;
 
-    proofDisplay_ = cmsCreateProofingTransform(
+    proofDisplay_ = cmsCreateProofingTransformTHR(
+        reinterpret_cast<cmsContext>(ctx_),
         p, TYPE_RGB_FLT,        // input:  ProPhoto profile + F32 interleaved buffer
         pf, TYPE_RGB_8,         // simulated output profile + display U8 buffer
         dp,                     // preview (monitor) profile
@@ -176,7 +224,8 @@ ImageBufferPtr SoftProofing::proofToDisplay(const ImageBuffer& input,
         if (!slot.transform || slot.generation != gen) {
             const cmsUInt32Number baseFlags = cmsFLAGS_NOCACHE | cmsFLAGS_BLACKPOINTCOMPENSATION |
                                               (withGamutCheck ? cmsFLAGS_GAMUTCHECK : 0);
-            slot.transform = cmsCreateProofingTransform(
+            slot.transform = cmsCreateProofingTransformTHR(
+                reinterpret_cast<cmsContext>(ctx_),
                 reinterpret_cast<cmsHPROFILE>(prophoto_), TYPE_RGB_FLT,
                 reinterpret_cast<cmsHPROFILE>(proofProfile_), TYPE_RGB_8,
                 reinterpret_cast<cmsHPROFILE>(srgb_),
@@ -213,18 +262,30 @@ ImageBufferPtr SoftProofing::proofToDisplay(const ImageBuffer& input,
 ImageBufferPtr SoftProofing::gamutMask(const ImageBuffer& input,
                                        RenderingIntent intent) const {
     // Run proof-to-display with gamutCheck enabled, then convert "pixel was
-    // marked as alarm code" into a F32 weight mask.  lcms sets out-of-gamut
-    // pixels to the alarm code (255,0,0 in the default config).
+    // marked as alarm code" into a F32 weight mask. lcms replaces out-of-gamut
+    // pixels with the alarm colour rather than exposing a separate gamut flag,
+    // so the mask is derived by matching that colour — which is why it must be
+    // the *configured* one and not the former hard-coded pure red: with any
+    // other colour the mask used to come back empty.
+    const GamutAlarmCodes alarm = gamutAlarmCodes();
     auto proof = proofToDisplay(input, intent, true);
     if (!proof) return nullptr;
     const int w = proof->width(), h = proof->height();
     auto mask = ImageBuffer::create(w, h, PixelFormat::F32);
     const uint8_t* s = proof->data().data();
     float* d = reinterpret_cast<float*>(mask->data().data());
+    // lcms writes the alarm codes into the 8-bit output exactly (0..255), but a
+    // small tolerance absorbs any rounding in a different output path.
+    const auto isAlarm = [](uint8_t v, uint8_t target) {
+        const int diff = static_cast<int>(v) - static_cast<int>(target);
+        return diff >= -2 && diff <= 2;
+    };
     const size_t n = static_cast<size_t>(w) * h;
     for (size_t i = 0; i < n; ++i) {
         const size_t si = i * 3;
-        const bool outOfGamut = (s[si] >= 250 && s[si+1] <= 5 && s[si+2] <= 5);
+        const bool outOfGamut = isAlarm(s[si], alarm.r) &&
+                                isAlarm(s[si + 1], alarm.g) &&
+                                isAlarm(s[si + 2], alarm.b);
         const float v = outOfGamut ? 1.0f : 0.0f;
         d[si    ] = v;
         d[si + 1] = v;

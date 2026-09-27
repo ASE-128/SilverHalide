@@ -172,6 +172,23 @@ std::vector<uint8_t> ColorManager::exportProfileBytes(
         return {};
     }
     cmsCloseProfile(h);
+
+    // Pin the creation timestamp (ICC header offset 24: six big-endian uInt16
+    // values — year, month, day, hour, minute, second). lcms stamps it with the
+    // wall clock, so the same preset serialized in two processes differed in the
+    // seconds byte (measured: offset 35 only), and two calls straddling a second
+    // boundary differed inside one process. An export must be byte-reproducible:
+    // same settings -> identical file, which is what makes checksums, dedup and
+    // byte-golden tests viable. The field is informational, nothing reads it back,
+    // and lcms leaves the profile ID (offset 84) unset for a profile built in
+    // memory, so patching the date cannot desynchronise the ID from the content.
+    if (bytes.size() >= 36) {
+        constexpr uint16_t kStamp[6] = {2020, 1, 1, 0, 0, 0};  // 2020-01-01 00:00
+        for (size_t i = 0; i < 6; ++i) {
+            bytes[24 + i * 2] = static_cast<uint8_t>(kStamp[i] >> 8);
+            bytes[24 + i * 2 + 1] = static_cast<uint8_t>(kStamp[i] & 0xFF);
+        }
+    }
     return bytes;
 }
 

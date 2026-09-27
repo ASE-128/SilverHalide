@@ -83,6 +83,11 @@ public:
      * The bytes are suitable for embedding into an exported JPEG (APP2), PNG
      * (iCCP) or TIFF (tag 34675). Returns an empty vector on profile creation
      * or serialization failure.
+     *
+     * @note The result is deterministic: the profile's creation timestamp is
+     *       pinned (see the implementation), so the same preset yields
+     *       byte-identical bytes in every process and on every call. Exports made
+     *       with the same settings are therefore byte-reproducible.
      */
     static std::vector<uint8_t> exportProfileBytes(ExportColorProfile profile);
 

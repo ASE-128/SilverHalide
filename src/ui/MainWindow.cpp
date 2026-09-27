@@ -46,6 +46,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QToolBar>
+#include <QtConcurrent>
 #include <QtGlobal>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -70,6 +71,7 @@
 #include "engine/AiInference.h"
 #include "ui/CollectionsDialog.h"
 #include "ui/DevelopPanel.h"
+#include "ui/DuplicateResultsDialog.h"
 #include "ui/EditHistoryDialog.h"
 #include "ui/ExportDialog.h"
 #include "ui/SnapshotDialog.h"
@@ -85,6 +87,7 @@
 #include "ui/PresetDialog.h"
 #include "ui/PreviewWorker.h"
 #include "ui/SmartCollectionsDialog.h"
+#include "ui/SoftProofingDialog.h"
 #include "utils/MathUtils.h"
 #include "utils/PresetLibrary.h"
 #include "utils/ProfileIO.h"
@@ -254,6 +257,12 @@ MainWindow::~MainWindow() {
     // The backup/optimize thread must finish before catalog_ (a member) is
     // destroyed -- joining here is the last chance to avoid a use-after-free.
     joinDbOpThread();
+    // Same for the duplicate scan: it holds catalog_/aiEngine_ references, so it
+    // must have returned before those members are destroyed.
+    if (duplicateWatcher_) {
+        duplicateWatcher_->waitForFinished();
+        duplicateWatcher_ = nullptr;
+    }
     stopWorkers();
     // Safety net -- a debounced edit that was never flushed (e.g. the window was
     // destroyed without a closeEvent) must still be persisted.
@@ -405,6 +414,12 @@ void MainWindow::buildUi() {
             });
     connect(developPanel_, &DevelopPanel::luminanceSamplerRequested, viewport_,
             &ImageViewport::setLuminanceSamplerActive);
+    // Independent colour-range sampler (the mask panel's own "取样" button).
+    // It shares ImageViewport's colour-range slot with the sub-mask sampler,
+    // which is why the panel buttons are kept mutually exclusive by
+    // DevelopPanel::onColorRangeSampleToggled / onSubColorSampleToggled.
+    connect(developPanel_, &DevelopPanel::colorRangeSamplerRequested, viewport_,
+            &ImageViewport::setColorRangeSamplerActive);
     connect(viewport_, &ImageViewport::luminanceSampled, developPanel_,
             &DevelopPanel::setLuminanceSubReference);
 
@@ -604,6 +619,8 @@ void MainWindow::buildMenus() {
     photoMenu->addAction(tr("编辑历史…"), this, &MainWindow::showEditHistory);
     photoMenu->addAction(tr("管理收藏夹…"), this,
                          &MainWindow::onManageCollections);
+    photoMenu->addSeparator();
+    photoMenu->addAction(tr("查找重复项…"), this, &MainWindow::onFindDuplicates);
 
     QMenu* viewMenu = menuBar()->addMenu(tr("视图"));
     viewMenu->addAction(tr("适合窗口"), this, [this]() {
@@ -620,6 +637,8 @@ void MainWindow::buildMenus() {
                         QKeySequence::ZoomIn);
     viewMenu->addAction(tr("缩小"), viewport_, &ImageViewport::zoomOut,
                         QKeySequence::ZoomOut);
+    viewMenu->addSeparator();
+    viewMenu->addAction(tr("软打样…"), this, &MainWindow::openSoftProofing);
 
     QMenu* settingsMenu = menuBar()->addMenu(tr("设置"));
     settingsMenu->addAction(tr("模型管理…"), this, [this]() {
@@ -981,6 +1000,14 @@ void MainWindow::startWorkers() {
     // worker emits it second), replacing the old 8-bit sampled histogram.
     connect(previewWorker_, &PreviewWorker::histogramReady, this,
             &MainWindow::onHistogramReady);
+    // Soft proofing: the dialog's parameters drive a proof render of the
+    // current preview; the report request writes the out-of-gamut mask PNG.
+    connect(previewWorker_, &PreviewWorker::proofReady, this,
+            &MainWindow::onProofReady);
+    connect(previewWorker_, &PreviewWorker::proofFailed, this,
+            &MainWindow::onProofFailed);
+    connect(previewWorker_, &PreviewWorker::gamutReportReady, this,
+            &MainWindow::onGamutReportReady);
     connect(previewWorker_, &PreviewWorker::previewReadyCoarse, this,
             &MainWindow::onPreviewReadyCoarse);
     connect(previewWorker_, &PreviewWorker::fullResReady, this,
@@ -995,6 +1022,8 @@ void MainWindow::startWorkers() {
             &MainWindow::onCameraMeta);
         connect(developPanel_, &DevelopPanel::dcpProfileSelected, this,
             &MainWindow::onDcpProfileSelected);
+        connect(developPanel_, &DevelopPanel::lensfunEnabledChanged, this,
+            &MainWindow::onLensfunEnabledChanged);
     connect(viewport_, &ImageViewport::fullResRequested, this,
             &MainWindow::onFullResRequested);
     // Preview-resolution rendering. The viewport reports its logical render size;
@@ -1598,6 +1627,258 @@ void MainWindow::refreshLensfunProfile(const QString& cameraMake,
     onAdjustmentsCommitted(currentAdjustments_);
 }
 
+void MainWindow::onLensfunEnabledChanged(bool enabled) {
+    // The adjustment stack has already been updated + committed by the panel
+    // (DevelopPanel emits lensfunEnabledChanged immediately before
+    // adjustmentsCommitted), so this handler only reports the new state.
+    statusBar()->showMessage(
+        enabled ? tr("Lensfun 镜头几何校正已启用")
+                : tr("Lensfun 镜头几何校正已关闭"),
+        4000);
+}
+
+// --- Soft proofing (视图 → 软打样…) ------------------------------------------
+
+void MainWindow::openSoftProofing() {
+    if (!softProofDialog_) {
+        // Modeless on purpose: the dialog only ships parameters, the viewport
+        // shows the proofed frame, so the user must be able to keep editing
+        // while it is open.
+        softProofDialog_ = new lrc::SoftProofingDialog(colorManager_.get(), this);
+        softProofDialog_->setModal(false);
+        connect(softProofDialog_, &lrc::SoftProofingDialog::paramsChanged, this,
+                &MainWindow::onSoftProofParamsChanged);
+        connect(softProofDialog_,
+                &lrc::SoftProofingDialog::exportGamutReportRequested, this,
+                &MainWindow::onExportGamutReport);
+    }
+    softProofDialog_->show();
+    softProofDialog_->raise();
+    softProofDialog_->activateWindow();
+}
+
+void MainWindow::onSoftProofParamsChanged(const lrc::SoftProofParams& params,
+                                          bool enabled) {
+    softProofParams_ = params;
+    softProofEnabled_ = enabled;
+    if (currentImageId_ < 0 || !previewWorker_)
+        return;
+    ++previewGeneration_;
+    // Arm the view's own render paths first (queued ahead of requestProof, so the
+    // worker sees this state): that is what makes the coarse drag frames and the
+    // 1:1 full-res frames come out proofed, and it is also how the dialog's
+    // out-of-gamut alarm colour reaches the preview overlay instead of only the
+    // exported gamut report.
+    QMetaObject::invokeMethod(
+        previewWorker_, "setProofState", Qt::QueuedConnection,
+        Q_ARG(lrc::SoftProofParams, params), Q_ARG(bool, enabled));
+    // requestProof both renders the proof and (when disabled) re-emits the plain
+    // preview, so the toggle never leaves a stale proofed frame on screen.
+    QMetaObject::invokeMethod(
+        previewWorker_, "requestProof", Qt::QueuedConnection,
+        Q_ARG(qint64, static_cast<qint64>(currentImageId_)),
+        Q_ARG(qint64, previewGeneration_),
+        Q_ARG(lrc::Adjustments, currentAdjustments_),
+        Q_ARG(lrc::SoftProofParams, params), Q_ARG(bool, enabled));
+    // In 1:1 the viewport shows the full-res frame and drops proofReady (it is
+    // preview-sized), so the full-res frame itself must be re-rendered. Its
+    // dedup key includes the proof state, so a colour/intent change re-renders.
+    if (fullResActive_)
+        requestAdjustFullRes();
+}
+
+void MainWindow::onProofReady(qint64 imageId,
+                              const lrc::ImageBufferPtr& rgbU8) {
+    if (imageId != currentImageId_)
+        return;
+    if (fullResActive_) {
+        // 1:1 全尺寸视图：预览尺寸的打样帧不能盖上去 (the proof frame here is
+        // preview-sized). 1:1 has its own proofed frames instead -- the worker
+        // proofs the full-res render, so nothing is lost by dropping this one.
+        return;
+    }
+    const QImage image = toQImage(rgbU8);
+    if (image.isNull())
+        return;
+    // Always a same-image refresh: proofing keeps the existing zoom/pan.
+    viewport_->setImageKeepView(image);
+    updateHistogramNow(image);
+}
+
+void MainWindow::onProofFailed(const QString& message) {
+    statusBar()->showMessage(message, 8000);
+}
+
+void MainWindow::onExportGamutReport() {
+    if (currentImageId_ < 0) {
+        statusBar()->showMessage(tr("请先选择一张照片再导出色域报告"), 4000);
+        return;
+    }
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("导出色域报告"), QString(), tr("PNG 图像 (*.png)"));
+    if (path.isEmpty())
+        return;
+    pendingGamutReportPath_ = path;
+    QMetaObject::invokeMethod(
+        previewWorker_, "requestGamutReport", Qt::QueuedConnection,
+        Q_ARG(qint64, static_cast<qint64>(currentImageId_)),
+        Q_ARG(lrc::Adjustments, currentAdjustments_),
+        Q_ARG(lrc::SoftProofParams, softProofParams_));
+}
+
+void MainWindow::onGamutReportReady(const lrc::ImageBufferPtr& rgbU8) {
+    if (pendingGamutReportPath_.isEmpty() || !rgbU8 || rgbU8->empty())
+        return;
+    const QString path = pendingGamutReportPath_;
+    pendingGamutReportPath_.clear();
+    const bool ok = lrc::ImageIO::writePng(toStdPath(path), *rgbU8);
+    if (ok)
+        statusBar()->showMessage(tr("色域报告已保存：%1").arg(path), 8000);
+    else
+        statusBar()->showMessage(tr("色域报告写入失败：%1").arg(path), 8000);
+}
+
+// --- Duplicate detection (照片 → 查找重复项…) --------------------------------
+
+MainWindow::DuplicateScanResult MainWindow::scanForDuplicates() {
+    DuplicateScanResult result;
+    if (!catalog_ || !catalog_->isOpen()) {
+        result.error = tr("没有打开的目录，无法查找重复项");
+        return result;
+    }
+    const auto images = catalog_->listImages();
+    result.photosScanned = images.size();
+    if (images.size() < 2) {
+        result.error = tr("目录中不足两张照片，无法比对");
+        return result;
+    }
+    // Thumbnails come from the catalog's own preview files (never a RAW decode),
+    // so a scan stays cheap. Cached phash / embeddings seed the detector and are
+    // written back afterwards.
+    std::vector<lrc::PhotoFrame> frames;
+    frames.reserve(images.size());
+    std::vector<std::pair<int64_t, uint64_t>> phashCache;
+    std::vector<std::pair<int64_t, std::vector<float>>> embedCache;
+    for (const auto& rec : images) {
+        const auto thumbPath =
+            catalog_->previewFilePath(rec.id, lrc::PreviewKind::Thumbnail);
+        if (!thumbPath)
+            continue;
+        auto img = lrc::ImageIO::loadImage(*thumbPath);
+        if (!img || img->empty())
+            continue;
+        lrc::PhotoFrame frame;
+        frame.photoId = rec.id;
+        frame.thumbnail = *img;
+        frames.push_back(std::move(frame));
+        if (auto feat = catalog_->getPhotoFeatures(rec.id)) {
+            phashCache.emplace_back(rec.id, feat->perceptualHash);
+            if (!feat->embedding.empty())
+                embedCache.emplace_back(rec.id, feat->embedding);
+        }
+    }
+    if (frames.size() < 2) {
+        result.error = tr("可用缩略图不足两张，无法比对");
+        return result;
+    }
+    lrc::DuplicateDetector detector(aiEngine_.get());
+    // Everything already in the caches was seeded from the database above; only
+    // the entries the detector appends past these marks are new and need writing
+    // back.
+    const size_t seededPhash = phashCache.size();
+    const size_t seededEmbed = embedCache.size();
+    auto detected = detector.detect(frames, 10, 0.92f, &phashCache, &embedCache);
+    result.groups = std::move(detected.groups);
+    result.embeddedCount = detected.embeddedCount;
+
+    // Persist freshly computed features (phash for every newly hashed frame,
+    // embedding only for the frames the second stage actually embedded). The
+    // detector may have grown both caches, so look embeddings up by index after
+    // it returned rather than holding pointers into the vector.
+    std::unordered_map<int64_t, size_t> embedIndex;
+    embedIndex.reserve(embedCache.size());
+    for (size_t i = seededEmbed; i < embedCache.size(); ++i)
+        embedIndex.emplace(embedCache[i].first, i);
+    const std::vector<float> noEmbedding;
+    for (size_t i = seededPhash; i < phashCache.size(); ++i) {
+        const int64_t id = phashCache[i].first;
+        const auto it = embedIndex.find(id);
+        catalog_->storePhotoFeatures(
+            id, phashCache[i].second,
+            it != embedIndex.end() ? embedCache[it->second].second
+                                   : noEmbedding);
+    }
+    return result;
+}
+
+void MainWindow::onFindDuplicates() {
+    if (duplicateWatcher_)
+        return;  // a scan is already running.
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    statusBar()->showMessage(tr("正在扫描重复照片…"), 0);
+    auto* watcher = new QFutureWatcher<DuplicateScanResult>(this);
+    duplicateWatcher_ = watcher;
+    connect(watcher, &QFutureWatcher<DuplicateScanResult>::finished, this,
+            &MainWindow::onDuplicateScanFinished);
+    watcher->setFuture(
+        QtConcurrent::run([this]() { return scanForDuplicates(); }));
+}
+
+void MainWindow::onDuplicateScanFinished() {
+    QApplication::restoreOverrideCursor();
+    auto* watcher = duplicateWatcher_;
+    if (!watcher)
+        return;
+    duplicateWatcher_ = nullptr;
+    const DuplicateScanResult result = watcher->result();
+    watcher->deleteLater();
+
+    if (!result.error.isEmpty()) {
+        statusBar()->showMessage(result.error, 6000);
+        return;
+    }
+    if (result.groups.empty()) {
+        statusBar()->showMessage(
+            tr("未发现重复照片（已扫描 %1 张）").arg(result.photosScanned), 6000);
+        return;
+    }
+    statusBar()->showMessage(
+        tr("发现 %1 组重复照片（已扫描 %2 张，深度比对 %3 张）")
+            .arg(result.groups.size())
+            .arg(result.photosScanned)
+            .arg(result.embeddedCount),
+        8000);
+    // Modal: the groups are copied into the dialog, which owns only this
+    // snapshot; stacking goes through the catalog immediately.
+    lrc::DuplicateResultsDialog dlg(result.groups, catalog_.get(), this);
+    connect(&dlg, &lrc::DuplicateResultsDialog::groupStacked, this,
+            [this](int64_t stackId) {
+                statusBar()->showMessage(
+                    tr("已堆叠为一组（stack %1）").arg(stackId), 5000);
+                refreshFilmstrip();
+            });
+    connect(&dlg, &lrc::DuplicateResultsDialog::focusImagesRequested, this,
+            &MainWindow::onDuplicateFocusImages);
+    dlg.exec();
+}
+
+void MainWindow::onDuplicateFocusImages(const QVector<int64_t>& imageIds) {
+    if (imageIds.isEmpty())
+        return;
+    // The filmstrip holds one row per photo (plus virtual copies), so jump to
+    // the first requested member that is currently listed; the rest are marked
+    // by the stack badge.
+    for (const int64_t wanted : imageIds) {
+        for (int row = 0; row < entries_.size(); ++row) {
+            if (entries_[row].imageId == static_cast<int>(wanted)) {
+                showImageAtIndex(row);
+                return;
+            }
+        }
+    }
+    statusBar()->showMessage(tr("这些照片不在当前列表视图中"), 4000);
+}
+
 void MainWindow::refreshDcpProfiles(const QString& cameraModel) {
     QStringList names;
     QStringList paths;
@@ -2163,23 +2444,42 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         case Qt::Key_W:
             viewport_->setWhiteBalanceSamplerActive(
                 !viewport_->whiteBalanceSamplerActive());
-            // When W activates the white-balance sampler, uncheck the panel's other
-            // sampler checkboxes.
-            if (viewport_->whiteBalanceSamplerActive())
+            // When W activates the white-balance sampler, disarm every other
+            // sampler. The setXxxChecked helpers mirror only the panel buttons (a
+            // QSignalBlocker stops the panel from emitting), so the viewport flags
+            // must be cleared here too -- otherwise two samplers stay armed at
+            // once and the panel buttons drift out of sync with the viewport.
+            if (viewport_->whiteBalanceSamplerActive()) {
                 disarmSpotToolButton();
+                viewport_->setSamplerActive(false);
+                viewport_->setPointColorSamplerActive(false);
+                viewport_->setColorRangeSamplerActive(false);
+                viewport_->setLuminanceSamplerActive(false);
+            }
             developPanel_->setSamplerChecked(false);
             developPanel_->setColorTargetSamplerChecked(false);
+            developPanel_->setColorRangeSamplerChecked(false);
+            developPanel_->setRangeSubSamplerChecked(false);
             return true;
         case Qt::Key_C:
             viewport_->setColorRangeSamplerActive(
                 !viewport_->colorRangeSamplerActive());
-            // Mutual exclusion: turning on the colour-range sampler disables white balance,
-            // point-colour and HSL samplers.
+            // Mutual exclusion: turning on the colour-range sampler disables white
+            // balance, HSL, point-colour and the range sub-mask samplers. As with
+            // W, the viewport flags are cleared explicitly because the panel
+            // mirrors are signal-blocked, and the independent colour-range button
+            // is re-synced from the viewport state it just toggled.
             if (viewport_->colorRangeSamplerActive())
                 disarmSpotToolButton();
             viewport_->setWhiteBalanceSamplerActive(false);
+            viewport_->setSamplerActive(false);
+            viewport_->setPointColorSamplerActive(false);
+            viewport_->setLuminanceSamplerActive(false);
             developPanel_->setSamplerChecked(false);
             developPanel_->setColorTargetSamplerChecked(false);
+            developPanel_->setColorRangeSamplerChecked(
+                viewport_->colorRangeSamplerActive());
+            developPanel_->setRangeSubSamplerChecked(false);
             return true;
         case Qt::Key_Plus:
         case Qt::Key_Equal:
@@ -2428,6 +2728,12 @@ void MainWindow::onPreviewReady(qint64 imageId,
         viewport_->setImageKeepView(image);
     }
     updateHistogramNow(image);
+    // While soft proofing is on it stays authoritative: re-proof the freshly
+    // rendered frame. onProofReady does not call back into this slot, so this
+    // cannot recurse. The coarse drag frames do not need this pass -- the worker
+    // proofs them itself now (see PreviewWorker::adjustPreviewCoarse).
+    if (softProofEnabled_)
+        onSoftProofParamsChanged(softProofParams_, true);
 }
 
 void MainWindow::onHistogramReady(qint64 imageId,

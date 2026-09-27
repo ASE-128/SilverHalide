@@ -646,6 +646,9 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                     return;
                 current_.lensfunEnabled = checked;
                 scheduleDebounce();
+                // Specific notification first (MainWindow surfaces it to the
+                // user), then the generic commit that persists + re-renders.
+                emit lensfunEnabledChanged(checked);
                 emit adjustmentsCommitted(current_);
             });
 
@@ -868,6 +871,9 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     colorSampleBtn_ = new QPushButton(tr("取样"), this);
     colorSampleBtn_->setCheckable(true);
     colorSampleBtn_->setProperty("secondary", true);
+    // Stable object name so the Qt tests can drive the independent colour-range
+    // sampler (two other buttons share the "取样" label).
+    colorSampleBtn_->setObjectName(QStringLiteral("colorRangeSampleButton"));
     maskColorToolRow->addWidget(colorRefSwatch_);
     maskColorToolRow->addWidget(colorSampleBtn_, 1);
     maskColorLayout->addLayout(maskColorToolRow);
@@ -937,6 +943,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     subColorSampleBtn_ = new QPushButton(tr("取色"), this);
     subColorSampleBtn_->setCheckable(true);
     subColorSampleBtn_->setProperty("secondary", true);
+    subColorSampleBtn_->setObjectName(
+        QStringLiteral("subColorRangeSampleButton"));
     subColorToolRow->addWidget(subColorSwatch_);
     subColorToolRow->addWidget(subColorSampleBtn_, 1);
     subRangeLayout->addLayout(subColorToolRow);
@@ -957,6 +965,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     subLumaSampleBtn_ = new QPushButton(tr("取样"), this);
     subLumaSampleBtn_->setCheckable(true);
     subLumaSampleBtn_->setProperty("secondary", true);
+    subLumaSampleBtn_->setObjectName(
+        QStringLiteral("subLuminanceSampleButton"));
     subLumaToolRow->addWidget(subLumaValueLabel_, 1);
     subLumaToolRow->addWidget(subLumaSampleBtn_);
     subRangeLayout->addLayout(subLumaToolRow);
@@ -2496,10 +2506,19 @@ void DevelopPanel::setLuminanceSubReference(double luma) {
 }
 
 void DevelopPanel::setRangeSubSamplerChecked(bool active) {
+    if (!subColorSampleBtn_ || !subLumaSampleBtn_)
+        return;
     const QSignalBlocker b1(subColorSampleBtn_);
     const QSignalBlocker b2(subLumaSampleBtn_);
     subColorSampleBtn_->setChecked(active);
     subLumaSampleBtn_->setChecked(active);
+}
+
+void DevelopPanel::setColorRangeSamplerChecked(bool active) {
+    if (!colorSampleBtn_)
+        return;
+    const QSignalBlocker b(colorSampleBtn_);
+    colorSampleBtn_->setChecked(active);
 }
 
 // --- point-colour (ColorTarget) targets --------------------------------------

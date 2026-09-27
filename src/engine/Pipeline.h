@@ -63,6 +63,20 @@ public:
     ImageBufferPtr renderFullDisplay(uint64_t imageId, const ImageBuffer& linear,
                                      const Adjustments& adjustments);
 
+    // Renders to an F32 linear ProPhoto buffer at a bounded resolution: no sRGB
+    // conversion and no LRU interaction. Soft proofing uses it to feed the
+    // colourimetric proof transform from exactly the stage the display path
+    // would convert (render() is renderInternalLinear() + toDisplaySRGB()), so a
+    // proofed frame and an unproofed frame of the same edit differ only by the
+    // proof transform. At coarse preview sizes it replaces that conversion
+    // rather than adding a second full pass.
+    //
+    // @param linear  Linear ProPhoto source; never modified.
+    // @param maxDim  Longest-edge cap; <= 0 keeps the source resolution.
+    ImageBufferPtr renderLinearBounded(const ImageBuffer& linear,
+                                       const Adjustments& adjustments,
+                                       int maxDim) const;
+
     // Preview-resolution render with per-stage incremental caching.
     // `source` is a linear ProPhoto buffer (F32 preferred; U16/U8 are converted);
     // it is downscaled (area-average, never upscaled) to fit `targetSize`.

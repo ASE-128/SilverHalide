@@ -3650,6 +3650,12 @@ ImageBufferPtr Pipeline::renderInternalLinear(const ImageBuffer& linear,
     return f32;
 }
 
+ImageBufferPtr Pipeline::renderLinearBounded(const ImageBuffer& linear,
+                                             const Adjustments& adjustments,
+                                             int maxDim) const {
+    return renderInternalLinear(linear, adjustments, maxDim);
+}
+
 ImageBufferPtr Pipeline::renderInternal(const ImageBuffer& linear,
                                         const Adjustments& adjustments,
                                         int maxDim) const {

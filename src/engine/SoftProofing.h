@@ -90,6 +90,45 @@ public:
      *  empty path clears any loaded profile. */
     bool loadProofProfile(const std::filesystem::path& iccPath);
 
+    /** (Re)load the proof profile from an in-memory ICC blob.
+     *
+     *  The UI's built-in destination presets (sRGB / Adobe RGB / Display P3) are
+     *  serialized in memory by ColorManager rather than shipped as separate
+     *  .icc files, so this is the entry point they use.  Passing an empty
+     *  vector clears any loaded profile (same semantics as an empty path).
+     *
+     *  @return false when the bytes are not a decodable ICC profile; on failure
+     *          the previously loaded profile has been released (no profile is
+     *          left behind), mirroring loadProofProfile(). */
+    bool loadProofProfileFromMemory(const std::vector<uint8_t>& iccBytes);
+
+    /**
+     * @brief Sets the out-of-gamut alarm colour used by the gamut-check leg.
+     *
+     * lcms replaces every out-of-gamut pixel with this colour instead of its
+     * proofed value, so it is what the user sees as the gamut warning. It drives
+     * both the soft-proof frame returned by proofToDisplay() and gamutMask()
+     * (which detects out-of-gamut pixels by matching the configured colour), so
+     * the preview overlay and the exported gamut report always agree.
+     *
+     * @param r,g,b Alarm colour in display sRGB.
+     *
+     * @note The codes are applied to this instance's private lcms context only:
+     *       they never touch lcms' process-global defaults, so a proofing
+     *       instance cannot recolour an unrelated transform running on another
+     *       thread (e.g. an export). The setter takes an exclusive lock, so it
+     *       cannot interleave with a running transform either.
+     *
+     * @warning Mask detection is inherently heuristic: a colour that real image
+     *          content can legitimately produce makes gamutMask() ambiguous.
+     *          The default (pure red) is chosen to be one that photographic
+     *          output rarely hits.
+     */
+    void setGamutAlarmCodes(uint8_t r, uint8_t g, uint8_t b);
+
+    /** @brief The alarm colour currently in use (default: pure red). */
+    GamutAlarmCodes gamutAlarmCodes() const;
+
     /** True iff a valid proof profile has been loaded. */
     bool hasProofProfile() const;
 
@@ -138,13 +177,17 @@ private:
     // Mutable so the const proofToDisplay / gamutMask can lazily build slots.
     mutable ProofCacheSlot proofCache_[2][4]; // [gamut?0:1][intent]
 
-    // Opaque cmsHPROFILE / cmsHTRANSFORM handles.
+    // Opaque cmsHPROFILE / cmsHTRANSFORM handles. All of them are created on the
+    // private context below, which is what keeps the alarm codes (and any other
+    // lcms client-chunk state) local to this instance.
+    void* ctx_           = nullptr;  // cmsContext (private)
     void* proofProfile_ = nullptr;   // cmsHPROFILE (destination simulated device)
     void* prophoto_     = nullptr;   // cmsHPROFILE (cached working space)
     void* srgb_         = nullptr;   // cmsHPROFILE (display space for the proof leg)
     void* proofDisplay_ = nullptr;   // cmsHTRANSFORM: ProPhoto → [proof] → sRGB
     void* proofGamut_   = nullptr;   // cmsHTRANSFORM with FLAGS_GAMUTCHECK
     std::filesystem::path proofPath_;
+    GamutAlarmCodes alarm_{};        // pushed into ctx_; read by gamutMask()
     mutable std::shared_mutex mutex_;
     uint64_t cacheGeneration_ = 0;   // bumped by loadProofProfile to invalidate proofCache_
 };

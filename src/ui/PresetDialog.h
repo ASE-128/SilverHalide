@@ -16,6 +16,9 @@
 #include <QString>
 
 #include "engine/Adjustments.h"
+// applied() carries lrc::Adjustments, so its metatype must be declared before
+// moc's generated code uses it.
+#include "ui/MetaTypes.h"
 
 class QLineEdit;
 class QListWidget;

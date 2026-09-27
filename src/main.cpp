@@ -18,6 +18,9 @@ int main(int argc, char** argv) {
     // P3-1: linear-light histogram bins cross the queued preview-worker
     // connection (worker thread -> UI thread).
     qRegisterMetaType<lrc::HistogramBins>();
+    // Soft-proofing parameters are dispatched UI -> preview worker through a
+    // queued invocation of requestProof().
+    qRegisterMetaType<lrc::SoftProofParams>();
 
     Application app(argc, argv);
     MainWindow window;

@@ -30,6 +30,9 @@
 
 #include "engine/ImageBuffer.h"
 #include "engine/PanoramaStitcher.h"
+// mergedReady() carries lrc::ImageBufferPtr, so its metatype must be declared
+// before moc's generated code uses it.
+#include "ui/MetaTypes.h"
 
 class QCheckBox;
 class QComboBox;

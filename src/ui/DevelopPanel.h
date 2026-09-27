@@ -28,6 +28,9 @@
 // this header, not just forward-declared. catalog/ is Qt-free, so pulling it
 // into a UI header is a one-way dependency (UI -> catalog).
 #include "catalog/CatalogDatabase.h"
+// lrc::Adjustments in the signals below must have its metatype declared before
+// moc's generated code uses it (see ui/MetaTypes.h for why).
+#include "ui/MetaTypes.h"
 
 class ColorWheelWidget;
 class CurveEditor;
@@ -134,6 +137,14 @@ public:
     // in sync when the viewport sampler is toggled directly). (Must NOT be a
     // signal -- moc would generate a duplicate definition.)
     void setRangeSubSamplerChecked(bool active);
+
+    // Sets the independent colour-range sampler button's checked state without
+    // emitting (used by MainWindow's C/W global-key handlers so the panel button
+    // mirrors a viewport sampler that was toggled directly). Kept separate from
+    // setRangeSubSamplerChecked because the two button families share the same
+    // viewport sampler slot but are checked independently. (Must NOT be a
+    // signal -- moc would generate a duplicate definition.)
+    void setColorRangeSamplerChecked(bool active);
 
 public slots:
     void setSectionMode(int mode);

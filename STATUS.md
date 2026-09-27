@@ -13,6 +13,163 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## 元类型重复声明 + 软打样三项遗留 + profile 字节可复现（2026-09-26，工作区未提交）
+
+### 1. `ImportMode` 元类型重复声明（C2766 隐患，已清除）
+
+`ui/MetaTypes.h` 与 `ui/ImportWorker.h` 各自 `Q_DECLARE_METATYPE(lrc::ImportMode)`。该宏展开为
+`QMetaTypeId<T>` 的**显式特化**，同一翻译单元内二次声明即 MSVC C2766，任何同时包含两个头的 TU
+直接编译失败（此前 `tests/lrc_qt_tests.cpp` 是靠「不包含 MetaTypes.h + 本地重复声明
+`SoftProofParams`」绕开的）。
+
+- **修法**：`ui/MetaTypes.h` 成为**唯一声明点**（补 `@warning` 说明）；`ui/ImportWorker.h` 改为包含它，
+  并留注释禁止在别处再声明；`lrc_qt_tests.cpp` 删掉本地声明。
+- **过程中暴露的更深依赖**：声明搬进 MetaTypes.h 后，AUTOMOC 的聚合 TU（`mocs_compilation.cpp`
+  把所有 `moc_*.cpp` 合成一个 TU）里 `moc_DevelopPanel.cpp` 先**隐式实例化**
+  `QMetaTypeId<lrc::Adjustments>`，之后才看到特化 → C2908 + C2766。根因是「把引擎类型放进信号/槽的
+  头没有包含元类型声明头」，此前只是靠 AUTOMOC 的排序恰好没触发（改一行包含顺序就可能炸）。
+  现按规则给 8 个真正在信号/槽里携带这些类型的头补 `#include "ui/MetaTypes.h"`：
+  `DevelopPanel` / `MainWindow` / `PreviewWorker` / `PanoramaWorker` / `PanoramaDialog` /
+  `SnapshotDialog` / `PresetDialog` / `SoftProofingDialog`（`HistogramWidget::computeFromBuffer`
+  是私有非槽方法，moc 不可见，故未加）。
+
+### 2. 软打样三项遗留（全部落地）
+
+- **(a) 报警色只作用于色域报告 PNG**：lcms 的 out-of-gamut 报警码存在 **context** 的 client chunk 里、
+  **每次 `cmsDoTransform` 按 `p->ContextID` 读取**（`cmsxform.c:296/453`），所以改色无需重建变换。
+  现引擎新增 `SoftProofing::setGamutAlarmCodes()/gamutAlarmCodes()`，并把整个实例改用**私有 lcms
+  context**（`cmsCreateContext` + 全部 `...THR` 变体）——既让颜色真正生效，也去掉了旧构造函数
+  `cmsSetAlarmCodes()` 写**进程全局**状态的副作用（那会重染同进程任何变换，并与并发变换构成数据竞争）。
+  `gamutMask()` 的判定改为匹配**当前配置色**：此前硬编码纯红，用户一换色掩膜就整体变空（静默失效）。
+  worker 在 arm 时把对话框的颜色推进引擎，预览叠加层与报告 PNG 从此一致。
+- **(b) 1:1 全尺寸视图不叠加打样**：1:1 帧改由 worker 自己打样——`loadFullRes`/`adjustFullRes` 在 arm 时
+  用 `proofLinear()` 取代 `toDisplaySRGB()`，`emitFullResCoarse` 同理。打样帧**不写** U8 缓存、
+  目录内嵌全尺寸预览与旧磁盘缓存（那些是未打样产物），并且帧去重键混入**打样状态盐**
+  （intent / gamut 开关 / 报警色；关闭时为 0）→ 同一次调整下切换打样或换色也会重新渲染。
+- **(c) 拖动中的粗帧不打样**：`adjustPreviewCoarse` 在 arm 时经新入口
+  `Pipeline::renderLinearBounded()`（= `renderInternalLinear`，与显示路径**同一 stage**，不做 sRGB
+  转换、不入显示 LRU）取线性缓冲再打样后发出；未 arm 时路径与行为完全不变。
+- 新增 `PreviewWorker::setProofState()` 新槽，MainWindow 在参数变化时 queued 下发；原来「预览帧渲染完成
+  后再补一次 requestProof」的机制保留（保证精修帧一致），但粗帧不再依赖它。
+
+### 3. `exportProfileBytes()` 跨进程字节不稳定（已修，导出可复现）
+
+- **取证**（临时探针把三份预置落盘，跨进程 + 间隔 3s 逐字节对比）：三份预置**只差 1 个字节，偏移
+  35** —— ICC 头 `dateTimeNumber` 的「秒」字段，即 lcms 用挂钟时间戳生成 profile；profile ID
+  （偏移 84）无变化 ⇒ 内存构造的 profile 未计算 MD5 ID，固定日期不会造成「ID 与内容不一致」。
+- **修法**：`exportProfileBytes()` 序列化后把偏移 24..35 的 6 个大端 uInt16 固定为
+  `2020-01-01 00:00:00`。修复后同样两次跨进程运行，三份预置**差异 0 字节**；export 因此在固定设置下
+  字节可复现（校验和、去重、字节金标准测试都成立）。
+
+**测试登记**：
+
+- `tests/TestColorManager.cpp`：`exportProfileBytes is byte-reproducible`（两次调用逐字节相同、声明长度
+  自洽、时间戳为固定值、`acsp` 未被改坏）。
+- `tests/TestSoftProofing.cpp`：`the alarm colour drives both the proof frame and mask`（默认纯红 → 换绿后
+  帧与掩膜同步跟随、掩膜不再变空）、`the alarm colour is per-instance, not process-global`（两个实例交错
+  使用各保持自己的颜色，证明私有 context）。
+- `tests/TestPipeline.cpp`：`renderLinearBounded stays linear F32 at a bounded size`（F32、尺寸上限、
+  不修改源缓冲，且 `toDisplaySRGB(该缓冲) == render()` 逐像素一致 ±1，即「就是显示路径所转换的那一级」）。
+- `tests/lrc_qt_tests.cpp`：`SoftProofRenderPathsTest` 端到端驱动真实 worker——未 arm 的粗帧无报警色、
+  arm 后粗帧带报警色；arm 时 1:1 帧带报警色、关闭后同一次调整重新渲染回无报警色。报警色取**品红**，
+  fixture 里不存在该颜色，所以「这帧有没有打样」是精确的像素计数而不是统计判断。
+
+**反向验证**：临时让 `proofArmed()` 恒为 false 后重建，两个新 Qt 用例按预期转红
+（`the coarse drag frame did not carry the soft proof` / `the 1:1 full-res frame did not carry the soft proof`），
+确认测试不是空过。
+
+**验证（Release，本机）**：GUI 全量构建通过；`lrc_qt_tests.exe` **11 个测试类全绿**；headless 全量
+**480 用例 / 878886 断言全部通过**。
+
+## R-08：JPEG 嵌入 ICC 丢 SOS 标记（缺陷修复，2026-09-26，工作区未提交）
+
+`TestRawDecoder.cpp:556`（embedded ICC JPEG 用例）长期 flaky 的根因**不是阈值**，而是写入端产出
+了**结构非法的 JPEG**；顺带修掉同一函数里第二处互操作缺陷。
+
+- **根因（写入侧丢 SOS 标记）**：`ImageIO.cpp` 的 `parseJpegSegments()` 命中 SOS 分支时先 `i += 2`
+  再记 `pixelStart`，偏移指向 SOS 的 length 字段而**不是 `FF DA` 标记本身**；`embedIccJpeg()`
+  从该偏移原样回贴尾部，于是每次带 ICC 写出的 JPEG 都**缺 SOS 标记**。
+  - 严格解码器（GDI+ / Qt 的 libjpeg）直接拒收：`Invalid JPEG file structure: missing SOS marker`。
+  - stb 过于宽容：把熵数据当头部继续扫，输出缓冲只写了一半，**未写到的字节是堆上残留**，
+    同一份字节流每次解码结果都不同 → 该用例的 ΔG 在 0.005~0.825 间随机跳，时过时不过。
+  - 读取路径 `extractIccFromJpeg()` 不使用该偏移，所以 **ICC 提取始终正确**，签名类断言全绿，
+    缺陷因此长期隐身（`TestCompetitiveP1` 只断言 `contains("ICC_PROFILE")`，从不解码）。
+- **产品影响**：`ExportEngine::exportJpeg()` 只要 `IccChoice != None`（sRGB/AdobeRGB/DisplayP3）
+  就会导出**外部打不开**的 JPEG（默认 `None` 路径不受影响，PNG iCCP / TIFF tag 34675 路径正确）。
+- **修复**：`parseJpegSegments()` 改为在跳过标记**之前**记录 `markerStart`，SOS/EOI 分支写
+  `pixelStart = markerStart`（尾段含标记本身）；未找到时哨兵值由 `0` 改为 `jpg.size()`（不再回贴
+  整份文件），并补齐函数契约注释与 `@warning`。
+- **同函数第二处缺陷（由新增 Qt 用例发现）**：`jpegIccMarkers()` 原先按 **255 字节**切分 ICC。
+  JPEG 段长是 16 位，APP2 载荷上限 65533、减去 14 字节 ICC 头即 **65519 字节/段**；255 字节切法
+  把 588 字节的 sRGB profile 切成 3 段（尾段仅 78 字节），而 Qt 的 JPEG 读取器**会静默丢弃
+  载荷 ≤146 字节的 ICC_PROFILE 段**（`qjpeghandler.cpp` 中 `data_length > 128 + 4 + 14`），
+  于是 Qt 只拿到 510/588 字节，`QColorSpace::fromIccProfile` 报 `failed size sanity 2` 并**整个
+  忽略该 profile** → Qt 系消费者会把我们的 wide-gamut 导出当 sRGB 处理。
+  现改为按 **65519 字节**切分（与 Qt / ImageMagick 一致，<64 kB 的 profile 永远是单段），
+  超过单段时按 `ceil(size/count)` **均分**，保证不出现接近该阈值的小尾段；超过 255 段
+  （seq/count 为单字节）无法表示时**丢弃 profile**，而不是写出 count 与实际段数不符的坏文件。
+- **测试登记（均先复现后修复）**：
+  - `tests/TestImageIO.cpp` 新增 4 用例：ICC JPEG 的 SOS 结构校验（独立实现的段游走，不复用引擎
+    解析器）＋ 解码回读像素＋双次解码一致性；无 ICC 路径字节等价于 `encodeJpeg()` 且结构有效；
+    70 kB profile 均分多段且 `loadSourceImage().icc` 逐字节相等；>255 段（16.7 MB）profile 被
+    丢弃但 JPEG 仍有效可解码。
+  - `tests/lrc_qt_tests.cpp` 新增 `IccJpegDecodabilityTest` 2 用例：导出 JPEG 必须被 Qt 的
+    **独立解码器**完整读出（尺寸、平铺色块像素、`colorSpace().isValid()` 且 profile 长度一致）；
+    反向对照——把同一文件删掉 `FF DA` 后 Qt 必须拒收（证明判定器对该缺陷敏感）。
+- **反向验证**：临时还原 `pixelStart = i` 后重建，`REQUIRE(sos != npos)` 与解码回读像素断言
+  **双双转红**（`bytes=1226 sos=npos`），确认新测试确为该缺陷的守卫；固定后 `[raw][io]` 连跑
+  **20/20 全绿**（修复前同一用例约半数失败）。跨进程交叉验证：GDI+ 从修复前的文件读出完整
+  588 字节 profile，段头实测 `271/271/94 seq=1/3,2/3,3/3` + `SOS@0x4C1`；修复后单段 602 字节，
+  Qt 报 `cs valid: true cs profile size: 588`。
+
+**验证（Release，本机）**：headless 全量 **476 用例 / 878791 断言全部通过**（此前基线 469 用例 /
+878717 断言，唯一失败即本次修复的 R-08 JPEG 用例）；GUI 全量构建通过；`lrc_qt_tests.exe`
+**10 个测试类全绿**（新增 `IccJpegDecodabilityTest`，且 `qt.gui.icc` 警告消失）。
+
+## UI 层接线修复 + 两个孤儿模块接入（2026-09-26，工作区未提交）
+
+对 `src/ui` 做了一次「信号声明 ↔ emit ↔ connect」三方对账与对话框入口追踪，修复下列接线缺陷；
+**未删除任何既有功能**，两个此前完全不可达的模块（软打样、查重）改为补入口接入。
+
+- **颜色范围「取样」按钮空转（真缺陷）**：`DevelopPanel` 的独立颜色范围取样按钮 emit 的
+  `colorRangeSamplerRequested(bool)` 在全仓库没有任何接收者，点击无反应，只有 `C` 快捷键能激活
+  viewport 取样器。现补 `connect(... → ImageViewport::setColorRangeSamplerActive)`；新增
+  `DevelopPanel::setColorRangeSamplerChecked(bool)`（信号阻断式镜像），并在 `C`/`W` 快捷键路径
+  回写面板按钮态。
+- **取样器互斥不完整**：`W`/`C` 之前只改面板按钮（信号被阻断，viewport 标志未复位），会导致
+  两个 sampler 同时 armed、按钮与 viewport 状态漂移。现两条路径显式复位
+  `setSamplerActive/setPointColorSamplerActive/setColorRangeSamplerActive/setLuminanceSamplerActive`
+  并同步面板按钮，顺带让此前定义但无人调用的 `setRangeSubSamplerChecked()` 真正投入使用。
+- **`lensfunEnabledChanged` 死信号**：`DevelopPanel.h` 声明后既无 emit 也无 connect。现由 Lensfun
+  开关 emit，`MainWindow::onLensfunEnabledChanged` 负责状态栏反馈（持久化仍走
+  `adjustmentsCommitted`，不重复提交）。
+- **软打样（视图 → 软打样…）接入**：此前 `engine/SoftProofing` + `ui/SoftProofingDialog` 完整实现
+  但全仓库无构造点。现补菜单项（无模式对话框）、`SoftProofing::loadProofProfileFromMemory()`
+  （内置 sRGB / Adobe RGB / Display P3 预设以内存 ICC 加载，无需随包分发 .icc）、
+  `PreviewWorker::requestProof()`（渲染调整后线性 ProPhoto → 打样到 sRGB U8，关闭时无损回落到普通
+  预览）与 `PreviewWorker::requestGamutReport()`（按报警色输出 U8 色域掩膜，主线程写 PNG）。
+  CMYK 打样预设（Fogra39 / SWOP）本仓库无 ICC 文件，不能解析时给出明确状态栏提示而非静默失败。
+- **查重（照片 → 查找重复项…）接入**：此前 `app/DuplicateDetector` + `CatalogDatabase` 的
+  `photo_features` / stack API + `ui/DuplicateResultsDialog` 完整但无入口。现补菜单项，
+  `QtConcurrent` 后台扫描（读目录内嵌缩略图，不做 RAW 解码），复用 `getPhotoFeatures` 作为缓存种子，
+  新算出的 phash/embedding 经 `storePhotoFeatures` 写回；结果进入结果对话框，`groupStacked` 刷新
+  胶片栏并提示，`focusImagesRequested` 跳转到首个成员。析构前 join 扫描，避免 use-after-free。
+- **头文件命名空间污染**：`ui/SoftProofingDialog.h` 把 `class ColorManager;` 前置声明写在全局命名空间，
+  任何同时 `using namespace lrc` 的 TU 包含它后无限定名 `ColorManager` 会解析到全局不完整类型
+  （实测让 `lrc_qt_tests.cpp` 既有代码编译失败）。现移入 `namespace lrc`。
+
+**测试登记**：`tests/TestSoftProofing.cpp` 新增 3 用例（内存 ICC 加载并出图、三种内置预设逐一打样、
+空字节清空与垃圾字节安全失败）；`tests/lrc_qt_tests.cpp` 新增 `ColorRangeSamplerTest`（按钮 emit /
+两种镜像静默）、`SoftProofingDialogSmokeTest`（paramsChanged 契约 + 启用状态）、
+`DuplicateResultsDialogSmokeTest`（无目录渲染分组）；`tests/CMakeLists.txt` 纳入
+`SoftProofingDialog.cpp` / `DuplicateResultsDialog.cpp`；`DevelopPanel` 三个取样按钮补稳定 objectName。
+
+**验证（Release，本机）**：GUI 全量构建通过（`SilverHalide.exe` + `lrc_qt_tests.exe`）；
+`lrc_qt_tests.exe` 9 个测试类全绿（含新增 3 类，Totals 全 0 failed）；GUI 启动冒烟
+（启动后 10s 存活 → WM_CLOSE）EXIT=0；headless 全量 **469 用例 / 878717 断言，468 通过**，
+唯一失败为既有 flaky `TestRawDecoder.cpp:556`（R-08 embedded-ICC：两次运行 Δ=0.0073 / 0.0121，
+均低于阈值 0.02），与本次改动路径无关——**该缺陷已在上一小节定位并修复**。
+
 ## P-C：移除 Lightroom 兼容（2026-09-26，工作区未提交）
 
 按 [ADR-0001](docs/adr/0001-drop-lightroom-compat.md) 与

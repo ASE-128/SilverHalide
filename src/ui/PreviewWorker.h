@@ -26,6 +26,11 @@
 #include "engine/DcpProfile.h"
 #include "engine/ImageBuffer.h"
 #include "engine/Pipeline.h"  // lrc::HistogramBins for the histogramReady signal.
+#include "engine/SoftProofing.h"  // lrc::SoftProofParams for requestProof.
+// The signals/slots below carry engine types (Adjustments, ImageBufferPtr,
+// HistogramBins, SoftProofParams): their metatypes must be declared before moc
+// uses them, and they cross thread boundaries as queued connections.
+#include "ui/MetaTypes.h"
 
 /**
  * Export formats understood by PreviewWorker::exportImage. Index order must
@@ -154,6 +159,57 @@ public slots:
      */
     void adjustPreviewCoarse(qint64 imageId, qint64 generation,
                              const lrc::Adjustments& adjustments);
+    /**
+     * @brief Renders the current preview through the soft-proofing transform.
+     *
+     * `enabled == false` restores the unproofed preview by delegating to the
+     * normal adjustPreview path, so toggling proofing off is lossless. When
+     * enabled, the adjusted linear ProPhoto buffer is re-rendered and mapped
+     * through SoftProofing::proofToDisplay, then emitted as proofReady.
+     *
+     * The destination field of `params` is either a built-in preset key
+     * ("srgb" / "adobe_rgb" / "display_p3", serialized in memory) or a real
+     * .icc/.icm file path. Keys this build cannot resolve (the CMYK proof
+     * presets) emit proofFailed instead of silently showing the unproofed
+     * frame. Runs on the worker thread; only the working image can be proofed
+     * (a different image id is ignored like adjustPreview).
+     */
+    void requestProof(qint64 imageId, qint64 generation,
+                      const lrc::Adjustments& adjustments,
+                      const lrc::SoftProofParams& params, bool enabled);
+    /**
+     * @brief Renders the out-of-gamut mask of the current preview.
+     *
+     * Produces a display-ready U8 frame (out-of-gamut pixels painted with the
+     * requested alarm colour, everything else black) and emits
+     * gamutReportReady; MainWindow writes it to the PNG the user picked.
+     */
+    void requestGamutReport(qint64 imageId,
+                            const lrc::Adjustments& adjustments,
+                            const lrc::SoftProofParams& params);
+    /**
+     * @brief Arms soft proofing for the view's own render paths.
+     *
+     * requestProof() re-renders the current preview on demand. This slot instead
+     * records the proof state so that every frame the viewport can receive is
+     * produced proofed — the coarse drag frames (previewReadyCoarse), the refine
+     * frame after each edit, and the 1:1 full-resolution frames
+     * (fullResReady / fullResReadyCoarse). It also pushes the dialog's
+     * out-of-gamut alarm colour into the engine, so the colour the user picks
+     * tints the preview overlay and not just the exported gamut report.
+     *
+     * @param params  Destination profile key/path, rendering intent and alarm
+     *                colour.
+     * @param enabled False restores the unproofed look on the next frame (the
+     *                recorded state is kept so re-enabling needs no re-send).
+     *
+     * @note Invoked from the UI thread via a queued connection; the recorded
+     *       state is plain worker-thread data, so no extra locking is needed.
+     *       A destination that cannot be resolved leaves proofing disarmed:
+     *       frames fall back to the unproofed render and requestProof reports the
+     *       failure to the user.
+     */
+    void setProofState(const lrc::SoftProofParams& params, bool enabled);
     /**
      * @brief Full-resolution decode + render + write to an image file.
      *
@@ -287,6 +343,23 @@ signals:
      */
     void histogramReady(qint64 imageId, const lrc::HistogramBins& bins);
     /**
+     * @brief Display-ready sRGB frame produced by the soft-proofing transform.
+     *
+     * Same shape as previewReady; emitted by requestProof when proofing is
+     * enabled. MainWindow swaps it into the viewport without resetting the
+     * view (the frame always belongs to the already-visible image).
+     */
+    void proofReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
+    /**
+     * @brief Soft proofing could not be applied (unresolvable destination
+     *        profile, no proof transform, or no working image).
+     */
+    void proofFailed(const QString& message);
+    /**
+     * @brief Out-of-gamut report frame for requestGamutReport (U8 RGB).
+     */
+    void gamutReportReady(const lrc::ImageBufferPtr& rgbU8);
+    /**
      * @brief Low-res (kCoarseMaxDim) preview frame, delivered ahead of
      *        previewReady for fast drag feedback.
      */
@@ -389,6 +462,75 @@ private:
     lrc::CatalogDatabase& catalog_;
     std::shared_ptr<lrc::ColorManager> colorManager_;
     std::unique_ptr<lrc::ExportEngine> exportEngine_;
+
+    // --- Soft proofing (P-C "视图 → 软打样…") ---------------------------------
+    // Proof transform cache. Used exclusively on the worker thread, so the
+    // engine's own locks are only there to make the shared-mutex API safe, not
+    // to guard additional state here.
+    lrc::SoftProofing proofing_;
+    // Destination key/path currently loaded into proofing_ (empty = none). Lets
+    // repeated parameter tweaks skip the (re)load + transform rebuild.
+    std::string proofProfileKey_;
+
+    /**
+     * @brief Ensures `destination` is the profile loaded into proofing_.
+     *
+     * Built-in preset keys are serialized in memory through
+     * ColorManager::exportProfileBytes; anything else is treated as an
+     * .icc/.icm path and loaded from disk. Returns false (and emits nothing)
+     * when the destination cannot be resolved, leaving proofProfileKey_ empty
+     * so a later request retries.
+     */
+    bool ensureProofProfileLoaded(const std::string& destination);
+
+    /**
+     * @brief Records the proof state and syncs the engine with it.
+     *
+     * Stores @p params / @p enabled for the render paths, pushes the alarm colour
+     * into `proofing_` and resolves the destination profile.
+     *
+     * @return True when the state is armed *and* usable (see proofArmed()).
+     */
+    bool applyProofState(const lrc::SoftProofParams& params, bool enabled);
+
+    /**
+     * @brief True when the render paths must proof their output.
+     *
+     * Mirrors the condition requestProof() checks before proofing: proofing
+     * switched on, a destination key/path recorded, and its profile loaded.
+     */
+    bool proofArmed() const {
+        return proofEnabled_ && !proofParams_.destinationProfilePath.empty() &&
+               proofing_.hasProofProfile();
+    }
+
+    /**
+     * @brief Proofs an adjusted linear buffer with the recorded state.
+     *
+     * @param linearDisplay Adjusted linear ProPhoto F32 buffer — the same stage
+     *        the unproofed path converts with ColorManager::toDisplaySRGB.
+     * @return The proofed display-ready U8 frame, or nullptr when proofing is not
+     *         armed / unusable, so callers keep their unproofed frame.
+     */
+    lrc::ImageBufferPtr proofLinear(const lrc::ImageBufferPtr& linearDisplay);
+
+    /**
+     * @brief Salt mixed into the 1:1 frame keys to reflect the proof state.
+     *
+     * The full-res frame dedup keys are (image, adjustments). Proofing changes
+     * the pixels for the same adjustment stack, so switching it on/off, changing
+     * the intent or picking another alarm colour must invalidate those keys —
+     * otherwise the viewport would keep an unproofed frame (or vice versa).
+     *
+     * @return 0 when proofing is not armed (keys reduce to the plain adjustment
+     *         hash, i.e. the historical behaviour).
+     */
+    uint64_t proofFrameSalt() const;
+
+    // Last state pushed by setProofState / requestProof: the render paths consult
+    // it so coarse, refine and 1:1 frames all come out proofed.
+    bool proofEnabled_ = false;
+    lrc::SoftProofParams proofParams_;
 
     lrc::ImageBufferPtr linear_;
     qint64 loadedImageId_ = -1;

@@ -187,6 +187,57 @@ TEST_CASE("Pipeline: render produces an 8-bit preview at maxDim", "[pipeline]") 
     REQUIRE(cached->data().data() == out->data().data());
 }
 
+TEST_CASE("Pipeline: renderLinearBounded stays linear F32 at a bounded size",
+          "[pipeline]") {
+    // Soft proofing feeds its colourimetric transform from this entry point: it
+    // must be the same stage render() converts with toDisplaySRGB (so a proofed
+    // frame and an unproofed frame of one edit differ only by the proof
+    // transform), at a bounded size and without touching the display LRU.
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+
+    auto buf = ImageBuffer::create(64, 32, PixelFormat::F32);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 64; ++x) {
+            buf->setPixel(x, y, 0, 0.25f);
+            buf->setPixel(x, y, 1, static_cast<float>(y) / 31.0f);
+            buf->setPixel(x, y, 2, 0.25f);
+        }
+    const Adjustments adj = Adjustments::defaults();
+
+    // maxDim <= 0 keeps the source resolution.
+    auto full = pipeline.renderLinearBounded(*buf, adj, 0);
+    REQUIRE(full);
+    CHECK(full->format() == PixelFormat::F32);
+    CHECK(full->width() == 64);
+    CHECK(full->height() == 32);
+    // The source must be left untouched (applyAdjustments edits in place).
+    CHECK(buf->pixel(0, 0, 0) == Approx(0.25f));
+
+    auto half = pipeline.renderLinearBounded(*buf, adj, 16);
+    REQUIRE(half);
+    CHECK(half->format() == PixelFormat::F32);
+    CHECK(half->width() == 16);
+    CHECK(half->height() == 8);
+
+    // The contract the proof path depends on: this buffer IS the stage render()
+    // converts, so converting it with the display transform must reproduce that
+    // render (the numeric values are not comparable directly — the buffer is
+    // linear ProPhoto while the render is display-encoded sRGB).
+    auto display = pipeline.render(0, *buf, adj, 16);
+    REQUIRE(display);
+    REQUIRE(display->format() == PixelFormat::U8);
+    auto converted = cm->toDisplaySRGB(*half);
+    REQUIRE(converted);
+    REQUIRE(converted->width() == display->width());
+    REQUIRE(converted->height() == display->height());
+    int maxDiff = 0;
+    for (size_t i = 0; i < converted->data().size(); ++i)
+        maxDiff = std::max(maxDiff, std::abs(static_cast<int>(converted->data()[i]) -
+                                             static_cast<int>(display->data()[i])));
+    CHECK(maxDiff <= 1);
+}
+
 TEST_CASE("Pipeline: cache is invalidated by a parameter change", "[pipeline]") {
     auto cm = std::make_shared<ColorManager>();
     Pipeline pipeline(cm);

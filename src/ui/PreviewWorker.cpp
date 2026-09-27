@@ -1,6 +1,7 @@
 #include "ui/PreviewWorker.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 
 #include "app/Constants.h"
@@ -44,6 +45,13 @@ void applyExportOptions(lrc::ExportEngine::ExportSpec& spec, int icc,
                         const ExportWatermark& wm) {
     spec.icc = static_cast<lrc::ExportEngine::ExportSpec::IccChoice>(icc);
     spec.watermark = toEngineWatermark(wm);
+}
+
+// Normalised 0..1 colour component -> 8-bit, the encoding the engine's soft
+// proofing params and gamut alarm codes use.
+uint8_t unitToU8(float v) {
+    return static_cast<uint8_t>(
+        std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
 }
 
 // Zero-copy ImageBufferPtr -> QImage: the QImage borrows the buffer's U8 pixel
@@ -262,8 +270,204 @@ void PreviewWorker::adjustPreviewCoarse(qint64 imageId, qint64 generation,
                                 lrc::app::kCoarseMaxDim);
     if (abort_.load())
         return;  // abort during render.
+    // Soft proofing is part of the displayed colour, so the coarse drag frame has
+    // to carry it too: otherwise the image visibly jumps colour on release.
+    // Proofing needs the linear stage, which render() does not hand back, so it
+    // is rendered once at the coarse size (renderLinearBounded skips the sRGB
+    // conversion and the LRU, so this is one bounded pass).
+    if (proofArmed()) {
+        if (auto lin = pipeline_.renderLinearBounded(*linear_, adjustments,
+                                                    lrc::app::kCoarseMaxDim)) {
+            if (auto proofed = proofLinear(lin))
+                out = proofed;
+        }
+        if (abort_.load())
+            return;  // abort during the proof.
+    }
     if (generation == latestGeneration_)
         emit previewReadyCoarse(imageId, out);
+}
+
+// --- Soft proofing (视图 → 软打样…") ------------------------------------------
+//
+// The proof leg is colourimetric: it needs the *adjusted linear ProPhoto* buffer
+// and maps it through a print/display simulation to display sRGB. This worker
+// owns that buffer (`linear_`, the preview-resolution decode), so proofing runs
+// here rather than on the UI thread. See requestProof's header comment for the
+// destination-key contract.
+
+bool PreviewWorker::ensureProofProfileLoaded(const std::string& destination) {
+    if (!destination.empty() && destination == proofProfileKey_)
+        return proofing_.hasProofProfile();
+    proofProfileKey_.clear();
+    if (destination.empty())
+        return false;
+    // Built-in presets carry no separate .icc file in this build: ColorManager
+    // serializes them in memory. `loadProofProfileFromMemory({})` clears the
+    // profile, so an empty byte vector must be treated as a load failure.
+    const auto loadPreset = [this](lrc::ColorManager::ExportColorProfile preset) {
+        const auto bytes = lrc::ColorManager::exportProfileBytes(preset);
+        return !bytes.empty() && proofing_.loadProofProfileFromMemory(bytes);
+    };
+    const QString key = QString::fromStdString(destination);
+    bool ok = false;
+    if (key.compare(QLatin1String("srgb"), Qt::CaseInsensitive) == 0) {
+        ok = loadPreset(lrc::ColorManager::ExportColorProfile::SRGB);
+    } else if (key.compare(QLatin1String("adobe_rgb"), Qt::CaseInsensitive) == 0) {
+        ok = loadPreset(lrc::ColorManager::ExportColorProfile::AdobeRGB);
+    } else if (key.compare(QLatin1String("display_p3"), Qt::CaseInsensitive) == 0) {
+        ok = loadPreset(lrc::ColorManager::ExportColorProfile::DisplayP3);
+    } else {
+        // Everything else is a real .icc/.icm path picked in the dialog.
+        ok = proofing_.loadProofProfile(toStdPath(key));
+    }
+    if (ok)
+        proofProfileKey_ = destination;
+    return ok;
+}
+
+bool PreviewWorker::applyProofState(const lrc::SoftProofParams& params,
+                                    bool enabled) {
+    proofParams_ = params;
+    proofEnabled_ = enabled;
+    if (!enabled || params.destinationProfilePath.empty())
+        return false;
+    // The alarm colour is engine instance state and tints both the preview
+    // overlay and the exported gamut report, so it is pushed on every change
+    // rather than only when a report is requested.
+    proofing_.setGamutAlarmCodes(unitToU8(params.outOfGamutR),
+                                 unitToU8(params.outOfGamutG),
+                                 unitToU8(params.outOfGamutB));
+    // A destination this build cannot resolve (the CMYK presets need an external
+    // .icc) leaves proofing unusable; callers then fall back to the unproofed
+    // frame and requestProof reports it.
+    if (!ensureProofProfileLoaded(params.destinationProfilePath))
+        return false;
+    return proofArmed();
+}
+
+lrc::ImageBufferPtr PreviewWorker::proofLinear(
+    const lrc::ImageBufferPtr& linearDisplay) {
+    if (!proofArmed() || !linearDisplay || linearDisplay->empty())
+        return nullptr;
+    return proofing_.proofToDisplay(*linearDisplay, proofParams_.intent,
+                                    proofParams_.showOutOfGamut);
+}
+
+uint64_t PreviewWorker::proofFrameSalt() const {
+    if (!proofArmed())
+        return 0;
+    const auto alarm = proofing_.gamutAlarmCodes();
+    uint64_t h = 0x9E3779B97F4A7C15ull;
+    h ^= static_cast<uint64_t>(proofParams_.intent) * 0x100000001B3ull;
+    h ^= proofParams_.showOutOfGamut ? 0xC2B2AE3D27D4EB4Full : 0ull;
+    h ^= (static_cast<uint64_t>(alarm.r) << 16) |
+         (static_cast<uint64_t>(alarm.g) << 8) | static_cast<uint64_t>(alarm.b);
+    return h;
+}
+
+void PreviewWorker::setProofState(const lrc::SoftProofParams& params,
+                                  bool enabled) {
+    // Records the state only: the frames currently on screen are refreshed by the
+    // requestProof() the UI issues alongside this call (preview) and by the next
+    // 1:1 render (which MainWindow re-requests when the viewport shows full-res).
+    applyProofState(params, enabled);
+}
+
+void PreviewWorker::requestProof(qint64 imageId, qint64 generation,
+                                 const lrc::Adjustments& adjustments,
+                                 const lrc::SoftProofParams& params,
+                                 bool enabled) {
+    if (abort_.load())
+        return;  // abort requested.
+    if (imageId != loadedImageId_ || !linear_)
+        return;  // only the working image can be proofed.
+    latestGeneration_ = generation;
+    if (!enabled) {
+        // Lossless off-switch: re-emit the normal preview (and its histogram)
+        // through the regular path so the unproofed frame comes back exactly.
+        applyProofState(params, false);
+        adjustPreview(imageId, generation, adjustments);
+        return;
+    }
+    if (params.destinationProfilePath.empty() ||
+        !applyProofState(params, true)) {
+        emit proofFailed(
+            tr("无法应用软打样：目标配置文件「%1」不可用（CMYK 打样预设需要外部 ICC 文件）")
+                .arg(QString::fromStdString(params.destinationProfilePath)));
+        return;
+    }
+    // The linear display buffer is only handed back by renderPreview() on an
+    // incremental-cache miss, so render it directly instead. `linear_` is
+    // already the preview-resolution decode, so this stays inside the preview
+    // budget; spatial kernels scale to the preview size rather than the native
+    // long edge, which is irrelevant for the colourimetric proof itself.
+    lrc::ImageBufferPtr linearDisplay = pipeline_.renderLinearFull(
+        static_cast<uint64_t>(imageId), *linear_, adjustments);
+    if (abort_.load() || !linearDisplay || linearDisplay->empty())
+        return;
+    lrc::ImageBufferPtr out = proofLinear(linearDisplay);
+    if (!out || out->empty())
+        return;
+    if (abort_.load() || generation != latestGeneration_)
+        return;  // superseded by a newer request.
+    emit proofReady(imageId, out);
+    // proofToDisplay() already returns display-ready sRGB U8, which the
+    // histogram helper bins directly (no re-encoding).
+    emit histogramReady(imageId,
+                        lrc::Pipeline::computeHistogramFromLinear(*out));
+}
+
+void PreviewWorker::requestGamutReport(qint64 imageId,
+                                       const lrc::Adjustments& adjustments,
+                                       const lrc::SoftProofParams& params) {
+    if (abort_.load())
+        return;
+    if (imageId != loadedImageId_ || !linear_)
+        return;
+    if (params.destinationProfilePath.empty() ||
+        !ensureProofProfileLoaded(params.destinationProfilePath)) {
+        emit proofFailed(tr("无法生成色域报告：软打样目标配置文件不可用"));
+        return;
+    }
+    // gamutMask() recognises out-of-gamut pixels by matching the *configured*
+    // alarm colour, so the report must push the colour it is about to paint with
+    // (the dialog can change it without arming the render paths).
+    proofing_.setGamutAlarmCodes(unitToU8(params.outOfGamutR),
+                                 unitToU8(params.outOfGamutG),
+                                 unitToU8(params.outOfGamutB));
+    lrc::ImageBufferPtr linearDisplay = pipeline_.renderLinearFull(
+        static_cast<uint64_t>(imageId), *linear_, adjustments);
+    if (abort_.load() || !linearDisplay || linearDisplay->empty())
+        return;
+    lrc::ImageBufferPtr mask =
+        proofing_.gamutMask(*linearDisplay, params.intent);
+    if (!mask || mask->empty()) {
+        emit proofFailed(tr("无法生成色域报告：没有可用的软打样变换"));
+        return;
+    }
+    // gamutMask() is F32 grey (1.0 = out of gamut). Paint it as a U8 RGB frame
+    // using the alarm colour picked in the dialog so the PNG is directly
+    // readable; MainWindow writes it losslessly.
+    const int w = mask->width();
+    const int h = mask->height();
+    auto out = lrc::ImageBuffer::create(w, h, lrc::PixelFormat::U8);
+    if (!out || out->empty())
+        return;
+    const float* src = reinterpret_cast<const float*>(mask->data().data());
+    uint8_t* dst = out->data().data();
+    const uint8_t ar = unitToU8(params.outOfGamutR);
+    const uint8_t ag = unitToU8(params.outOfGamutG);
+    const uint8_t ab = unitToU8(params.outOfGamutB);
+    const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
+    for (size_t i = 0; i < pixels; ++i) {
+        const bool outOfGamut = src[i * 3] > 0.5f;
+        const size_t di = i * 3;
+        dst[di + 0] = outOfGamut ? ar : 0;
+        dst[di + 1] = outOfGamut ? ag : 0;
+        dst[di + 2] = outOfGamut ? ab : 0;
+    }
+    emit gamutReportReady(out);
 }
 
 // --- Full-resolution 1:1 path -------------------------------------------------
@@ -275,15 +479,21 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
         return;  // abort requested.
     fullResLatest_ = generation;
     const uint64_t adjHash = static_cast<uint64_t>(adjustments.hash());
-    // Skip when the full-res frame was already emitted for this (image, adjHash).
+    // Frame identity = adjustments *and* the proof state, because proofing changes
+    // the pixels for an unchanged adjustment stack.
+    const uint64_t frameKey = adjHash ^ proofFrameSalt();
+    // Skip when the full-res frame was already emitted for this (image, state).
     if (fullResLinear_ && fullResImageId_ == imageId &&
-        fullResAdjHash_ == adjHash) {
+        fullResAdjHash_ == frameKey) {
         return;
     }
-    // Serve from the import-time full-res cache when at default settings.
+    // Serve from the import-time full-res cache when at default settings. Those
+    // blobs (and the legacy disk cache) hold unproofed pixels, so the fast path
+    // is skipped while proofing is armed.
     const bool atDefaults =
         adjHash == static_cast<uint64_t>(lrc::Adjustments::defaults().hash());
-    if (atDefaults && !(fullResLinear_ && fullResImageId_ == imageId)) {
+    if (atDefaults && !proofArmed() &&
+        !(fullResLinear_ && fullResImageId_ == imageId)) {
         // Embedded full-res JPEG stored in the catalog file; fast path, no raw
         // decode.
         if (auto blob =
@@ -315,7 +525,9 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
     }
     // Reuse a previously rendered (image, adjHash) full-res U8, skipping the
     // decode + renderLinearFull + toDisplaySRGB pass for non-default adjustments.
-    if (!atDefaults) {
+    // The cache only ever holds unproofed frames, so it is bypassed while
+    // proofing is armed.
+    if (!atDefaults && !proofArmed()) {
         const bool haveLinear = fullResLinear_ && fullResImageId_ == imageId;
         const int nativeW = haveLinear ? fullResLinear_->width() : 0;
         const int nativeH = haveLinear ? fullResLinear_->height() : 0;
@@ -324,7 +536,7 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
             fullResImageId_ = imageId;
             fullResPath_ = filePath;
             fullResCoarseHash_ = 0; // image/adjust change invalidates dedup.
-            fullResAdjHash_ = adjHash;
+            fullResAdjHash_ = frameKey;
             if (generation == fullResLatest_)
                 emit fullResReady(imageId, cached);
             return;
@@ -346,22 +558,30 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
         emit loadFailed(filePath);
         return;
     }
-    auto u8 = colorManager_->toDisplaySRGB(*f32);
+    // Soft proofing applies to the 1:1 view as well: the full-res viewport shows
+    // this frame and never the preview-sized proof frame, so without proofing
+    // here the 1:1 view would silently switch to unproofed colours.
+    auto u8 = proofArmed() ? proofLinear(f32) : colorManager_->toDisplaySRGB(*f32);
     if (abort_.load())
-        return;  // abort during the sRGB conversion.
+        return;  // abort during the display conversion / proof.
+    if (!u8 || u8->empty()) {
+        emit loadFailed(filePath);
+        return;
+    }
     fullResFromCache_ = false;
-    if (atDefaults && generation == fullResLatest_) {
+    if (atDefaults && !proofArmed() && generation == fullResLatest_) {
         // Store the rendered 1:1 JPEG inside the catalog file as the embedded
-        // preview.
+        // preview. Never while proofing: these blobs are the unproofed frame and
+        // are reused verbatim on the next 1:1 entry.
         auto bytes = lrc::ImageIO::encodeJpeg(*u8, 92);
         if (!bytes.empty())
             catalog_.storePreview(imageId, lrc::PreviewKind::FullRes, bytes,
                                   u8->width(), u8->height());
         fullResCache_.writeFullRes(toStdPath(filePath), *u8); // legacy disk cache
     }
-    if (!atDefaults)
+    if (!atDefaults && !proofArmed())
         storeFullResU8(imageId, adjHash, u8); // cache the frame.
-    fullResAdjHash_ = adjHash;
+    fullResAdjHash_ = frameKey;
     if (generation == fullResLatest_)
         emit fullResReady(imageId, u8);
 }
@@ -372,19 +592,20 @@ void PreviewWorker::adjustFullRes(qint64 imageId, qint64 generation,
         return;  // abort requested; skip stale queued full-res re-renders.
     fullResLatest_ = generation;
     const uint64_t adjHash = static_cast<uint64_t>(adjustments.hash());
-    // Already emitted for this adjustment state.
-    if (fullResAdjHash_ == adjHash)
+    const uint64_t frameKey = adjHash ^ proofFrameSalt();
+    // Already emitted for this (adjustments, proof state).
+    if (fullResAdjHash_ == frameKey)
         return;
     const bool atDefaults =
         adjHash == static_cast<uint64_t>(lrc::Adjustments::defaults().hash());
-    if (!atDefaults) {
+    if (!atDefaults && !proofArmed()) {
         // Cache hit: reuse the full-res U8, skipping the decode + render +
-        // conversion pass.
+        // conversion pass. Bypassed while proofing (unproofed cache only).
         const bool haveLinear = fullResLinear_ && fullResImageId_ == imageId;
         const int nativeW = haveLinear ? fullResLinear_->width() : 0;
         const int nativeH = haveLinear ? fullResLinear_->height() : 0;
         if (auto cached = findFullResU8(imageId, adjHash, nativeW, nativeH)) {
-            fullResAdjHash_ = adjHash;
+            fullResAdjHash_ = frameKey;
             if (generation == fullResLatest_)
                 emit fullResReady(imageId, cached);
             return;
@@ -408,12 +629,16 @@ void PreviewWorker::adjustFullRes(qint64 imageId, qint64 generation,
         return;  // abort during the full-res render.
     if (!f32 || f32->empty())
         return;
-    auto u8 = colorManager_->toDisplaySRGB(*f32);
+    // 1:1 is proofed here rather than from the preview-sized proof frame: the
+    // full-res viewport ignores proofReady while it is showing full resolution.
+    auto u8 = proofArmed() ? proofLinear(f32) : colorManager_->toDisplaySRGB(*f32);
     if (abort_.load())
-        return;  // abort during the sRGB conversion.
-    if (!atDefaults)
+        return;  // abort during the display conversion / proof.
+    if (!u8 || u8->empty())
+        return;
+    if (!atDefaults && !proofArmed())
         storeFullResU8(imageId, adjHash, u8); // cache the frame.
-    fullResAdjHash_ = adjHash;
+    fullResAdjHash_ = frameKey;
     if (generation == fullResLatest_)
         emit fullResReady(imageId, u8);
 }
@@ -431,8 +656,8 @@ void PreviewWorker::adjustFullResCoarse(qint64 imageId, qint64 generation,
             return;  // abort after the lazy decode.
     }
     const uint64_t adjHash = static_cast<uint64_t>(adjustments.hash());
-    if (fullResAdjHash_ == adjHash)
-        return; // full-res frame already current for this (image, adjHash)
+    if (fullResAdjHash_ == (adjHash ^ proofFrameSalt()))
+        return; // full-res frame already current for this (state)
     emitFullResCoarse(imageId, generation, adjHash, adjustments);
 }
 
@@ -441,8 +666,8 @@ void PreviewWorker::emitFullResCoarse(qint64 imageId, qint64 generation,
                                       const lrc::Adjustments& adjustments) {
     if (!fullResLinear_ || fullResImageId_ != imageId)
         return; // no retained full-res linear buffer for this image
-    if (fullResCoarseHash_ == adjHash)
-        return; // coarse frame already emitted for this (image, adjHash).
+    if (fullResCoarseHash_ == (adjHash ^ proofFrameSalt()))
+        return; // coarse frame already emitted for this (state).
     if (abort_.load())
         return;
     auto coarse = pipeline_.render(imageId, *fullResLinear_, adjustments,
@@ -451,7 +676,19 @@ void PreviewWorker::emitFullResCoarse(qint64 imageId, qint64 generation,
         return;  // abort during the coarse render.
     if (!coarse || coarse->empty())
         return;
-    fullResCoarseHash_ = adjHash;
+    // The 1:1 coarse frame is what the user sees while the full-res pass runs, so
+    // it carries the proof state too (same bounded-linear trick as the preview
+    // coarse path).
+    if (proofArmed()) {
+        if (auto lin = pipeline_.renderLinearBounded(*fullResLinear_, adjustments,
+                                                    lrc::app::kCoarseMaxDim)) {
+            if (auto proofed = proofLinear(lin))
+                coarse = proofed;
+        }
+        if (abort_.load())
+            return;  // abort during the proof.
+    }
+    fullResCoarseHash_ = adjHash ^ proofFrameSalt();
     if (generation == fullResLatest_)
         emit fullResReadyCoarse(imageId, coarse);
 }

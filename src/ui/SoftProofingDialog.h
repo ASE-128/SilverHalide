@@ -26,14 +26,18 @@
 #include <QString>
 
 #include "engine/SoftProofing.h"
+// paramsChanged() carries lrc::SoftProofParams, so its metatype must be declared
+// before moc's generated code uses it.
+#include "ui/MetaTypes.h"
 
 class QComboBox;
 class QCheckBox;
 class QPushButton;
 class QLabel;
-class ColorManager;
 
 namespace lrc {
+
+class ColorManager;
 
 class SoftProofingDialog : public QDialog {
     Q_OBJECT

@@ -78,19 +78,37 @@ std::vector<uint8_t> pngChunk(const char type[5],
     return out;
 }
 
-// Parses a JPEG byte stream into standalone segment payloads (marker -> bytes,
-// in order), excluding the SOS/pixel-data section. Returns (segments, sosOffset)
-// where sosOffset is the offset of the FFD9/SOS marker or bytes.size().
-// Each entry holds the marker code (e.g. 0x0E for APP14, 0xDA for SOS…).
+// Parses a JPEG byte stream into standalone segments (marker code + payload), in
+// file order, up to — but excluding — the entropy-coded pixel data.
+// Each entry holds the marker's second byte (0xE0 = APP0/JFIF, 0xDB = DQT,
+// 0xEE = APP14…) and the segment body without its 2-byte length field, so a
+// re-emitter must write back `payload.size() + 2` as the length.
 struct JpegSegment {
-    uint8_t marker = 0;              // lower byte, e.g. 0xE0 (APP0), 0xDA (SOS)
+    uint8_t marker = 0;              // lower byte, e.g. 0xE0 (APP0), 0xEE (APP14)
     std::vector<uint8_t> payload;    // segment body (excluding the length field)
 };
 
+/**
+ * @brief Splits a JPEG into its header segments and locates the verbatim tail.
+ *
+ * @param jpg         Complete JPEG byte stream (must start with SOI).
+ * @param pixelStart  Out: offset of the marker that begins the tail preserved
+ *                    verbatim (the FFD9/FFDA marker), or jpg.size() when no such
+ *                    marker was found before the stream ran out.
+ * @return The parsed segments; empty when `jpg` is not a JPEG at all.
+ *
+ * @warning `pixelStart` points AT the 0xFF byte of the marker, not past it. A
+ *          caller that reassembles the file by appending the tail from this
+ *          offset keeps the scan/terminator marker; pointing past it silently
+ *          produces a JPEG with no SOS, which strict decoders reject and which
+ *          permissive ones decode into uninitialised output.
+ *
+ * @note Read-only and allocation-local, hence thread-safe.
+ */
 std::vector<JpegSegment> parseJpegSegments(const std::vector<uint8_t>& jpg,
                                            size_t& pixelStart) {
     std::vector<JpegSegment> segs;
-    pixelStart = 0;
+    pixelStart = jpg.size();  // sentinel: nothing left to copy verbatim
     const size_t n = jpg.size();
     size_t i = 0;
     // Skip SOI.
@@ -108,13 +126,14 @@ std::vector<JpegSegment> parseJpegSegments(const std::vector<uint8_t>& jpg,
             ++i;
             continue;
         }
+        const size_t markerStart = i;  // offset of the 0xFF of this marker
         i += 2;
         if (marker == 0xDA) {  // Start Of Scan — header ends here
-            pixelStart = i;
+            pixelStart = markerStart;
             break;
         }
         if (marker == 0xD9) {  // EOI with no pixel data
-            pixelStart = i;
+            pixelStart = markerStart;
             break;
         }
         if (i + 2 > n)
@@ -131,15 +150,40 @@ std::vector<JpegSegment> parseJpegSegments(const std::vector<uint8_t>& jpg,
     return segs;
 }
 
-// Splits an ICC profile into ICC_PROFILE APP2 JPEG markers (max 255 bytes each,
-// per the ICC JPEG spec: FFE2, len, "ICC_PROFILE\0", seq, count, data).
+// Splits an ICC profile into ICC_PROFILE APP2 JPEG markers, per the JFIF/ICC
+// convention: FFE2, length, "ICC_PROFILE\0", seq, count, data.
+//
+// A JPEG segment's 16-bit length field caps its payload at 65533 bytes; the
+// 14-byte ICC header (12-byte signature + seq + count) leaves 65519 bytes of
+// profile per marker. Splitting at that maximum keeps every profile below 64 kB
+// in a single marker, which real readers need: Qt's JPEG reader silently skips
+// any ICC_PROFILE chunk with a payload of 146 bytes or fewer, so a short
+// trailing chunk silently truncates the profile and the colour-space parser then
+// rejects it (QColorSpace::fromIccProfile: "failed size sanity"). Profiles larger
+// than one marker are split into *balanced* chunks for the same reason, so that
+// no chunk lands near that threshold.
+//
+// @return The marker bytes, or empty when the profile cannot be represented —
+//         more than 255 chunks, the maximum the 1-byte count field can express.
+//         The caller then embeds no profile rather than a corrupt one.
+//
+// @note Reassembly is caller-side; each chunk carries its own 1-based sequence
+//       number and the total chunk count.
 std::vector<uint8_t> jpegIccMarkers(const std::vector<uint8_t>& icc) {
     std::vector<uint8_t> out;
-    constexpr size_t kMaxData = 255;
+    constexpr size_t kMaxData = 65519;  // 65533-byte segment payload - 14
+    constexpr size_t kMaxChunks = 255;  // seq/count are single bytes
+    if (icc.empty())
+        return out;
     const size_t count = (icc.size() + kMaxData - 1) / kMaxData;
+    if (count > kMaxChunks)
+        return out;
+    const size_t chunk = (icc.size() + count - 1) / count;  // balanced split
     for (size_t c = 0; c < count; ++c) {
-        const size_t begin = c * kMaxData;
-        const size_t end = std::min(begin + kMaxData, icc.size());
+        const size_t begin = c * chunk;
+        const size_t end = std::min(begin + chunk, icc.size());
+        if (end <= begin)
+            break;
         // JPEG segment length must account for the 2 length bytes themselves
         // (the parser subtracts them back via segLen-2). ICC header is 14 bytes:
         // "ICC_PROFILE\0"(12) + seq(1) + count(1). Off-by-two here silently
@@ -161,6 +205,8 @@ std::vector<uint8_t> jpegIccMarkers(const std::vector<uint8_t>& icc) {
 
 // Inserts ICC_PROFILE APP2 markers into an encoded JPEG. Existing APP0/APP1/
 // APP2/APP14 segments are dropped so the ICC payload is authoritative.
+// The tail starting at the SOS marker is copied verbatim, marker included — that
+// marker is what makes the result a decodable JPEG (see parseJpegSegments).
 std::vector<uint8_t> embedIccJpeg(const std::vector<uint8_t>& jpg,
                                   const std::vector<uint8_t>& icc) {
     size_t pixelStart = 0;
@@ -187,7 +233,8 @@ std::vector<uint8_t> embedIccJpeg(const std::vector<uint8_t>& jpg,
     // Insert the ICC chunk before the first pixel-data marker.
     const auto iccMarkers = jpegIccMarkers(icc);
     out.insert(out.end(), iccMarkers.begin(), iccMarkers.end());
-    // Aparse the rest of the header + pixel data verbatim.
+    // Append the rest of the header + the entropy-coded data verbatim, starting
+    // at (and including) the SOS marker.
     out.insert(out.end(), jpg.begin() + static_cast<std::ptrdiff_t>(pixelStart),
                jpg.end());
     return out;

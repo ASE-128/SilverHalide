@@ -22,6 +22,9 @@
 #include <QString>
 
 #include "engine/PanoramaStitcher.h"
+// finished() carries lrc::ImageBufferPtr back to the GUI thread, so its metatype
+// must be declared before moc's generated code uses it.
+#include "ui/MetaTypes.h"
 
 class PanoramaWorker : public QObject {
     Q_OBJECT

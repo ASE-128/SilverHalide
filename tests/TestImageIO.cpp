@@ -1,11 +1,14 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <vector>
 
+#include "engine/ColorManager.h"
 #include "engine/ImageBuffer.h"
 #include "engine/ImageIO.h"
 
@@ -265,6 +268,257 @@ TEST_CASE("ImageIO: T-2 small TIFF stays a single strip", "[io][t2]") {
     auto loaded = ImageIO::loadImage(path);
     REQUIRE(loaded);
     REQUIRE(loaded->data() == src->data());
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+// --- R-08: ICC-bearing JPEGs must stay structurally valid and decodable ------
+//
+// writeJpeg() with a profile encodes to memory, then re-assembles the file as
+// "SOI + kept segments + ICC APP2 markers + tail". The tail must begin AT the SOS
+// marker. When that offset pointed one marker pair PAST it, the output kept the
+// whole ICC payload — so signature-only assertions ("does the file contain
+// ICC_PROFILE?") stayed green — but lost its start-of-scan marker. Strict decoders
+// reject such a file; stb_image is permissive enough to "decode" it into a
+// partially written buffer whose remaining bytes are uninitialised heap memory,
+// which is why the same bytes yielded a different image on every decode.
+//
+// These tests pin the two invariants that defect violated: the file walks as a
+// valid JPEG up to its SOS marker, and decoding it reproduces the written pixels
+// deterministically.
+
+namespace {
+
+// Test-side JPEG structure walk: steps over SOI and each length-prefixed segment
+// and returns the offset of the SOS marker, or npos when the stream is malformed
+// or ends first. Deliberately independent of the engine's parser so a future
+// regression there cannot make the check agree with it.
+size_t strictSosOffset(const std::vector<uint8_t>& b) {
+    const size_t npos = std::string::npos;
+    if (b.size() < 2 || b[0] != 0xFF || b[1] != 0xD8)
+        return npos;
+    size_t i = 2;
+    while (i + 1 < b.size()) {
+        if (b[i] != 0xFF)
+            return npos;  // not sitting on a marker boundary
+        const uint8_t m = b[i + 1];
+        if (m == 0xD9)
+            return npos;  // EOI before any scan
+        if (m == 0xDA)
+            return i;     // Start Of Scan
+        if (i + 4 > b.size())
+            return npos;
+        const size_t len = (static_cast<size_t>(b[i + 2]) << 8) | b[i + 3];
+        if (len < 2 || i + 2 + len > b.size())
+            return npos;
+        i += 2 + len;
+    }
+    return npos;
+}
+
+// First offset at which `needle` occurs in `hay`, or npos.
+size_t findBytes(const std::vector<uint8_t>& hay, const std::string& needle) {
+    if (needle.empty() || hay.size() < needle.size())
+        return std::string::npos;
+    for (size_t i = 0; i + needle.size() <= hay.size(); ++i)
+        if (std::memcmp(hay.data() + i, needle.data(), needle.size()) == 0)
+            return i;
+    return std::string::npos;
+}
+
+std::vector<uint8_t> readAllBytes(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+}
+
+// Payload length of every ICC_PROFILE APP2 chunk, in file order. Walks the
+// markers itself and stops at the scan/end-of-image marker.
+std::vector<size_t> jpegIccChunkSizes(const std::vector<uint8_t>& b) {
+    std::vector<size_t> sizes;
+    size_t i = 2;
+    while (i + 1 < b.size()) {
+        if (b[i] != 0xFF)
+            break;
+        const uint8_t m = b[i + 1];
+        if (m == 0xDA || m == 0xD9)
+            break;
+        if (i + 4 > b.size())
+            break;
+        const size_t len = (static_cast<size_t>(b[i + 2]) << 8) | b[i + 3];
+        if (len < 2 || i + 2 + len > b.size())
+            break;
+        if (m == 0xE2 && len >= 16 &&
+            std::memcmp(b.data() + i + 4, "ICC_PROFILE", 11) == 0)
+            sizes.push_back(len - 16);  // payload minus the 14-byte ICC header
+        i += 2 + len;
+    }
+    return sizes;
+}
+
+// A flat patch of an exact byte value. A constant colour survives a q95 JPEG
+// round-trip to within a couple of LSBs, which makes a pixel-content assertion
+// meaningful without depending on the encoder's exact rounding.
+ImageBufferPtr makeFlatU8(int w, int h, uint8_t r, uint8_t g, uint8_t b) {
+    auto buf = ImageBuffer::create(w, h, PixelFormat::U8);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            auto* px = buf->data().data() + (static_cast<size_t>(y) * w + x) * 3;
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+        }
+    return buf;
+}
+
+// Per-channel comparison in 0..1 display space with a stated LSB tolerance.
+bool nearlyEqual(const ImageBuffer& img, int x, int y, uint8_t r, uint8_t g,
+                 uint8_t b, float tol) {
+    return std::fabs(img.pixel(x, y, 0) - r / 255.0f) <= tol &&
+           std::fabs(img.pixel(x, y, 1) - g / 255.0f) <= tol &&
+           std::fabs(img.pixel(x, y, 2) - b / 255.0f) <= tol;
+}
+
+} // namespace
+
+TEST_CASE("ImageIO: R-08 ICC JPEG keeps its SOS marker and decodes back",
+          "[io][r08][icc]") {
+    auto src = makeFlatU8(24, 16, 60, 160, 100);
+    // 568 bytes -> three APP2 chunks, i.e. the multi-segment reassembly path.
+    const auto icc = ColorManager::exportProfileBytes(
+        ColorManager::ExportColorProfile::AdobeRGB);
+    REQUIRE_FALSE(icc.empty());
+
+    // The ICC header's first field is the profile's own size in bytes (big
+    // endian). Independent parsers reject the profile outright when that field
+    // disagrees with the payload length, so the bytes we embed must be
+    // self-consistent to start with.
+    const uint32_t declared = (static_cast<uint32_t>(icc[0]) << 24) |
+                              (static_cast<uint32_t>(icc[1]) << 16) |
+                              (static_cast<uint32_t>(icc[2]) << 8) | icc[3];
+    INFO("declared=" << declared << " actual=" << icc.size());
+    REQUIRE(declared == icc.size());
+
+    const auto path = std::filesystem::temp_directory_path() / "lrc_r08_icc.jpg";
+    REQUIRE(ImageIO::writeJpeg(path, *src, 95, icc));
+    const auto bytes = readAllBytes(path);
+
+    // SOI, then a segment walk that must actually reach a start-of-scan marker.
+    REQUIRE(bytes.size() > 2);
+    REQUIRE(bytes[0] == 0xFF);
+    REQUIRE(bytes[1] == 0xD8);
+    const size_t sos = strictSosOffset(bytes);
+    INFO("bytes=" << bytes.size() << " sos=" << sos);
+    REQUIRE(sos != std::string::npos);
+
+    // The profile is embedded in the header, ahead of the scan data (never
+    // spliced into it).
+    const size_t iccAt = findBytes(bytes, "ICC_PROFILE");
+    REQUIRE(iccAt != std::string::npos);
+    REQUIRE(iccAt < sos);
+
+    // It must travel in a single APP2 chunk. Qt's JPEG reader drops any
+    // ICC_PROFILE chunk with a payload of 146 bytes or fewer, so over-chunking a
+    // sub-64 kB profile (the old 255-byte split left a 78-byte tail) silently
+    // truncates it and the colour-space parser rejects the whole profile.
+    const auto chunks = jpegIccChunkSizes(bytes);
+    REQUIRE(chunks.size() == 1);
+    REQUIRE(chunks[0] == icc.size());
+
+    // The embedded profile still round-trips byte-for-byte across all chunks.
+    const auto source = ImageIO::loadSourceImage(path);
+    REQUIRE(source.pixels);
+    REQUIRE(source.icc == icc);
+
+    // Decode-back: the pixel content survives the splice (q95, flat patch, so
+    // only encoder rounding separates input from output).
+    auto decoded = ImageIO::loadImage(path);
+    REQUIRE(decoded);
+    REQUIRE(decoded->width() == 24);
+    REQUIRE(decoded->height() == 16);
+    REQUIRE(nearlyEqual(*decoded, 0, 0, 60, 160, 100, 4.0f / 255.0f));
+
+    // Determinism: the same file must decode to the same pixels. This is a
+    // secondary guard — a defect that leaves stb's output buffer partly
+    // unwritten makes the result depend on heap leftovers, which may or may not
+    // differ between two decodes in one process, so the structural and pixel
+    // checks above are the deterministic ones.
+    auto again = ImageIO::loadImage(path);
+    REQUIRE(again);
+    REQUIRE(again->data() == decoded->data());
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("ImageIO: R-08 the no-ICC JPEG path stays byte-identical and valid",
+          "[io][r08][icc]") {
+    auto src = makeFlatU8(24, 16, 200, 40, 90);
+    const auto path = std::filesystem::temp_directory_path() / "lrc_r08_plain.jpg";
+    REQUIRE(ImageIO::writeJpeg(path, *src, 90));
+    const auto bytes = readAllBytes(path);
+    REQUIRE(bytes.size() > 2);
+
+    // No profile requested: no ICC signature, but a valid JPEG regardless.
+    REQUIRE(findBytes(bytes, "ICC_PROFILE") == std::string::npos);
+    REQUIRE(strictSosOffset(bytes) != std::string::npos);
+
+    // The empty-ICC branch is documented as the byte-identical legacy path.
+    REQUIRE(bytes == ImageIO::encodeJpeg(*src, 90));
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("ImageIO: ICC profiles larger than one APP2 marker split evenly",
+          "[io][r08][icc]") {
+    // 70000 bytes needs two markers. Neither may be a short tail (see the Qt
+    // threshold documented in the R-08 test above). The bytes are arbitrary: the
+    // writer and the extractor treat a profile as opaque, so this exercises the
+    // chunking maths without needing a real 70 kB profile.
+    std::vector<uint8_t> big(70000);
+    for (size_t i = 0; i < big.size(); ++i)
+        big[i] = static_cast<uint8_t>((i * 31 + 7) & 0xFF);
+
+    auto src = makeFlatU8(8, 8, 10, 20, 30);
+    const auto path = std::filesystem::temp_directory_path() / "lrc_r08_bigicc.jpg";
+    REQUIRE(ImageIO::writeJpeg(path, *src, 90, big));
+    const auto bytes = readAllBytes(path);
+
+    const auto chunks = jpegIccChunkSizes(bytes);
+    REQUIRE(chunks.size() == 2);
+    for (size_t n : chunks)
+        REQUIRE(n > 146);  // never a chunk a strict reader would skip
+    REQUIRE(chunks[0] + chunks[1] == big.size());
+
+    // A multi-chunk profile must still leave a valid, decodable JPEG behind.
+    REQUIRE(strictSosOffset(bytes) != std::string::npos);
+    const auto source = ImageIO::loadSourceImage(path);
+    REQUIRE(source.pixels);
+    REQUIRE(source.icc == big);
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("ImageIO: an unrepresentable ICC profile is dropped, not corrupted",
+          "[io][r08][icc]") {
+    // seq/count are single bytes, so at most 255 markers (255 * 65519 bytes of
+    // profile) can describe one. Beyond that the profile cannot be embedded at
+    // all; the writer must degrade to a valid JPEG without it rather than emit a
+    // count byte that no longer matches the number of markers.
+    const std::vector<uint8_t> huge(255u * 65519u + 1u, 0x5A);
+    auto src = makeFlatU8(8, 8, 10, 20, 30);
+    const auto path = std::filesystem::temp_directory_path() / "lrc_r08_hugeicc.jpg";
+    REQUIRE(ImageIO::writeJpeg(path, *src, 90, huge));
+    const auto bytes = readAllBytes(path);
+
+    REQUIRE(jpegIccChunkSizes(bytes).empty());
+    REQUIRE(strictSosOffset(bytes) != std::string::npos);
+    auto decoded = ImageIO::loadImage(path);
+    REQUIRE(decoded);
+    REQUIRE(nearlyEqual(*decoded, 0, 0, 10, 20, 30, 4.0f / 255.0f));
+
     std::error_code ec;
     std::filesystem::remove(path, ec);
 }

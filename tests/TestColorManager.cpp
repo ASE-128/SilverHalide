@@ -319,3 +319,44 @@ TEST_CASE("ColorManager: sRGBEncodedToProfile converts pixels into the target IC
     REQUIRE(std::abs(int(back[1]) - int(g)) <= 3);
     REQUIRE(std::abs(int(back[2]) - int(b)) <= 3);
 }
+
+TEST_CASE("ColorManager: exportProfileBytes is byte-reproducible",
+          "[color][p1]") {
+    // lcms stamps the profile's creation timestamp (ICC header offset 24: year,
+    // month, day, hour, minute, second as big-endian uInt16) with the wall clock,
+    // so the same preset used to differ between processes — and between calls
+    // straddling a second boundary. Pinning it is what makes an export with fixed
+    // settings byte-identical run to run (checksums / dedup / byte-golden tests).
+    for (auto preset : {ColorManager::ExportColorProfile::SRGB,
+                        ColorManager::ExportColorProfile::AdobeRGB,
+                        ColorManager::ExportColorProfile::DisplayP3}) {
+        const auto bytes = ColorManager::exportProfileBytes(preset);
+        REQUIRE(bytes.size() > 40);
+        // A second call must produce exactly the same bytes.
+        REQUIRE(ColorManager::exportProfileBytes(preset) == bytes);
+
+        // Header self-consistency: the declared size is the payload size, and the
+        // timestamp is the pinned value (2020-01-01 00:00:00).
+        const uint32_t declared = (static_cast<uint32_t>(bytes[0]) << 24) |
+                                  (static_cast<uint32_t>(bytes[1]) << 16) |
+                                  (static_cast<uint32_t>(bytes[2]) << 8) | bytes[3];
+        REQUIRE(declared == bytes.size());
+        const uint16_t year = static_cast<uint16_t>((bytes[24] << 8) | bytes[25]);
+        const uint16_t month = static_cast<uint16_t>((bytes[26] << 8) | bytes[27]);
+        const uint16_t day = static_cast<uint16_t>((bytes[28] << 8) | bytes[29]);
+        const uint16_t hour = static_cast<uint16_t>((bytes[30] << 8) | bytes[31]);
+        const uint16_t minute = static_cast<uint16_t>((bytes[32] << 8) | bytes[33]);
+        const uint16_t second = static_cast<uint16_t>((bytes[34] << 8) | bytes[35]);
+        CHECK(year == 2020);
+        CHECK(month == 1);
+        CHECK(day == 1);
+        CHECK(hour == 0);
+        CHECK(minute == 0);
+        CHECK(second == 0);
+        // Colourimetric header fields must be untouched by the pin.
+        REQUIRE(bytes[36] == 'a');
+        REQUIRE(bytes[37] == 'c');
+        REQUIRE(bytes[38] == 's');
+        REQUIRE(bytes[39] == 'p');
+    }
+}
