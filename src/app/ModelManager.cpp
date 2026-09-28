@@ -474,14 +474,36 @@ std::string ModelManager::lastError() const {
 
 uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                                      DownloadProgressFn cb) {
-    std::lock_guard<std::mutex> lk(impl_->mu);
-    const uint64_t h = impl_->nextHandle++;
-    impl_->callbacks[h] = std::move(cb);
+    // The two registries under impl_->mu are written from here, read from the
+    // QNetworkReply callbacks and from cancelDownload(), so every access goes
+    // through these helpers. Callbacks are always invoked with the lock
+    // released: a caller callback may re-enter ModelManager (lastError(), ...),
+    // which a non-recursive mutex would otherwise turn into a deadlock.
+    const auto callbackFor = [this](uint64_t handle) -> DownloadProgressFn {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        auto it = impl_->callbacks.find(handle);
+        return it == impl_->callbacks.end() ? DownloadProgressFn{} : it->second;
+    };
+    const auto unregisterDownload = [this](uint64_t handle) {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->callbacks.erase(handle);
+#if LRC_ENABLE_QT
+        impl_->qtDownloads.erase(handle);
+#endif
+    };
+
+    uint64_t h = 0;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        h = impl_->nextHandle++;
+        impl_->callbacks[h] = std::move(cb);
+    }
 
     // --- fast-path success: already ready ------------------------------------
     if (isModelReady(entry)) {
-        if (auto& fn = impl_->callbacks[h])
+        if (auto fn = callbackFor(h))
             fn(entry.sizeBytes, entry.sizeBytes, true, "");
+        unregisterDownload(h);
         return h;
     }
 
@@ -490,11 +512,11 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
     // returns. The file may still be placed in the cache by hand, which the
     // fast path above accepts through the size check.
     if (!shaIsVerifiable(entry.sha256)) {
-        if (auto& fn = impl_->callbacks[h])
+        if (auto fn = callbackFor(h))
             fn(0, 0, true,
                "model manifest has no verifiable SHA256 for '" + entry.id +
                    "'; refusing to download unverified data");
-        impl_->callbacks.erase(h);
+        unregisterDownload(h);
         return h;
     }
 
@@ -508,14 +530,27 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
     // Ensure the containing folder exists
     std::error_code ec;
     std::filesystem::create_directories(dl->targetPath.parent_path(), ec);
-    impl_->qtDownloads[h] = dl;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->qtDownloads[h] = dl;
+    }
 
-    dl->beginFetch = [this, h](const std::string& url, bool mirror) {
+    dl->beginFetch = [this, h, unregisterDownload](const std::string& url,
+                                      bool mirror) {
         // Re-resolve dl from the registry each call so this stored callable
-        // does not capture the shared_ptr (avoids a dl<->beginFetch cycle).
-        auto it = impl_->qtDownloads.find(h);
-        if (it == impl_->qtDownloads.end() || !it->second) return;
-        auto& dl = it->second;
+        // does not capture the shared_ptr (avoids a dl<->beginFetch cycle). The
+        // lookup copies the shared_ptr under the registry lock instead of
+        // returning a reference that cancelDownload() could erase underneath us.
+        std::shared_ptr<Impl::QtDownload> dl;
+        {
+            std::lock_guard<std::mutex> lk(impl_->mu);
+            auto it = impl_->qtDownloads.find(h);
+            if (it == impl_->qtDownloads.end())
+                return;
+            dl = it->second;
+        }
+        if (!dl)
+            return;
         dl->usingMirror = mirror;
         QNetworkRequest req(QUrl(QString::fromStdString(url)));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
@@ -534,11 +569,21 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
 
         QObject::connect(dl->reply, &QNetworkReply::downloadProgress,
             dl->reply, [this, h, already](qint64 recv, qint64 total) {
-                auto it = impl_->callbacks.find(h);
-                if (it == impl_->callbacks.end() || !it->second) return;
+                // Snapshot the callback under the registry lock and invoke it
+                // outside: it may re-enter ModelManager (see callbackFor).
+                DownloadProgressFn cb;
+                {
+                    std::lock_guard<std::mutex> lk(impl_->mu);
+                    auto it = impl_->callbacks.find(h);
+                    if (it == impl_->callbacks.end())
+                        return;
+                    cb = it->second;
+                }
+                if (!cb)
+                    return;
                 const uint64_t r = already + static_cast<uint64_t>(recv);
                 const uint64_t t = total > 0 ? static_cast<uint64_t>(total) + already : 0;
-                it->second(r, t, false, "");
+                cb(r, t, false, "");
             });
         QObject::connect(dl->reply, &QNetworkReply::readyRead,
             dl->reply, [this, h, dl]() {
@@ -557,7 +602,7 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                 f.close();
             });
         QObject::connect(dl->reply, &QNetworkReply::finished,
-            dl->reply, [this, h, dl]() mutable {
+            dl->reply, [this, h, dl, unregisterDownload]() mutable {
                 const auto err = dl->reply->error();
                 const auto errStr = dl->reply->errorString().toStdString();
                 const int status = dl->reply->attribute(
@@ -572,18 +617,25 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                 dl->reply->deleteLater();
                 dl->reply = nullptr;
 
-                auto itCb = impl_->callbacks.find(h);
-                const bool hasCb = itCb != impl_->callbacks.end() && bool(itCb->second);
+                // Snapshot the callback under the registry lock; it is invoked
+                // with the lock released (see callbackFor in downloadModel).
+                DownloadProgressFn cb;
+                {
+                    std::lock_guard<std::mutex> lk(impl_->mu);
+                    auto itCb = impl_->callbacks.find(h);
+                    if (itCb != impl_->callbacks.end())
+                        cb = itCb->second;
+                }
+                const bool hasCb = bool(cb);
 
                 // A failed write means the cache path is not writable; the
                 // mirror would fail identically, so report it directly.
                 if (dl->writeFailed) {
                     if (hasCb)
-                        itCb->second(0, 0, true,
-                                     "cannot write model file: " +
-                                         dl->partPath.string());
-                    impl_->qtDownloads.erase(h);
-                    impl_->callbacks.erase(h);
+                        cb(0, 0, true,
+                           "cannot write model file: " +
+                               dl->partPath.string());
+                    unregisterDownload(h);
                     return;
                 }
 
@@ -600,16 +652,16 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                 }
 
                 if (err != QNetworkReply::NoError) {
-                    if (hasCb) itCb->second(0, 0, true, errStr);
-                    impl_->qtDownloads.erase(h);
-                    impl_->callbacks.erase(h);
+                    if (hasCb) cb(0, 0, true, errStr);
+                    unregisterDownload(h);
                     return;
                 }
                 // SHA256 verify -> move to final filename or delete + retry
                 std::error_code lec;
                 if (!std::filesystem::exists(dl->partPath, lec)) {
-                    if (hasCb) itCb->second(0, 0, true, "download produced no file");
-                    impl_->qtDownloads.erase(h); impl_->callbacks.erase(h); return;
+                    if (hasCb) cb(0, 0, true, "download produced no file");
+                    unregisterDownload(h);
+                    return;
                 }
 
                 // ZIP-packaged download_url (e.g. qualcomm/NAFNet-DeNoise
@@ -628,9 +680,10 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                     std::string zipErr;
                     if (!extractOnnxFromZip(dl->partPath, dl->targetPath, zipErr)) {
                         std::filesystem::remove(dl->partPath, lec);
-                        if (hasCb) itCb->second(0, 0, true,
+                        if (hasCb) cb(0, 0, true,
                             "ZIP extraction failed: " + zipErr);
-                        impl_->qtDownloads.erase(h); impl_->callbacks.erase(h); return;
+                        unregisterDownload(h);
+                    return;
                     }
                     std::filesystem::remove(dl->partPath, lec);  // archive no longer needed
                     // The entry is verifiable by construction (downloadModel
@@ -640,15 +693,17 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                         sha256File(dl->targetPath) == dl->entry.sha256;
                     if (!shaOk) {
                         std::filesystem::remove(dl->targetPath, lec);
-                        if (hasCb) itCb->second(0, 0, true,
+                        if (hasCb) cb(0, 0, true,
                             "SHA256 mismatch after ZIP extraction — model corrupted, retry");
-                        impl_->qtDownloads.erase(h); impl_->callbacks.erase(h); return;
+                        unregisterDownload(h);
+                    return;
                     }
                     const uint64_t sz = std::filesystem::exists(dl->targetPath, lec)
                         ? static_cast<uint64_t>(std::filesystem::file_size(dl->targetPath, lec))
                         : dl->entry.sizeBytes;
-                    if (hasCb) itCb->second(sz, sz, true, "");
-                    impl_->qtDownloads.erase(h); impl_->callbacks.erase(h); return;
+                    if (hasCb) cb(sz, sz, true, "");
+                    unregisterDownload(h);
+                    return;
                 }
 
                 // Non-ZIP path: bare .onnx download. SHA256 verify the part
@@ -657,8 +712,9 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                     sha256File(dl->partPath) == dl->entry.sha256;
                 if (!shaValid) {
                     std::filesystem::remove(dl->partPath, lec);
-                    if (hasCb) itCb->second(0, 0, true, "SHA256 mismatch — model corrupted, retry");
-                    impl_->qtDownloads.erase(h); impl_->callbacks.erase(h); return;
+                    if (hasCb) cb(0, 0, true, "SHA256 mismatch — model corrupted, retry");
+                    unregisterDownload(h);
+                    return;
                 }
                 // Atomically rename (overwrite existing stale).
                 std::filesystem::remove(dl->targetPath, lec);
@@ -666,34 +722,49 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                 const uint64_t sz = std::filesystem::exists(dl->targetPath, lec)
                     ? static_cast<uint64_t>(std::filesystem::file_size(dl->targetPath, lec))
                     : dl->entry.sizeBytes;
-                if (hasCb) itCb->second(sz, sz, true, "");
-                impl_->qtDownloads.erase(h); impl_->callbacks.erase(h);
+                if (hasCb) cb(sz, sz, true, "");
+                unregisterDownload(h);
             });
     };
     dl->beginFetch(entry.downloadUrl, false);
 #else
     // No Qt: report failure via the callback immediately so callers can
     // handle the UI gray-out (button disabled, tooltip "model missing").
-    if (auto& fn = impl_->callbacks[h])
+    if (auto fn = callbackFor(h))
         fn(0, 0, true,
            "Download unavailable — ModelManager built without QtNetwork. "
            "Place the model file manually in " + cachePathFor(entry).string());
+    unregisterDownload(h);
 #endif
     return h;
 }
 
 void ModelManager::cancelDownload(uint64_t handle) {
-    std::lock_guard<std::mutex> lk(impl_->mu);
 #if LRC_ENABLE_QT
-    auto it = impl_->qtDownloads.find(handle);
-    if (it != impl_->qtDownloads.end() && it->second->reply) {
-        it->second->reply->abort();
-        QObject::disconnect(it->second->reply, nullptr, nullptr, nullptr);
-        it->second->reply->deleteLater();
-        it->second->reply = nullptr;
+    QNetworkReply* reply = nullptr;
+#endif
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+#if LRC_ENABLE_QT
+        auto it = impl_->qtDownloads.find(handle);
+        if (it != impl_->qtDownloads.end() && it->second->reply) {
+            reply = it->second->reply;
+            it->second->reply = nullptr;
+        }
+#endif
+        impl_->callbacks.erase(handle);
+    }
+    // Tear the reply down with the registry lock released, and disconnect
+    // before aborting: the finished handler now takes impl_->mu itself, and
+    // abort() may deliver finished() synchronously -- aborting while holding
+    // the lock would deadlock (and would also report a spurious outcome).
+#if LRC_ENABLE_QT
+    if (reply) {
+        QObject::disconnect(reply, nullptr, nullptr, nullptr);
+        reply->abort();
+        reply->deleteLater();
     }
 #endif
-    impl_->callbacks.erase(handle);
 }
 
 } // namespace lrc

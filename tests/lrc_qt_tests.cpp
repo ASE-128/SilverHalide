@@ -1232,20 +1232,29 @@ void FullResHotPathTest::repeatRequestHitsEarlyReturnWithoutRender() {
 
     // Identical repeat: the worker still holds the linear buffer and the frame
     // key, so it returns without rendering and without re-emitting a frame.
+    //
+    // BlockingQueuedConnection makes the call synchronous with the worker, so the
+    // "no frame" assertion below needs no fixed sleep to be meaningful: by the
+    // time invokeMethod() returns, the slot has run to completion. A qWait() here
+    // would only make the check weaker (a frame arriving after the wait would
+    // still pass it).
     QSignalSpy readySpy(h.worker, &PreviewWorker::fullResReady);
     QMetaObject::invokeMethod(
-        h.worker, "loadFullRes", Qt::QueuedConnection, Q_ARG(qint64, h.imageId),
+        h.worker, "loadFullRes", Qt::BlockingQueuedConnection,
+        Q_ARG(qint64, h.imageId),
         Q_ARG(QString, QString::fromStdWString(h.image.wstring())),
         Q_ARG(qint64, 2),
         Q_ARG(lrc::Adjustments, lrc::Adjustments::defaults()));
-    QTest::qWait(300);
     QCOMPARE(readySpy.count(), 0);
     qInfo("[PERF1A][test] repeat entry took hit=earlyReturn: no render, no "
           "frame (excluded from the B-1 anchor verdict)");
 
     // Releasing the 1:1 buffer must make the next entry produce a frame again.
-    QMetaObject::invokeMethod(h.worker, "clearFullRes", Qt::QueuedConnection);
-    QTest::qWait(50);
+    // Blocking for the same reason: with a queued clear the next request could
+    // race against it and observe the stale (early-return) state, turning the
+    // assertion below into a 30 s timeout under load.
+    QMetaObject::invokeMethod(h.worker, "clearFullRes",
+                              Qt::BlockingQueuedConnection);
     const auto after = timeFullResEntry(h, 3);
     QVERIFY2(after.ms >= 0, "clearFullRes did not release the full-res state");
     QVERIFY(after.frame && !after.frame->empty());

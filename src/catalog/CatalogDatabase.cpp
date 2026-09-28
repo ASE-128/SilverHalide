@@ -820,13 +820,31 @@ bool CatalogDatabase::applyMigrations() {
 }
 
 // Runs the transactional SQL body for a single schema version. Handles FK
-// suspension (outside the transaction — PRAGMA foreign_keys cannot toggle
-// inside one), the transaction, the body, and after commit the user_version
-// bump + schema_migrations insert (both disallowed inside a transaction).
+// suspension (outside the transaction: PRAGMA foreign_keys cannot toggle inside
+// one), the transaction, the body, and after commit the user_version bump +
+// schema_migrations insert (both disallowed inside a transaction).
+//
+// Every exit path restores PRAGMA foreign_keys=ON. The previous version only
+// restored it on the two transaction paths, so a failure while writing
+// user_version or the ledger row left the connection with FK enforcement
+// switched off for the rest of the session.
+//
+// @param v      Schema version to apply.
+// @param errOut Optional diagnostic; set on every failure path.
+// @return true when the version was applied and recorded.
 bool CatalogDatabase::migrateSqlVersion(int v, std::string* errOut) {
+    // Restores FK enforcement and reports the failure in one place, so no exit
+    // path can forget either half.
+    const auto failWith = [&](const std::string& stage) {
+        if (errOut)
+            *errOut = stage + " failed: " + sqlite3_errmsg(db_);
+        (void)sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
+        return false;
+    };
+
     (void)sqlite3_exec(db_, "PRAGMA foreign_keys=OFF;", nullptr, nullptr, nullptr);
     if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) != SQLITE_OK)
-        return false;
+        return failWith("BEGIN IMMEDIATE");
 
     bool ok = false;
     switch (v) {
@@ -835,23 +853,37 @@ bool CatalogDatabase::migrateSqlVersion(int v, std::string* errOut) {
         case 3: ok = migrateV3(errOut); break;
         case 4: ok = migrateV4(errOut); break;
         case 5: ok = migrateV5(errOut); break;
-        default: ok = false; break;
+        default:
+            if (errOut)
+                *errOut = "unknown schema version " + std::to_string(v);
+            ok = false;
+            break;
     }
 
     if (!ok) {
+        // Keep the body's own diagnostic: ROLLBACK overwrites sqlite3_errmsg
+        // with "not an error".
+        const std::string bodyError = errOut ? *errOut : std::string();
         (void)sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        if (errOut)
+            *errOut = bodyError.empty()
+                          ? "migration body v" + std::to_string(v) + " failed"
+                          : bodyError;
         (void)sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
         return false;
     }
     if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        const std::string commitError = errOut ? sqlite3_errmsg(db_) : std::string();
         (void)sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        if (errOut)
+            *errOut = "COMMIT failed: " + commitError;
         (void)sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
         return false;
     }
     // user_version / schema_migrations must be set outside the transaction.
     const std::string verSQL = "PRAGMA user_version=" + std::to_string(v) + ";";
     if (sqlite3_exec(db_, verSQL.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK)
-        return false;
+        return failWith("PRAGMA user_version");
     // Ensure the ledger table exists (created here, right before its first row).
     (void)sqlite3_exec(db_,
                        "CREATE TABLE IF NOT EXISTS schema_migrations("
@@ -865,7 +897,7 @@ bool CatalogDatabase::migrateSqlVersion(int v, std::string* errOut) {
                             ", 'migrate_v" + std::to_string(v) + "', '" +
                             nowIso8601Utc() + "');";
     if (sqlite3_exec(db_, ins.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK)
-        return false;
+        return failWith("schema_migrations insert");
     (void)sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
     return true;
 }
