@@ -16,6 +16,7 @@
 #include <sqlite3.h>
 
 #include "catalog/StandardPreview.h"
+#include "utils/MathUtils.h"
 #include "utils/ProfileIO.h"
 
 namespace lrc {
@@ -508,20 +509,28 @@ bool writePreviewFileAtomically(const std::filesystem::path& path,
     std::error_code ec;
     if (auto parent = path.parent_path(); !parent.empty())
         std::filesystem::create_directories(parent, ec);
-    const std::string tmp = path.string() + ".tmp";
-    FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (!f)
-        return false;
-    const bool wrote =
-        data.empty() || std::fwrite(data.data(), 1, data.size(), f) == data.size();
-    if (std::fclose(f) != 0)
-        return false;
-    if (!wrote) {
-        std::filesystem::remove(tmp, ec);
-        return false;
+    // The temp name is appended to the path object itself: a std::string round
+    // trip would re-encode the whole path through the ANSI code page, which is
+    // also why the file is opened with std::ofstream (wide path) rather than
+    // std::fopen (narrow path).
+    std::filesystem::path tmp = path;
+    tmp += L".tmp";
+    {
+        std::ofstream os(tmp, std::ios::binary | std::ios::trunc);
+        if (!os)
+            return false;
+        if (!data.empty())
+            os.write(reinterpret_cast<const char*>(data.data()),
+                     static_cast<std::streamsize>(data.size()));
+        os.flush();
+        if (!os.good()) {
+            os.close();
+            std::filesystem::remove(tmp, ec);
+            return false;
+        }
     }
-    std::filesystem::rename(tmp, path.string(), ec);
-    return !ec ? true : false;
+    std::filesystem::rename(tmp, path, ec);
+    return !ec;
 }
 
 // Reads an externalized preview file into a byte vector, or nullopt when the
@@ -529,7 +538,7 @@ bool writePreviewFileAtomically(const std::filesystem::path& path,
 // turn the stored path column back into the bytes the UI expects.
 std::optional<std::vector<uint8_t>> readPreviewFile(
     const std::filesystem::path& path) {
-    std::ifstream in(path.string(), std::ios::binary);
+    std::ifstream in(path, std::ios::binary);
     if (!in)
         return std::nullopt;
     std::vector<uint8_t> bytes;
@@ -589,8 +598,10 @@ CatalogDatabase::~CatalogDatabase() { close(); }
 std::filesystem::path CatalogDatabase::previewRootDir() const {
     if (!previewDir_.empty())
         return previewDir_;
+    // The stem is concatenated as a wide string so a non-ASCII catalog name
+    // does not get re-encoded through the ANSI code page.
     return path_.parent_path() /
-           (path_.stem().generic_string() + " Previews.shcat");
+           (path_.stem().wstring() + L" Previews.shcat");
 }
 
 // Resolves the on-disk file for a preview record, sharded by the first three
@@ -630,7 +641,11 @@ bool CatalogDatabase::open() {
     // removed between the dialog and the restart.
     std::error_code mkdirEc;
     std::filesystem::create_directories(path_.parent_path(), mkdirEc);
-    const int rc = sqlite3_open_v2(path_.string().c_str(), &db_, flags, nullptr);
+    // SQLite reads the filename as UTF-8 (it converts to UTF-16 internally on
+    // Windows), so the path must not be narrowed through the ANSI code page.
+    const std::string dbPathUtf8 = pathToUtf8(path_);
+    const int rc =
+        sqlite3_open_v2(dbPathUtf8.c_str(), &db_, flags, nullptr);
     if (rc != SQLITE_OK) {
         lastError_ = db_ ? sqlite3_errmsg(db_) : "sqlite open failed";
         if (db_)
@@ -1214,13 +1229,28 @@ bool CatalogDatabase::migrateV5(std::string* errOut) {
 }
 
 // Exports remaining legacy preview rows (previews_old) to disk files and clears
-// them. Each row commits independently so an interrupted run only loses one
-// export and is resumed on the next open(); the migration is resumable.
-// Returns false only on a hard database error.
+// them. Batches of rows commit independently, so an interrupted run only loses
+// the uncommitted batch and is resumed on the next open(): the migration is
+// resumable.
+//
+// The loop must always make progress: the SELECT takes the oldest remaining row,
+// so any row that cannot be exported or moved is re-selected on the next
+// iteration. Every failure path therefore returns false (leaving the row in
+// previews_old for the next open()) instead of retrying in place.
+//
+// @return true when previews_old is gone (or was already absent); false on a
+//         hard database or preview-file failure, with lastError() set.
 bool CatalogDatabase::finishPreviewExport() {
     const bool hasOld = tableHasColumn(db_, "previews_old", "kind");
     if (!hasOld)
         return true;
+    // One transaction per row costs one fsync per row, which is visible on a
+    // large catalog; a single transaction for the whole table would hold the
+    // write lock for the entire export and lose all progress on interruption.
+    constexpr int kExportBatchRows = 200;
+    int rowsInBatch = 0;
+    if (!beginTransaction())
+        return false;
     for (;;) {
         int64_t imageId = 0;
         int kind = 0;
@@ -1230,8 +1260,11 @@ bool CatalogDatabase::finishPreviewExport() {
         {
             Stmt s(db_, "SELECT image_id, kind, data, width, height FROM "
                         "previews_old LIMIT 1;");
-            if (!s.ok())
+            if (!s.ok()) {
+                (void)rollbackTransaction();
+                lastError_ = "previews_old: SELECT could not be prepared";
                 return false;
+            }
             if (s.step() == SQLITE_ROW) {
                 any = true;
                 imageId = sqlite3_column_int64(s.stmt, 0);
@@ -1249,37 +1282,66 @@ bool CatalogDatabase::finishPreviewExport() {
             break;
         const auto path =
             previewPathFor(imageId, static_cast<PreviewKind>(kind), true);
-        bool wrote = writePreviewFileAtomically(path, data);
-        if (!wrote)
-            continue;  // leave the row; retried on next open
-        if (sqlite3_exec(db_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) !=
-            SQLITE_OK)
+        if (!writePreviewFileAtomically(path, data)) {
+            // The row stays in previews_old and is retried by the next open().
+            // Aborting this pass keeps a persistent I/O failure from spinning
+            // on the same row forever.
+            (void)rollbackTransaction();
+            lastError_ = "preview export failed for image " +
+                         std::to_string(imageId) + " kind " +
+                         std::to_string(kind);
             return false;
+        }
         Stmt ins(db_, "INSERT INTO previews(image_id, kind, path, width, height) "
                       "VALUES(?1, ?2, ?3, ?4, ?5);");
         Stmt del(db_, "DELETE FROM previews_old WHERE image_id=?1 AND kind=?2;");
-        bool stepOk = ins.ok() && del.ok();
-        if (stepOk) {
-            sqlite3_bind_int64(ins.stmt, 1, imageId);
-            sqlite3_bind_int(ins.stmt, 2, kind);
-            const std::string rel = path.lexically_relative(previewRootDir())
-                                        .generic_string();
-            sqlite3_bind_text(ins.stmt, 3, rel.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(ins.stmt, 4, width);
-            sqlite3_bind_int(ins.stmt, 5, height);
-            sqlite3_bind_int64(del.stmt, 1, imageId);
-            sqlite3_bind_int(del.stmt, 2, kind);
-            stepOk = ins.step() == SQLITE_DONE && del.step() == SQLITE_DONE;
-        }
-        if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
-            (void)sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        if (!ins.ok() || !del.ok()) {
+            (void)rollbackTransaction();
+            lastError_ = "previews_old: INSERT/DELETE could not be prepared";
             return false;
         }
-        (void)stepOk;  // worst case a row is left for the next resume pass
+        sqlite3_bind_int64(ins.stmt, 1, imageId);
+        sqlite3_bind_int(ins.stmt, 2, kind);
+        const std::string rel = path.lexically_relative(previewRootDir())
+                                    .generic_string();
+        sqlite3_bind_text(ins.stmt, 3, rel.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(ins.stmt, 4, width);
+        sqlite3_bind_int(ins.stmt, 5, height);
+        sqlite3_bind_int64(del.stmt, 1, imageId);
+        sqlite3_bind_int(del.stmt, 2, kind);
+        // Both statements are stepped unconditionally: an ordinary && would
+        // skip the DELETE when the INSERT fails and leave the row in place.
+        const int insertRc = ins.step();
+        const int deleteRc = del.step();
+        if (insertRc != SQLITE_DONE || deleteRc != SQLITE_DONE) {
+            (void)rollbackTransaction();
+            lastError_ = std::string("previews_old: row transfer failed (insert=") +
+                         sqlite3_errstr(insertRc) + ", delete=" +
+                         sqlite3_errstr(deleteRc) + ")";
+            return false;
+        }
+        if (++rowsInBatch >= kExportBatchRows) {
+            if (!commitTransaction())
+                return false;
+            rowsInBatch = 0;
+            if (!beginTransaction())
+                return false;
+        }
     }
-    // All exported — drop the staging table and shrink the database file.
-    sqlite3_exec(db_, "DROP TABLE previews_old;", nullptr, nullptr, nullptr);
-    sqlite3_exec(db_, "VACUUM;", nullptr, nullptr, nullptr);
+    // Covers both the empty-table and the tail-batch case; commitTransaction()
+    // is a no-op when nothing is open.
+    if (!commitTransaction())
+        return false;
+    // All exported: drop the staging table. A failure is reported but not fatal
+    // -- the table is empty, so the next open() retries the drop.
+    if (!exec("DROP TABLE previews_old;"))
+        return false;
+    // Shrinking the file is best effort: a failed or very slow VACUUM must not
+    // fail the migration, because the data has already been exported.
+    if (!exec("VACUUM;")) {
+        const std::string vacuumError = lastError_;
+        lastError_ = "catalog VACUUM failed: " + vacuumError;
+    }
     return true;
 }
 
@@ -3439,7 +3501,9 @@ bool CatalogDatabase::backup(const std::filesystem::path& destPath) const {
         return false;
     }
     sqlite3* dest = nullptr;
-    const int rc = sqlite3_open_v2(destPath.string().c_str(), &dest,
+    // UTF-8 filename again: see the note in open().
+    const std::string destPathUtf8 = pathToUtf8(destPath);
+    const int rc = sqlite3_open_v2(destPathUtf8.c_str(), &dest,
                                    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
                                    nullptr);
     if (rc != SQLITE_OK) {

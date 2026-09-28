@@ -534,6 +534,20 @@ private:
     QElapsedTimer histogramClock_;    // monotonic clock for the throttle
     QImage pendingHistogramImage_;    // most recent coarse frame awaiting flush
 
+    // --- 1:1 entry instrumentation ([PERF1A]) ----------------------------------
+    // Monotonic clock started when a 1:1 request leaves the UI thread (t0). The
+    // frame that answers that request stops it (t7). Diagnostics only: it never
+    // gates, reorders or delays rendering.
+    //
+    // The pending sample is tagged with the generation and image of the request
+    // that opened it. Any newer request (requestFullRes or requestAdjustFullRes,
+    // both of which bump previewGeneration_) invalidates the tag, and the sample
+    // is consumed by the first frame that matches, so a later frame can never be
+    // charged to an earlier request and report an ever-growing total.
+    QElapsedTimer perfFullResClock_;
+    qint64 perfFullResGeneration_ = -1;  // generation of the measured 1:1 entry
+    qint64 perfFullResImageId_ = -1;     // image that entry was requested for
+
     // --- Debounced adjustment persistence --------------------------------------
     std::optional<lrc::Adjustments> pendingSave_;  // latest value awaiting flush
     int pendingSaveImageId_ = -1;     // image the pending save belongs to

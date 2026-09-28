@@ -36,8 +36,30 @@ enum class PixelFormat : uint8_t {
 class ImageBuffer {
 public:
     ImageBuffer() = default;
+    /**
+     * @brief Allocates an RGB buffer of `width` x `height` pixels.
+     *
+     * @param width  Pixel width; must be >= 0.
+     * @param height Pixel height; must be >= 0.
+     * @param format Pixel format (U16/F32/U8), which fixes the byte depth.
+     *
+     * @warning This constructor does not have a failure return: it throws
+     *          std::invalid_argument for a negative dimension and
+     *          std::length_error / std::bad_alloc when the pixel data cannot
+     *          be allocated. Callers that must not propagate exceptions (Qt
+     *          slots, decoders fed by untrusted files) have to validate the
+     *          dimensions against their own limits and wrap the call in a
+     *          try/catch -- do not test the result for nullptr.
+     */
     ImageBuffer(int width, int height, PixelFormat format);
 
+    /**
+     * @brief Factory for a shared RGB buffer.
+     *
+     * @note Never returns nullptr: allocation failures and invalid dimensions
+     *       throw exactly as the constructor does (see above). The returned
+     *       pointer is non-null even for a 0 x 0 request.
+     */
     static std::shared_ptr<ImageBuffer> create(int width, int height,
                                                PixelFormat format);
 

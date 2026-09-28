@@ -7,6 +7,7 @@
 #include "utils/Json.h"
 #include "utils/Sha256.h"   // lrc::sha256File (extracted for headless testing)
 
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <mutex>
@@ -61,6 +62,22 @@ std::string versionedFilename(const ModelManifestEntry& e) {
         return oss.str();
     }
     return e.filename;
+}
+
+// True when a manifest hash can actually be verified. An empty value or a
+// placeholder marker ("TBD...", "PLACEHOLDER...") means the entry carries no
+// integrity value yet, so a *downloaded* file for it could never be checked;
+// downloadModel() refuses such entries outright.
+bool shaIsVerifiable(const std::string& sha) {
+    if (sha.empty())
+        return false;
+    std::string upper;
+    upper.reserve(sha.size());
+    for (const char c : sha)
+        upper.push_back(static_cast<char>(
+            std::toupper(static_cast<unsigned char>(c))));
+    return upper.find("TBD") == std::string::npos &&
+           upper.find("PLACEHOLDER") == std::string::npos;
 }
 }  // namespace
 
@@ -220,7 +237,7 @@ bool ModelManager::extractOnnxFromZip(const std::filesystem::path& zipPath,
                                      const std::filesystem::path& targetPath,
                                      std::string& errMsg) {
     errMsg.clear();
-    QZipReader reader(QString::fromStdString(zipPath.string()));
+    QZipReader reader(QString::fromStdWString(zipPath.wstring()));
     if (!reader.isReadable() || reader.status() != QZipReader::NoError) {
         errMsg = "ZIP unreadable or status != NoError: " + zipPath.string();
         return false;
@@ -255,7 +272,7 @@ bool ModelManager::extractOnnxFromZip(const std::filesystem::path& zipPath,
     // Also make sure the output directory exists.
     std::filesystem::create_directories(outDir, ec);
 
-    if (!reader.extractAll(QString::fromStdString(tmpDir.string()))) {
+    if (!reader.extractAll(QString::fromStdWString(tmpDir.wstring()))) {
         errMsg = "QZipReader::extractAll failed";
         reader.close();
         std::filesystem::remove_all(tmpDir, ec);
@@ -348,6 +365,10 @@ struct ModelManager::Impl {
         std::filesystem::path partPath;
         ModelManifestEntry entry;
         bool usingMirror = false;
+        // Set when the .part file cannot be opened/appended: the transfer is
+        // aborted and the failure is reported through the finish handler
+        // instead of silently dropping the received bytes.
+        bool writeFailed = false;
         // Recursive re-fetch entry point (mirror fallback). Stored here rather
         // than as a downloadModel() local so it outlives the function return:
         // QNetworkReply::finished fires asynchronously. The stored callable
@@ -430,14 +451,12 @@ std::optional<ModelManifestEntry> ModelManager::findModel(const std::string& id)
 bool ModelManager::isModelReady(const ModelManifestEntry& entry) const {
     const auto p = readPathFor(entry);
     if (!std::filesystem::exists(p)) return false;
-    // Placeholder / TBD SHA: accept the file if size matches (best-effort).
-    // This keeps the model usable on a development machine before the first
-    // formal upload produces a stable SHA.
+    // Without a verifiable manifest hash only the file size can be checked.
+    // That is enough for a model placed manually in the cache (development
+    // convenience), but a *downloaded* file is never accepted this way:
+    // downloadModel() refuses an unverifiable entry before it opens a socket.
     const auto& sha = entry.sha256;
-    const bool shaValid = !sha.empty() &&
-                          sha.find("TBD") == std::string::npos &&
-                          sha.find("PLACEHOLDER") == std::string::npos;
-    if (!shaValid) {
+    if (!shaIsVerifiable(sha)) {
         // Accept if size matches (or size is 0, accept any)
         if (entry.sizeBytes == 0) return true;
         std::error_code ec;
@@ -463,6 +482,19 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
     if (isModelReady(entry)) {
         if (auto& fn = impl_->callbacks[h])
             fn(entry.sizeBytes, entry.sizeBytes, true, "");
+        return h;
+    }
+
+    // An entry whose manifest hash is missing or a placeholder cannot be
+    // verified after the transfer, so refuse to install whatever the network
+    // returns. The file may still be placed in the cache by hand, which the
+    // fast path above accepts through the size check.
+    if (!shaIsVerifiable(entry.sha256)) {
+        if (auto& fn = impl_->callbacks[h])
+            fn(0, 0, true,
+               "model manifest has no verifiable SHA256 for '" + entry.id +
+                   "'; refusing to download unverified data");
+        impl_->callbacks.erase(h);
         return h;
     }
 
@@ -510,11 +542,17 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
             });
         QObject::connect(dl->reply, &QNetworkReply::readyRead,
             dl->reply, [this, h, dl]() {
-                // Append the ready-read bytes to the .part file.
+                // Append the ready-read bytes to the .part file. The path is
+                // converted through the wide string: path::string() is the
+                // ANSI code page, but QString::fromStdString expects UTF-8.
                 const auto bytes = dl->reply->readAll();
                 if (bytes.isEmpty()) return;
-                QFile f(QString::fromStdString(dl->partPath.string()));
-                if (!f.open(QIODevice::Append)) return;
+                QFile f(QString::fromStdWString(dl->partPath.wstring()));
+                if (!f.open(QIODevice::Append)) {
+                    dl->writeFailed = true;
+                    dl->reply->abort();
+                    return;
+                }
                 f.write(bytes);
                 f.close();
             });
@@ -527,14 +565,27 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                 // Flush any remaining bytes to the .part
                 const auto tail = dl->reply->readAll();
                 if (!tail.isEmpty()) {
-                    QFile f(QString::fromStdString(dl->partPath.string()));
+                    QFile f(QString::fromStdWString(dl->partPath.wstring()));
                     if (f.open(QIODevice::Append)) { f.write(tail); f.close(); }
+                    else dl->writeFailed = true;
                 }
                 dl->reply->deleteLater();
                 dl->reply = nullptr;
 
                 auto itCb = impl_->callbacks.find(h);
                 const bool hasCb = itCb != impl_->callbacks.end() && bool(itCb->second);
+
+                // A failed write means the cache path is not writable; the
+                // mirror would fail identically, so report it directly.
+                if (dl->writeFailed) {
+                    if (hasCb)
+                        itCb->second(0, 0, true,
+                                     "cannot write model file: " +
+                                         dl->partPath.string());
+                    impl_->qtDownloads.erase(h);
+                    impl_->callbacks.erase(h);
+                    return;
+                }
 
                 // Mirror fallback on 4xx / network errors (unless we are already on mirror)
                 const bool shouldMirror = !dl->usingMirror && !dl->entry.mirrorUrl.empty() &&
@@ -582,9 +633,10 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
                         impl_->qtDownloads.erase(h); impl_->callbacks.erase(h); return;
                     }
                     std::filesystem::remove(dl->partPath, lec);  // archive no longer needed
-                    const bool shaOk = dl->entry.sha256.empty() ||
-                        dl->entry.sha256.find("TBD") == 0 ||
-                        dl->entry.sha256.find("PLACEHOLDER") == 0 ||
+                    // The entry is verifiable by construction (downloadModel
+                    // refuses placeholders before opening a socket), so the
+                    // extracted ONNX must match the manifest hash exactly.
+                    const bool shaOk = shaIsVerifiable(dl->entry.sha256) &&
                         sha256File(dl->targetPath) == dl->entry.sha256;
                     if (!shaOk) {
                         std::filesystem::remove(dl->targetPath, lec);
@@ -601,9 +653,7 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
 
                 // Non-ZIP path: bare .onnx download. SHA256 verify the part
                 // file then atomically rename to the final target.
-                const bool shaValid = dl->entry.sha256.empty() ||
-                    dl->entry.sha256.find("TBD") == 0 ||
-                    dl->entry.sha256.find("PLACEHOLDER") == 0 ||
+                const bool shaValid = shaIsVerifiable(dl->entry.sha256) &&
                     sha256File(dl->partPath) == dl->entry.sha256;
                 if (!shaValid) {
                     std::filesystem::remove(dl->partPath, lec);

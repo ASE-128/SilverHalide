@@ -9,6 +9,8 @@
 
 #include <libraw/libraw.h>
 
+#include "utils/MathUtils.h"
+
 namespace lrc {
 
 namespace {
@@ -84,7 +86,7 @@ bool DngConverter::convert(const std::filesystem::path& inRaw,
 
     // --- decode the raw mosaic (metadata only; no rendering) --------------
     LibRaw raw;
-    const int openRet = raw.open_file(inRaw.string().c_str());
+    const int openRet = openRawFile(raw, inRaw);
     if (openRet != LIBRAW_SUCCESS) {
         return fail("cannot open raw file (libraw error " +
                     std::to_string(openRet) + ")");

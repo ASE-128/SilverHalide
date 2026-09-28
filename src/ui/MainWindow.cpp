@@ -2636,6 +2636,15 @@ void MainWindow::requestAdjustCoarse(const lrc::Adjustments& adjustments) {
 
 void MainWindow::requestFullRes() {
     ++previewGeneration_;
+    // [PERF1A] t0: start of the end-to-end 1:1 entry measurement. The matching
+    // stop is in onFullResReady(); the worker-side [PERF1A] lines only break the
+    // elapsed time down for attribution and are not the anchor verdict.
+    perfFullResClock_.start();
+    perfFullResGeneration_ = previewGeneration_;
+    perfFullResImageId_ = currentImageId_;
+    qInfo("[PERF1A] t0 requestFullRes id=%lld gen=%lld",
+          static_cast<long long>(currentImageId_),
+          static_cast<long long>(previewGeneration_));
     QMetaObject::invokeMethod(
         previewWorker_, "loadFullRes", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(QString, currentFilePath_),
@@ -2697,6 +2706,21 @@ void MainWindow::onFullResReady(qint64 imageId,
     if (viewport_->nativeSize().isEmpty())
         viewport_->setNativeImageSize(image.size());
     viewport_->setImageKeepView(image);
+    // [PERF1A] t7: the 1:1 frame is on screen; this delta is the end-to-end
+    // sample quoted for the B-1 anchor. It is reported only when the frame still
+    // belongs to the measured request: the generation must be unchanged (a newer
+    // full-res or adjustment request invalidates it) and the image must match.
+    // The sample is consumed here, so later frames of the same 1:1 session -
+    // notably the adjustFullRes updates - are not charged to it.
+    if (perfFullResGeneration_ == previewGeneration_ &&
+        perfFullResImageId_ == imageId) {
+        qInfo("[PERF1A] t7 presented id=%lld gen=%lld total=%lldms",
+              static_cast<long long>(imageId),
+              static_cast<long long>(previewGeneration_),
+              static_cast<long long>(perfFullResClock_.elapsed()));
+        perfFullResGeneration_ = -1;
+        perfFullResImageId_ = -1;
+    }
     // Full-res is a final frame -- histogram/status refresh immediately (not
     // throttled).
     updateHistogramNow(image);

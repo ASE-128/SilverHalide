@@ -94,4 +94,27 @@ inline std::string pathToUtf8(const std::filesystem::path& p) {
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
 
+// --- LibRaw path opening ---------------------------------------------------
+/**
+ * @brief Opens a RAW file with LibRaw using the encoding LibRaw expects.
+ *
+ * LibRaw's narrow open_file() interprets its argument in the process ANSI code
+ * page, so a path outside that code page is opened incorrectly or not at all.
+ * Windows builds of LibRaw also provide a wchar_t overload, which is used
+ * here; on POSIX the narrow form is already UTF-8 and stays as it is.
+ *
+ * @param raw  A LibRaw (or compatible) instance. Templated so this header does
+ *             not have to include libraw.
+ * @param path File to open.
+ * @return The LibRaw status code, where 0 means LIBRAW_SUCCESS.
+ */
+template <typename RawType>
+int openRawFile(RawType& raw, const std::filesystem::path& path) {
+#if defined(_WIN32)
+    return raw.open_file(path.wstring().c_str());
+#else
+    return raw.open_file(path.string().c_str());
+#endif
+}
+
 } // namespace lrc

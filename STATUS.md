@@ -13,6 +13,25 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## 1a 热路径验收工具化：埋点 + worker 级计时 + 运行手册（2026-09-28，工作区未提交）
+
+- **埋点**：`src/ui` 新增 `[PERF1A]` 计时日志。t0 = `MainWindow::requestFullRes()` 请求下发，t7 =
+  `MainWindow::onFullResReady()` 帧呈现（端到端判定口径）；worker 侧 `PreviewWorker::loadFullRes()`
+  打出 `hit=earlyReturn|embedded|disk|memU8`、`decode=done`、`render=done`、`worker=done`（归因用）。
+  埋点零副作用，不改变控制流、缓存写入条件与 `fullResReady` 的发出顺序；engine/catalog 未引入 Qt。
+- **测试**：`tests/lrc_qt_tests.cpp` 新增 `FullResHotPathTest`（3 用例）——分别计量目录内嵌预览与
+  legacy 磁盘缓存两条直读路径的请求→出帧耗时，验证同图同状态重复请求走 `earlyReturn`（无渲染、无帧，
+  不计入锚点判定），并在 `clearFullRes()` 后确认可重新出帧。
+- **文档**：新增 [docs/spec/optimization/pillars/01-pa/1a-hot-path-runbook.md](docs/spec/optimization/pillars/01-pa/1a-hot-path-runbook.md)
+  （样本与机器、构建命令、埋点位置表、冷态重置、测量步骤、产出物、边界）；
+  [M1-zero-wait.md](docs/spec/optimization/pillars/01-pa/M1-zero-wait.md) 补 2026-09-28 实测小节。
+- **验证（Release，本机）**：`build_gui/tests/lrc_qt_tests.exe` **12 类 / 48 用例全绿**（exit 0）；
+  `build_gui/SilverHalide.exe` 重新编译链接通过；headless
+  `build_headless/tests/Release/lrc_tests.exe "[performance]"` **4 用例 / 24 断言全绿**
+  （B-2 精帧 min=98.0ms / avg=100.4ms，B-1 引擎段 623.7ms，D-2 回落 688.2MB 可重复）。
+- **状态**：代码与文档已落地并自测通过；**B-1 锚点仍为真机待验**——本次数字只覆盖 PreviewWorker
+  管道且夹具为 256×192 合成图，不构成 50MP 锚点判定。
+
 ## 元类型重复声明 + 软打样三项遗留 + profile 字节可复现（2026-09-26，工作区未提交）
 
 ### 1. `ImportMode` 元类型重复声明（C2766 隐患，已清除）

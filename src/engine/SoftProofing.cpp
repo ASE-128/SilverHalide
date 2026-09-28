@@ -9,6 +9,7 @@
 #include <lcms2.h>
 
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -115,8 +116,25 @@ bool SoftProofing::loadProofProfile(const std::filesystem::path& iccPath) {
     if (iccPath.empty()) return true;   // "clear profile" success
     if (!std::filesystem::exists(iccPath)) return false;
 
-    cmsHPROFILE hp = cmsOpenProfileFromFileTHR(
-        reinterpret_cast<cmsContext>(ctx_), iccPath.string().c_str(), "r");
+    // The profile bytes are read here instead of letting lcms open the file:
+    // cmsOpenProfileFromFileTHR takes a narrow (ANSI) filename, which mangles
+    // non-ASCII profile paths on Windows, while std::ifstream uses the wide
+    // path.
+    std::vector<uint8_t> iccBytes;
+    {
+        std::ifstream in(iccPath, std::ios::binary);
+        if (!in) return false;
+        in.seekg(0, std::ios::end);
+        const std::streamoff len = in.tellg();
+        if (len <= 0) return false;
+        in.seekg(0, std::ios::beg);
+        iccBytes.resize(static_cast<size_t>(len));
+        in.read(reinterpret_cast<char*>(iccBytes.data()), len);
+        if (!in) return false;
+    }
+    cmsHPROFILE hp = cmsOpenProfileFromMemTHR(
+        reinterpret_cast<cmsContext>(ctx_), iccBytes.data(),
+        static_cast<cmsUInt32Number>(iccBytes.size()));
     if (!hp) return false;
     proofProfile_ = hp;
     proofPath_ = iccPath;

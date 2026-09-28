@@ -10,6 +10,7 @@
 #include "engine/DcpProfile.h"
 #include "engine/ImageFormats.h"
 #include "engine/ImageIO.h"
+#include "utils/MathUtils.h"
 #include "utils/Parallel.h"
 
 namespace lrc {
@@ -499,7 +500,7 @@ std::optional<RawMeta> RawDecoder::readMeta(
     if (!isRawPath(path))
         return std::nullopt;
     LibRaw raw;
-    if (!rawOk("open", raw.open_file(path.string().c_str())))
+    if (!rawOk("open", openRawFile(raw, path)))
         return std::nullopt;
     // No unpack / process: the reported frame dimensions are the raw's native
     // full-res sizes (this path never halves).
@@ -515,7 +516,7 @@ std::optional<DecodedImage> RawDecoder::decode(
         return decodeNonRaw(path, params);
 
     LibRaw raw;
-    if (!rawOk("open", raw.open_file(path.string().c_str())))
+    if (!rawOk("open", openRawFile(raw, path)))
         return std::nullopt;
 
     libraw_output_params_t& p = raw.imgdata.params;
@@ -639,7 +640,7 @@ std::optional<DecodedImage> RawDecoder::decode(
 std::optional<std::vector<uint8_t>> RawDecoder::extractEmbeddedThumbnail(
     const std::filesystem::path& path) const {
     LibRaw raw;
-    if (!rawOk("open", raw.open_file(path.string().c_str())))
+    if (!rawOk("open", openRawFile(raw, path)))
         return std::nullopt;
     raw.imgdata.params.output_bps = 16;
     raw.imgdata.params.use_camera_wb = 1;

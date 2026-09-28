@@ -4,8 +4,10 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <limits>
+#include <new>
 #include <unordered_map>
 #include <utility>
 
@@ -294,8 +296,47 @@ void appendToVector(void* context, void* data, int size) {
     vec->insert(vec->end(), bytes, bytes + size);
 }
 
+// ---------------------------------------------------------------------------
+// Decoder input limits
+// ---------------------------------------------------------------------------
+// ImageBuffer's constructor *throws* on a negative dimension or an impossible
+// allocation (std::invalid_argument / std::length_error / std::bad_alloc); it
+// never returns an empty buffer. Each decoder must therefore reject a
+// nonsensical header itself: these entry points run inside Qt slots, and an
+// exception escaping a slot has no handler on the event loop.
+
+// Upper bound on the pixel count of one decoded image (256 MP, well above any
+// current consumer camera and the 50 MP performance anchors).
+constexpr uint64_t kMaxDecodedPixels = 256ull * 1024ull * 1024ull;
+// Upper bound on the RGB output of one decode, in bytes. The working formats
+// use 1 (U8), 2 (U16) or 4 (F32) bytes per channel.
+constexpr uint64_t kMaxDecodedBytes = 3ull * 1024ull * 1024ull * 1024ull;
+// Upper bound on a source file that is read fully into memory before decoding.
+constexpr uint64_t kMaxSourceFileBytes = 2ull * 1024ull * 1024ull * 1024ull;
+
+/**
+ * @brief True when a `w` x `h` RGB image with `bytesPerSample` bytes per
+ *        channel is representable and inside the decoder limits.
+ *
+ * @note `w * h` cannot overflow: both operands are bounded by INT_MAX below.
+ */
+bool withinDecodeLimits(uint64_t w, uint64_t h, uint64_t bytesPerSample) {
+    if (w == 0 || h == 0)
+        return false;
+    // ImageBuffer takes int dimensions, so reject anything above INT_MAX here
+    // instead of letting the narrowing cast produce a negative width.
+    if (w > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+        h > static_cast<uint64_t>(std::numeric_limits<int>::max()))
+        return false;
+    const uint64_t pixels = w * h;
+    if (pixels > kMaxDecodedPixels)
+        return false;
+    return pixels * 3ull * bytesPerSample <= kMaxDecodedBytes;
+}
+
 // Shared stb_image decode from raw bytes into a display-ready 8-bit sRGB U8
-// buffer. Returns an empty buffer on failure.
+// buffer. Returns an empty buffer on failure: malformed input and allocation
+// failure are both reported through that empty buffer, never as an exception.
 ImageBufferPtr decodeStbFromMemory(const uint8_t* data, size_t size) {
     auto fail = [] { return ImageBuffer::create(0, 0, PixelFormat::U8); };
     if (!data || size == 0 ||
@@ -305,8 +346,18 @@ ImageBufferPtr decodeStbFromMemory(const uint8_t* data, size_t size) {
     stbi_uc* px = stbi_load_from_memory(data, static_cast<int>(size), &w, &h, &n, 3);
     if (!px || w <= 0 || h <= 0)
         return fail();
-    auto out = ImageBuffer::create(w, h, PixelFormat::U8);
-    std::memcpy(out->data().data(), px, static_cast<size_t>(w) * h * 3);
+    if (!withinDecodeLimits(static_cast<uint64_t>(w), static_cast<uint64_t>(h), 1)) {
+        stbi_image_free(px);
+        return fail();
+    }
+    ImageBufferPtr out;
+    try {
+        out = ImageBuffer::create(w, h, PixelFormat::U8);
+        std::memcpy(out->data().data(), px, static_cast<size_t>(w) * h * 3);
+    } catch (const std::exception&) {
+        stbi_image_free(px);
+        return fail();
+    }
     stbi_image_free(px);
     return out;
 }
@@ -592,14 +643,23 @@ ImageBufferPtr loadTiffImpl(const std::vector<uint8_t>& bytes, bool preserveDept
     };
 
     const size_t sampleBytes = bps / 8;
+    // Reject absurd headers (e.g. a 0xFFFFFFFF width) before the narrowing int
+    // cast and the allocating ImageBuffer constructor below.
+    if (!withinDecodeLimits(w, h, sampleBytes))
+        return ImageBuffer::create(0, 0, PixelFormat::U8);
     const size_t bytesPerRow = static_cast<size_t>(w) * spp * sampleBytes;
     // Preserve 16-bit source depth when requested; otherwise and for
     // 8-bit sources the output is display-ready U8.
     PixelFormat outFmt = PixelFormat::U8;
     if (preserveDepth && bps == 16)
         outFmt = PixelFormat::U16;
-    auto out = ImageBuffer::create(static_cast<int>(w), static_cast<int>(h),
-                                   outFmt);
+    ImageBufferPtr out;
+    try {
+        out = ImageBuffer::create(static_cast<int>(w), static_cast<int>(h),
+                                  outFmt);
+    } catch (const std::exception&) {
+        return ImageBuffer::create(0, 0, PixelFormat::U8);
+    }
 
     // Extract the embedded ICC profile (tag 34675, type BYTE): the tag parser
     // stores each value byte sequentially in the values vector.
@@ -891,28 +951,40 @@ bool ImageIO::writeDng(const std::filesystem::path& path,
                         rgbU16.data().data(), /*dng=*/true, iccPtr);
 }
 
+/**
+ * @brief Decodes one image file into a display-ready U8 buffer.
+ *
+ * The whole file is buffered before decoding, so files above
+ * kMaxSourceFileBytes are rejected outright. Every failure path -- unreadable
+ * file, malformed header, allocation failure -- returns an empty buffer; no
+ * exception escapes, because this runs inside Qt slots.
+ */
 ImageBufferPtr ImageIO::loadImage(const std::filesystem::path& path) {
     auto fail = [] { return ImageBuffer::create(0, 0, PixelFormat::U8); };
-    std::ifstream in(path, std::ios::binary);
-    if (!in)
-        return fail();
-    in.seekg(0, std::ios::end);
-    const std::streamsize sz = in.tellg();
-    if (sz <= 0)
-        return fail();
-    in.seekg(0, std::ios::beg);
-    std::vector<uint8_t> bytes(static_cast<size_t>(sz));
-    in.read(reinterpret_cast<char*>(bytes.data()), sz);
-    if (!in.good() && !in.eof())
-        return fail();
+    try {
+        std::ifstream in(path, std::ios::binary);
+        if (!in)
+            return fail();
+        in.seekg(0, std::ios::end);
+        const std::streamsize sz = in.tellg();
+        if (sz <= 0 || static_cast<uint64_t>(sz) > kMaxSourceFileBytes)
+            return fail();
+        in.seekg(0, std::ios::beg);
+        std::vector<uint8_t> bytes(static_cast<size_t>(sz));
+        in.read(reinterpret_cast<char*>(bytes.data()), sz);
+        if (!in.good() && !in.eof())
+            return fail();
 
-    // stb_image has no TIFF support, so TIFF goes to the built-in reader.
-    if (bytes.size() >= 4 &&
-        ((bytes[0] == 'I' && bytes[1] == 'I') ||
-         (bytes[0] == 'M' && bytes[1] == 'M')))
-        return loadTiffImpl(bytes, /*preserveDepth=*/false, nullptr);
+        // stb_image has no TIFF support, so TIFF goes to the built-in reader.
+        if (bytes.size() >= 4 &&
+            ((bytes[0] == 'I' && bytes[1] == 'I') ||
+             (bytes[0] == 'M' && bytes[1] == 'M')))
+            return loadTiffImpl(bytes, /*preserveDepth=*/false, nullptr);
 
-    return decodeStbFromMemory(bytes.data(), bytes.size());
+        return decodeStbFromMemory(bytes.data(), bytes.size());
+    } catch (const std::exception&) {
+        return fail();
+    }
 }
 
 ImageBufferPtr ImageIO::loadImage(const uint8_t* data, size_t size) {
@@ -923,7 +995,10 @@ namespace {
 // Shared decode core for the source (import) path: given raw file bytes, return
 // pixels at native bit depth plus the embedded source ICC. Both the
 // file-path and in-memory import APIs delegate here so they stay consistent.
-ImageIO::SourceImage decodeSourceBytes(const std::vector<uint8_t>& bytes) {
+//
+// Throws nothing: the public entry points wrap this call in a try/catch so a
+// decode-time allocation failure surfaces as an empty SourceImage.
+ImageIO::SourceImage decodeSourceBytesImpl(const std::vector<uint8_t>& bytes) {
     ImageIO::SourceImage result;
     auto fail = [&result] {
         result.pixels = ImageBuffer::create(0, 0, PixelFormat::U8);
@@ -951,9 +1026,20 @@ ImageIO::SourceImage decodeSourceBytes(const std::vector<uint8_t>& bytes) {
                 bytes.data(), static_cast<int>(bytes.size()), &w, &h, &n, 3);
             if (!px || w <= 0 || h <= 0)
                 return fail();
-            auto out = ImageBuffer::create(w, h, PixelFormat::U16);
-            std::memcpy(out->data().data(), px,
-                        static_cast<size_t>(w) * h * 3 * 2);
+            if (!withinDecodeLimits(static_cast<uint64_t>(w),
+                                    static_cast<uint64_t>(h), 2)) {
+                stbi_image_free(px);
+                return fail();
+            }
+            ImageBufferPtr out;
+            try {
+                out = ImageBuffer::create(w, h, PixelFormat::U16);
+                std::memcpy(out->data().data(), px,
+                            static_cast<size_t>(w) * h * 3 * 2);
+            } catch (const std::exception&) {
+                stbi_image_free(px);
+                return fail();
+            }
             stbi_image_free(px);
             result.pixels = std::move(out);
         } else {
@@ -973,29 +1059,44 @@ ImageIO::SourceImage decodeSourceBytes(const std::vector<uint8_t>& bytes) {
 }
 } // namespace
 
+/**
+ * @brief Import-path helper: reads a file and decodes it at native depth.
+ *
+ * Same failure contract as loadImage(path): over-large files are rejected and
+ * every error (including allocation failure) becomes an empty SourceImage
+ * instead of an exception.
+ */
 ImageIO::SourceImage ImageIO::loadSourceImage(
     const std::filesystem::path& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in)
+    try {
+        std::ifstream in(path, std::ios::binary);
+        if (!in)
+            return {};
+        in.seekg(0, std::ios::end);
+        const std::streamsize sz = in.tellg();
+        if (sz <= 0 || static_cast<uint64_t>(sz) > kMaxSourceFileBytes)
+            return {};
+        in.seekg(0, std::ios::beg);
+        std::vector<uint8_t> bytes(static_cast<size_t>(sz));
+        in.read(reinterpret_cast<char*>(bytes.data()), sz);
+        if (!in.good() && !in.eof())
+            return {};
+        return decodeSourceBytesImpl(bytes);
+    } catch (const std::exception&) {
         return {};
-    in.seekg(0, std::ios::end);
-    const std::streamsize sz = in.tellg();
-    if (sz <= 0)
-        return {};
-    in.seekg(0, std::ios::beg);
-    std::vector<uint8_t> bytes(static_cast<size_t>(sz));
-    in.read(reinterpret_cast<char*>(bytes.data()), sz);
-    if (!in.good() && !in.eof())
-        return {};
-    return decodeSourceBytes(bytes);
+    }
 }
 
 ImageIO::SourceImage ImageIO::loadSourceImageFromMemory(const uint8_t* data,
                                                        size_t size) {
     if (!data || size == 0)
         return {};
-    std::vector<uint8_t> bytes(data, data + size);
-    return decodeSourceBytes(bytes);
+    try {
+        std::vector<uint8_t> bytes(data, data + size);
+        return decodeSourceBytesImpl(bytes);
+    } catch (const std::exception&) {
+        return {};
+    }
 }
 
 std::vector<uint8_t> ImageIO::encodeJpeg(const ImageBuffer& rgbU8,

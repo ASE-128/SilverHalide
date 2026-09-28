@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <vector>
 
 #include <lcms2.h>
@@ -109,7 +110,27 @@ void ColorManager::rebuildTransforms() {
 
 void ColorManager::loadDisplayProfile(const std::filesystem::path& iccPath) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    cmsHPROFILE candidate = cmsOpenProfileFromFile(iccPath.string().c_str(), "r");
+    // The profile bytes are read here and handed to lcms as memory:
+    // cmsOpenProfileFromFile takes a narrow (ANSI) filename, which mangles
+    // non-ASCII profile paths on Windows, while std::ifstream uses the wide
+    // path. Every failure keeps the previous display profile.
+    std::vector<uint8_t> iccBytes;
+    {
+        std::ifstream in(iccPath, std::ios::binary);
+        if (!in)
+            return; // keep previous display profile
+        in.seekg(0, std::ios::end);
+        const std::streamoff len = in.tellg();
+        if (len <= 0)
+            return; // keep previous display profile
+        in.seekg(0, std::ios::beg);
+        iccBytes.resize(static_cast<size_t>(len));
+        in.read(reinterpret_cast<char*>(iccBytes.data()), len);
+        if (!in)
+            return; // keep previous display profile
+    }
+    cmsHPROFILE candidate = cmsOpenProfileFromMem(
+        iccBytes.data(), static_cast<cmsUInt32Number>(iccBytes.size()));
     if (!candidate)
         return; // keep previous display profile
     if (display_ && display_ != srgb_)

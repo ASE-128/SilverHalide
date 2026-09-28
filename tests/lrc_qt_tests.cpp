@@ -14,6 +14,8 @@
 #include <QCheckBox>
 #include <QColor>
 #include <QColorSpace>
+#include <QDebug>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QImage>
 #include <QImageReader>
@@ -1028,6 +1030,230 @@ void SoftProofRenderPathsTest::fullResFrameIsProofed() {
 }
 
 // ---------------------------------------------------------------------------
+// 1:1 entry hot-path timing (P-A anchor B-1 attribution)
+//
+// The B-1 verdict -- "50MP, default adjustments, cache hit: 1:1 entry <= 175 ms;
+// cold entry <= 1500 ms" -- must be taken on a real machine with a real >=50MP
+// RAW and the GUI in the loop. This suite measures the part that is reachable
+// without either: how long PreviewWorker::loadFullRes takes to produce a frame
+// for each of its cache legs, observed from the test thread (request -> signal,
+// queued hop included).
+//
+// Two boundaries matter and are never blurred here:
+//   • The fixture is small (256x192), so the cold "decode + render" number is a
+//     scheduler/plumbing figure, NOT a 50MP performance claim.
+//   • The early-return leg renders nothing and emits nothing, so it is excluded
+//     from the anchor verdict: a ~0 ms repeat is not evidence of a fast hot path.
+//
+// The worker's own [PERF1A] qInfo lines (hit=embedded / hit=disk / hit=memU8 /
+// hit=earlyReturn, plus decode/render legs) identify which branch answered each
+// request; the numbers below are the request-to-frame wall time around them.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Writes a small synthetic JPEG fixture. No camera RAW sample is shipped in the
+// repo, and the 1:1 path accepts anything RawDecoder can read, so a JPEG keeps
+// the fixture self-contained (same trick as BatchExportTest).
+bool writeFullResFixture(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    auto src = ImageBuffer::create(256, 192, PixelFormat::U8);
+    if (!src || src->empty())
+        return false;
+    auto& px = src->data();
+    for (size_t i = 0; i < px.size(); ++i)
+        px[i] = static_cast<uint8_t>((i * 11) & 0xff);
+    return ImageIO::writeJpeg(path, *src, 92);
+}
+
+// Fills a U8 buffer with a deterministic ramp. Used both as the fixture pixels
+// and as the seeded cache payload.
+bool fillRamp(const ImageBufferPtr& buf, unsigned step) {
+    if (!buf || buf->format() != PixelFormat::U8 || buf->empty())
+        return false;
+    auto& px = buf->data();
+    for (size_t i = 0; i < px.size(); ++i)
+        px[i] = static_cast<uint8_t>((i * step) & 0xff);
+    return true;
+}
+
+// Engine objects + a running worker thread for one 1:1 entry case.
+struct FullResHarness {
+    std::filesystem::path dir;
+    std::filesystem::path image;
+    std::shared_ptr<ColorManager> cm;
+    std::unique_ptr<Pipeline> pipeline;
+    std::unique_ptr<RawDecoder> decoder;
+    std::unique_ptr<ThumbnailCache> cache;
+    std::unique_ptr<CatalogDatabase> db;
+    QThread thread;
+    PreviewWorker* worker = nullptr;
+    int64_t imageId = -1;
+    bool ok = false;
+
+    ~FullResHarness() { stop(); }
+
+    void start(const std::filesystem::path& root) {
+        std::error_code ec;
+        dir = root;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir / "cache", ec);
+        image = dir / "fixture.jpg";
+        if (!writeFullResFixture(image))
+            return;
+        cm = std::make_shared<ColorManager>();
+        pipeline = std::make_unique<Pipeline>(cm);
+        decoder = std::make_unique<RawDecoder>();
+        decoder->setColorManager(cm);
+        cache = std::make_unique<ThumbnailCache>(dir / "cache");
+        db = std::make_unique<CatalogDatabase>(dir / "fullres.db");
+        if (!db->open())
+            return;
+        imageId = db->addImage(image.string(), std::string());
+        if (imageId <= 0)
+            return;
+        thread.setObjectName(QStringLiteral("perf1a_fullres"));
+        worker = new PreviewWorker(*decoder, *pipeline, *cache, *db, cm);
+        worker->moveToThread(&thread);
+        thread.start();
+        ok = true;
+    }
+
+    void stop() {
+        if (!worker)
+            return;
+        thread.quit();
+        thread.wait();
+        delete worker;
+        worker = nullptr;
+    }
+};
+
+struct FullResTiming {
+    // Wall time from request to the fullResReady signal, or -1 on timeout. This
+    // includes the queued UI -> worker hop, which is part of what the anchor
+    // measures; it excludes the GUI presentation step (MainWindow's t7).
+    qint64 ms = -1;
+    lrc::ImageBufferPtr frame;
+};
+
+// Requests one 1:1 entry and waits for the resulting frame.
+FullResTiming timeFullResEntry(FullResHarness& h, qint64 generation) {
+    FullResTiming out;
+    QSignalSpy readySpy(h.worker, &PreviewWorker::fullResReady);
+    QElapsedTimer clock;
+    clock.start();
+    QMetaObject::invokeMethod(
+        h.worker, "loadFullRes", Qt::QueuedConnection, Q_ARG(qint64, h.imageId),
+        Q_ARG(QString, QString::fromStdWString(h.image.wstring())),
+        Q_ARG(qint64, generation),
+        Q_ARG(lrc::Adjustments, lrc::Adjustments::defaults()));
+    if (!readySpy.wait(30000))
+        return out;  // ms stays -1: no frame (timeout or loadFailed).
+    out.ms = clock.elapsed();
+    out.frame = readySpy.at(0).at(1).value<lrc::ImageBufferPtr>();
+    return out;
+}
+
+} // namespace
+
+class FullResHotPathTest : public QObject {
+    Q_OBJECT
+private slots:
+    void embeddedPreviewHitIsTimed();
+    void diskCacheHitIsTimed();
+    void repeatRequestHitsEarlyReturnWithoutRender();
+};
+
+void FullResHotPathTest::embeddedPreviewHitIsTimed() {
+    const auto root =
+        std::filesystem::temp_directory_path() / "lrc_perf1a_embedded";
+    FullResHarness h;
+    h.start(root);
+    QVERIFY(h.ok);
+
+    // Seed ONLY the catalog-embedded 1:1 preview: the fast path must serve it
+    // without decoding the source file and without running the pipeline.
+    auto preview = ImageBuffer::create(256, 192, PixelFormat::U8);
+    QVERIFY(fillRamp(preview, 5));
+    const auto jpeg = ImageIO::encodeJpeg(*preview, 92);
+    QVERIFY(!jpeg.empty());
+    QVERIFY(h.db->storePreview(h.imageId, PreviewKind::FullRes, jpeg, 256, 192));
+
+    const auto first = timeFullResEntry(h, 1);
+    QVERIFY2(first.ms >= 0, "no frame arrived for the embedded fast path");
+    QVERIFY(first.frame && !first.frame->empty());
+    qInfo("[PERF1A][test] hit=embedded request->frame %lld ms",
+          static_cast<long long>(first.ms));
+
+    // Repeating the request keeps using the catalog blob: the embedded fast path
+    // never populates the linear buffer, so no early-return branch is involved.
+    const auto again = timeFullResEntry(h, 2);
+    QVERIFY2(again.ms >= 0, "the repeated embedded request produced no frame");
+    QVERIFY(again.frame && !again.frame->empty());
+    qInfo("[PERF1A][test] hit=embedded (repeat) request->frame %lld ms",
+          static_cast<long long>(again.ms));
+}
+
+void FullResHotPathTest::diskCacheHitIsTimed() {
+    const auto root = std::filesystem::temp_directory_path() / "lrc_perf1a_disk";
+    FullResHarness h;
+    h.start(root);
+    QVERIFY(h.ok);
+
+    // Seed ONLY the legacy disk cache: no catalog-embedded preview exists, so the
+    // request has to be answered by the disk JPEG (still without a raw decode).
+    auto seeded = ImageBuffer::create(256, 192, PixelFormat::U8);
+    QVERIFY(fillRamp(seeded, 7));
+    QVERIFY(h.cache->writeFullRes(h.image, *seeded));
+    QVERIFY(h.cache->findFullRes(h.image).has_value());
+
+    const auto first = timeFullResEntry(h, 1);
+    QVERIFY2(first.ms >= 0, "no frame arrived for the disk-cache fast path");
+    QVERIFY(first.frame && !first.frame->empty());
+    qInfo("[PERF1A][test] hit=disk request->frame %lld ms",
+          static_cast<long long>(first.ms));
+}
+
+void FullResHotPathTest::repeatRequestHitsEarlyReturnWithoutRender() {
+    const auto root = std::filesystem::temp_directory_path() / "lrc_perf1a_cold";
+    FullResHarness h;
+    h.start(root);
+    QVERIFY(h.ok);
+
+    // Neither cache is seeded, so the first entry takes the decode + render leg --
+    // the only leg that leaves a resident linear buffer behind.
+    const auto cold = timeFullResEntry(h, 1);
+    QVERIFY2(cold.ms >= 0, "the cold 1:1 entry produced no frame");
+    QVERIFY(cold.frame && !cold.frame->empty());
+    qInfo("[PERF1A][test] cold leg (decode + render, small fixture) %lld ms "
+          "(not a 50MP claim)",
+          static_cast<long long>(cold.ms));
+
+    // Identical repeat: the worker still holds the linear buffer and the frame
+    // key, so it returns without rendering and without re-emitting a frame.
+    QSignalSpy readySpy(h.worker, &PreviewWorker::fullResReady);
+    QMetaObject::invokeMethod(
+        h.worker, "loadFullRes", Qt::QueuedConnection, Q_ARG(qint64, h.imageId),
+        Q_ARG(QString, QString::fromStdWString(h.image.wstring())),
+        Q_ARG(qint64, 2),
+        Q_ARG(lrc::Adjustments, lrc::Adjustments::defaults()));
+    QTest::qWait(300);
+    QCOMPARE(readySpy.count(), 0);
+    qInfo("[PERF1A][test] repeat entry took hit=earlyReturn: no render, no "
+          "frame (excluded from the B-1 anchor verdict)");
+
+    // Releasing the 1:1 buffer must make the next entry produce a frame again.
+    QMetaObject::invokeMethod(h.worker, "clearFullRes", Qt::QueuedConnection);
+    QTest::qWait(50);
+    const auto after = timeFullResEntry(h, 3);
+    QVERIFY2(after.ms >= 0, "clearFullRes did not release the full-res state");
+    QVERIFY(after.frame && !after.frame->empty());
+    qInfo("[PERF1A][test] entry after clearFullRes %lld ms",
+          static_cast<long long>(after.ms));
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1086,6 +1312,10 @@ int main(int argc, char** argv) {
     }
     {
         SoftProofRenderPathsTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        FullResHotPathTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
 

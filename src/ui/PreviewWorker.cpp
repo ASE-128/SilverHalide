@@ -4,6 +4,9 @@
 #include <cmath>
 #include <filesystem>
 
+#include <QDebug>
+#include <QElapsedTimer>
+
 #include "app/Constants.h"
 #include "catalog/CatalogDatabase.h"
 #include "catalog/ThumbnailCache.h"
@@ -19,6 +22,19 @@ namespace {
 
 std::filesystem::path toStdPath(const QString& path) {
     return std::filesystem::path(path.toStdWString());
+}
+
+// Monotonic millisecond stamp for the [PERF1A] 1:1 entry instrumentation.
+// QElapsedTimer::elapsed() is const and safe to call from several threads on one
+// instance, and the clock starts once at first use, so the deltas stay meaningful
+// across the queued UI -> worker hop (and a wall-clock jump cannot skew them).
+qint64 perfStampMs() {
+    static QElapsedTimer timer = [] {
+        QElapsedTimer t;
+        t.start();
+        return t;
+    }();
+    return timer.elapsed();
 }
 
 // Copies a queued ExportWatermark into the engine ExportSpec (Qt vector ->
@@ -478,6 +494,9 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
     if (abort_.load())
         return;  // abort requested.
     fullResLatest_ = generation;
+    // [PERF1A] worker-side entry stamp. Attribution only: the anchor verdict is
+    // the end-to-end delta measured in MainWindow (t0 -> t7).
+    const qint64 perfT1 = perfStampMs();
     const uint64_t adjHash = static_cast<uint64_t>(adjustments.hash());
     // Frame identity = adjustments *and* the proof state, because proofing changes
     // the pixels for an unchanged adjustment stack.
@@ -485,6 +504,11 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
     // Skip when the full-res frame was already emitted for this (image, state).
     if (fullResLinear_ && fullResImageId_ == imageId &&
         fullResAdjHash_ == frameKey) {
+        // hit=earlyReturn renders nothing, so it is excluded from the B-1 anchor
+        // verdict: a ~0 ms "second entry" is not evidence of a fast hot path.
+        qInfo("[PERF1A] hit=earlyReturn id=%lld gen=%lld",
+              static_cast<long long>(imageId),
+              static_cast<long long>(generation));
         return;
     }
     // Serve from the import-time full-res cache when at default settings. Those
@@ -504,6 +528,12 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
                 fullResImageId_ = imageId;
                 fullResPath_ = filePath;
                 fullResCoarseHash_ = 0; // image switch invalidates coarse dedup.
+                // [PERF1A] fastest hot path: catalog-embedded 1:1 preview, no
+                // raw decode and no pipeline render.
+                qInfo("[PERF1A] hit=embedded id=%lld gen=%lld worker=%lldms",
+                      static_cast<long long>(imageId),
+                      static_cast<long long>(generation),
+                      static_cast<long long>(perfStampMs() - perfT1));
                 if (generation == fullResLatest_)
                     emit fullResReady(imageId, img);
                 return; // embedded full-res from the catalog file (fast path).
@@ -517,6 +547,12 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
                 fullResImageId_ = imageId;
                 fullResPath_ = filePath;
                 fullResCoarseHash_ = 0; // image switch invalidates coarse dedup.
+                // [PERF1A] legacy disk-cache hot path: JPEG read + decode, still
+                // no raw decode.
+                qInfo("[PERF1A] hit=disk id=%lld gen=%lld worker=%lldms",
+                      static_cast<long long>(imageId),
+                      static_cast<long long>(generation),
+                      static_cast<long long>(perfStampMs() - perfT1));
                 if (generation == fullResLatest_)
                     emit fullResReady(imageId, img);
                 return; // 1:1 from disk cache, no raw decode (fast).
@@ -537,6 +573,11 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
             fullResPath_ = filePath;
             fullResCoarseHash_ = 0; // image/adjust change invalidates dedup.
             fullResAdjHash_ = frameKey;
+            // [PERF1A] in-memory full-res U8 reuse (non-default adjustments).
+            qInfo("[PERF1A] hit=memU8 id=%lld gen=%lld worker=%lldms",
+                  static_cast<long long>(imageId),
+                  static_cast<long long>(generation),
+                  static_cast<long long>(perfStampMs() - perfT1));
             if (generation == fullResLatest_)
                 emit fullResReady(imageId, cached);
             return;
@@ -551,7 +592,15 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
         if (abort_.load())
             return;  // abort after the full-res decode.
     }
+    // [PERF1A] cold-leg attribution: the decode is usually the dominant cost.
+    qInfo("[PERF1A] decode=done id=%lld worker=%lldms",
+          static_cast<long long>(imageId),
+          static_cast<long long>(perfStampMs() - perfT1));
     auto f32 = pipeline_.renderLinearFull(imageId, *fullResLinear_, adjustments);
+    // [PERF1A] engine render leg (linear -> full-size), excludes display convert.
+    qInfo("[PERF1A] render=done id=%lld worker=%lldms",
+          static_cast<long long>(imageId),
+          static_cast<long long>(perfStampMs() - perfT1));
     if (abort_.load())
         return;  // abort during the full-res render.
     if (!f32 || f32->empty()) {
@@ -584,6 +633,11 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
     fullResAdjHash_ = frameKey;
     if (generation == fullResLatest_)
         emit fullResReady(imageId, u8);
+    // [PERF1A] worker-side completion; the frame is queued to the UI thread here.
+    qInfo("[PERF1A] worker=done id=%lld gen=%lld worker=%lldms",
+          static_cast<long long>(imageId),
+          static_cast<long long>(generation),
+          static_cast<long long>(perfStampMs() - perfT1));
 }
 
 void PreviewWorker::adjustFullRes(qint64 imageId, qint64 generation,
