@@ -1,5 +1,7 @@
 #include "ui/MainWindow.h"
 
+#include "ui/Logging.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -912,6 +914,9 @@ void MainWindow::backupCatalog() {
         statusBar()->showMessage(tr("目录操作正在进行,请稍候…"), 3000);
         return;
     }
+    // Reclaim a finished-but-unjoined handle before reusing the member, so the
+    // std::thread assignment below can never hit a joinable thread (terminate).
+    joinDbOpThread();
     dbOpRunning_ = true;
     statusBar()->showMessage(tr("正在备份目录…"));
     // sqlite3_backup_step copies the whole catalog synchronously; on a large
@@ -932,9 +937,10 @@ void MainWindow::backupCatalog() {
 
 void MainWindow::onCatalogBackupFinished(bool ok, const QString& error,
                                          const QString& destPath) {
-    dbOpRunning_ = false;
-    if (dbOpThread_.joinable())
-        dbOpThread_.detach();  // 线程已完成,仅回收句柄 (thread done; reclaim).
+    // Joined, not detached: the worker has already posted this completion, so
+    // the join returns immediately and the thread handle can never outlive the
+    // window. joinDbOpThread() also clears dbOpRunning_.
+    joinDbOpThread();
     if (ok)
         QMessageBox::information(this, tr("备份目录"),
                                  tr("目录已备份到 %1").arg(destPath));
@@ -948,6 +954,7 @@ void MainWindow::optimizeCatalog() {
         statusBar()->showMessage(tr("目录操作正在进行,请稍候…"), 3000);
         return;
     }
+    joinDbOpThread();
     dbOpRunning_ = true;
     statusBar()->showMessage(tr("正在优化目录…"));
     // VACUUM rebuilds the catalog file and can take seconds on a large library;
@@ -963,9 +970,10 @@ void MainWindow::optimizeCatalog() {
 }
 
 void MainWindow::onCatalogOptimizeFinished(bool ok, const QString& error) {
-    dbOpRunning_ = false;
-    if (dbOpThread_.joinable())
-        dbOpThread_.detach();  // 线程已完成,仅回收句柄 (thread done; reclaim).
+    // Joined, not detached: the worker has already posted this completion, so
+    // the join returns immediately and the thread handle can never outlive the
+    // window. joinDbOpThread() also clears dbOpRunning_.
+    joinDbOpThread();
     if (ok)
         QMessageBox::information(this, tr("优化目录"), tr("目录已优化。"));
     else
@@ -2642,7 +2650,7 @@ void MainWindow::requestFullRes() {
     perfFullResClock_.start();
     perfFullResGeneration_ = previewGeneration_;
     perfFullResImageId_ = currentImageId_;
-    qInfo("[PERF1A] t0 requestFullRes id=%lld gen=%lld",
+    qCInfo(lrcPerf, "[PERF1A] t0 requestFullRes id=%lld gen=%lld",
           static_cast<long long>(currentImageId_),
           static_cast<long long>(previewGeneration_));
     QMetaObject::invokeMethod(
@@ -2714,7 +2722,7 @@ void MainWindow::onFullResReady(qint64 imageId,
     // notably the adjustFullRes updates - are not charged to it.
     if (perfFullResGeneration_ == previewGeneration_ &&
         perfFullResImageId_ == imageId) {
-        qInfo("[PERF1A] t7 presented id=%lld gen=%lld total=%lldms",
+        qCInfo(lrcPerf, "[PERF1A] t7 presented id=%lld gen=%lld total=%lldms",
               static_cast<long long>(imageId),
               static_cast<long long>(previewGeneration_),
               static_cast<long long>(perfFullResClock_.elapsed()));

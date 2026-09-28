@@ -27,7 +27,10 @@ public:
     Value() = default;
     Value(std::nullptr_t) : type_(Type::Null) {}
     Value(bool b) : type_(Type::Bool), bool_(b) {}
-    Value(int n) : type_(Type::Number), num_(static_cast<double>(n)) {}
+    Value(int n) : type_(Type::Number), isInt_(true), int_(n) {}
+    // Integral values are stored as long long so ids and counters beyond 2^53 do
+    // not lose precision on a round trip; asNumber() still exposes them as double.
+    Value(long long n) : type_(Type::Number), isInt_(true), int_(n) {}
     Value(double n) : type_(Type::Number), num_(n) {}
     Value(const char* s) : type_(Type::String), str_(s) {}
     Value(std::string s) : type_(Type::String), str_(std::move(s)) {}
@@ -50,13 +53,27 @@ public:
     bool asBool(bool def = false) const {
         return isBool() ? bool_ : def;
     }
+    /** @brief True when this Number was created/parsed as an integer. */
+    bool isInt() const { return type_ == Type::Number && isInt_; }
     /** @brief Reads as number, returning `def` when not a Number. */
     double asNumber(double def = 0.0) const {
-        return isNumber() ? num_ : def;
+        if (!isNumber())
+            return def;
+        return isInt_ ? static_cast<double>(int_) : num_;
+    }
+    /**
+     * @brief Reads as a 64-bit integer, returning `def` otherwise.
+     *
+     * @note A Number that was parsed as a float is truncated toward zero.
+     */
+    long long asInt64(long long def = 0) const {
+        if (!isNumber())
+            return def;
+        return isInt_ ? int_ : static_cast<long long>(num_);
     }
     /** @brief Reads as int (from a Number), returning `def` otherwise. */
     int asInt(int def = 0) const {
-        return isNumber() ? static_cast<int>(num_) : def;
+        return isNumber() ? static_cast<int>(asInt64()) : def;
     }
     /** @brief Returns the string payload (empty when not a String). */
     const std::string& asString() const { return str_; }
@@ -101,7 +118,9 @@ public:
 private:
     Type type_ = Type::Null;
     bool bool_ = false;
-    double num_ = 0.0;
+    bool isInt_ = false;   // Number: holds an exact integer in int_
+    long long int_ = 0;    // valid when isInt_
+    double num_ = 0.0;     // valid when !isInt_
     std::string str_;
     std::vector<Value> arr_;
     std::map<std::string, Value> obj_;

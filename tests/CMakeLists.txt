@@ -69,7 +69,9 @@ target_compile_definitions(lrc_tests PRIVATE
   "LRC_SOURCE_ROOT=\"${CMAKE_SOURCE_DIR}\"")
 
 if(MSVC)
-  target_compile_options(lrc_tests PRIVATE /W3 /EHsc)
+  # /utf-8: the tests include engine headers with non-ASCII comments; without
+  # it MSVC reads them in the ANSI code page (see the AGENTS.md comment rule).
+  target_compile_options(lrc_tests PRIVATE /utf-8 /W3 /EHsc)
 endif()
 
 add_test(NAME lrc_tests COMMAND lrc_tests)
@@ -84,7 +86,7 @@ add_test(NAME lrc_tests COMMAND lrc_tests)
 # Run: build_gui/tests/lrc_qt_tests.exe
 # ---------------------------------------------------------------------------
 if(LRC_ENABLE_QT)
-  find_package(Qt6 REQUIRED COMPONENTS Test Widgets Concurrent)
+  find_package(Qt6 REQUIRED COMPONENTS Test Widgets Concurrent Network)
 
   set(CMAKE_AUTOMOC ON)
 
@@ -96,6 +98,7 @@ if(LRC_ENABLE_QT)
     ../src/ui/HistogramWidget.cpp
     ../src/ui/ImportWorker.cpp
     ../src/ui/ImageViewport.cpp
+    ../src/ui/Logging.cpp
     ../src/ui/PanelSection.cpp
     ../src/ui/PreviewWorker.cpp
     ../src/ui/ExportDialog.cpp
@@ -106,10 +109,13 @@ if(LRC_ENABLE_QT)
     # the soft-proofing dialog (视图 → 软打样…) and the duplicate-results dialog
     # (照片 → 查找重复项…).
     ../src/ui/SoftProofingDialog.cpp
-    ../src/ui/DuplicateResultsDialog.cpp)
+    ../src/ui/DuplicateResultsDialog.cpp
+    # ModelManager: manifest parsing, SHA256 gating and the ZIP extractor
+    # are driven directly (no network) by ModelManagerTest.
+    ../src/app/ModelManager.cpp)
   target_link_libraries(lrc_qt_tests PRIVATE
     lrc_catalog lrc_engine
-    Qt6::Test Qt6::Widgets Qt6::Concurrent)
+    Qt6::Test Qt6::Widgets Qt6::Concurrent Qt6::Network Qt6::CorePrivate)
   target_include_directories(lrc_qt_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_compile_definitions(lrc_qt_tests PRIVATE
     LRC_ENABLE_QT=1

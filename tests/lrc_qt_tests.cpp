@@ -12,6 +12,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QLoggingCategory>
 #include <QColor>
 #include <QColorSpace>
 #include <QDebug>
@@ -37,6 +38,7 @@
 #include <vector>
 
 #include "app/Constants.h"
+#include "app/ModelManager.h"
 #include "catalog/CatalogDatabase.h"
 #include "catalog/ThumbnailCache.h"
 #include "engine/ColorManager.h"
@@ -1263,10 +1265,184 @@ void FullResHotPathTest::repeatRequestHitsEarlyReturnWithoutRender() {
 }
 
 // ---------------------------------------------------------------------------
+// ModelManager: integrity and archive hardening.
+//
+// These drive the real ModelManager (QtNetwork-backed) without touching the
+// network: both cases below must be decided before any socket is opened, which
+// is precisely the property the review asked for.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Minimal CRC-32 (IEEE) for the hand-built ZIP fixtures below.
+uint32_t testCrc32(const std::string& data) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (const char ch : data) {
+        crc ^= static_cast<uint8_t>(ch);
+        for (int k = 0; k < 8; ++k)
+            crc = (crc >> 1) ^ (0xEDB88320u & (~(crc & 1u) + 1u));
+    }
+    return ~crc;
+}
+
+void put16(std::vector<uint8_t>& v, uint16_t x) {
+    v.push_back(static_cast<uint8_t>(x & 0xFF));
+    v.push_back(static_cast<uint8_t>(x >> 8));
+}
+void put32(std::vector<uint8_t>& v, uint32_t x) {
+    for (int i = 0; i < 4; ++i)
+        v.push_back(static_cast<uint8_t>((x >> (8 * i)) & 0xFF));
+}
+
+// Builds a one-entry ZIP with the *stored* (uncompressed) method, which is all
+// the extractor under test has to understand for the fixture to be valid.
+std::vector<uint8_t> makeStoredZip(const std::string& name,
+                                   const std::string& payload) {
+    const uint32_t crc = testCrc32(payload);
+    const uint32_t size = static_cast<uint32_t>(payload.size());
+    std::vector<uint8_t> out;
+    // Local file header.
+    put32(out, 0x04034b50u);
+    put16(out, 20);  // version needed
+    put16(out, 0);   // flags
+    put16(out, 0);   // method: stored
+    put16(out, 0);
+    put16(out, 0);   // time / date
+    put32(out, crc);
+    put32(out, size);
+    put32(out, size);
+    put16(out, static_cast<uint16_t>(name.size()));
+    put16(out, 0);
+    out.insert(out.end(), name.begin(), name.end());
+    const uint32_t dataOffset = static_cast<uint32_t>(out.size());
+    out.insert(out.end(), payload.begin(), payload.end());
+    // Central directory.
+    const uint32_t cdOffset = static_cast<uint32_t>(out.size());
+    put32(out, 0x02014b50u);
+    put16(out, 20);  // version made by
+    put16(out, 20);  // version needed
+    put16(out, 0);
+    put16(out, 0);   // method: stored
+    put16(out, 0);
+    put16(out, 0);   // time / date
+    put32(out, crc);
+    put32(out, size);
+    put32(out, size);
+    put16(out, static_cast<uint16_t>(name.size()));
+    put16(out, 0);   // extra length
+    put16(out, 0);   // comment length
+    put16(out, 0);   // disk number start
+    put16(out, 0);   // internal attributes
+    put32(out, 0);   // external attributes
+    put32(out, 0);   // local header offset
+    out.insert(out.end(), name.begin(), name.end());
+    const uint32_t cdSize = static_cast<uint32_t>(out.size()) - cdOffset;
+    // End of central directory.
+    put32(out, 0x06054b50u);
+    put16(out, 0);
+    put16(out, 0);
+    put16(out, 1);   // entries on this disk
+    put16(out, 1);   // total entries
+    put32(out, cdSize);
+    put32(out, cdOffset);
+    put16(out, 0);   // comment length
+    return out;
+}
+
+bool writeFileBytes(const std::filesystem::path& path,
+                    const std::vector<uint8_t>& bytes) {
+    std::ofstream os(path, std::ios::binary | std::ios::trunc);
+    if (!os)
+        return false;
+    os.write(reinterpret_cast<const char*>(bytes.data()),
+             static_cast<std::streamsize>(bytes.size()));
+    return os.good();
+}
+
+}  // namespace
+
+class ModelManagerTest : public QObject {
+    Q_OBJECT
+private slots:
+    void placeholderShaIsRefusedWithoutOpeningASocket();
+    void zipEntryEscapingTheTargetIsRejected();
+};
+
+void ModelManagerTest::placeholderShaIsRefusedWithoutOpeningASocket() {
+    const auto dir = std::filesystem::temp_directory_path() / "lrc_mm_placeholder";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    const auto manifest = dir / "manifest.json";
+    {
+        std::ofstream os(manifest, std::ios::binary | std::ios::trunc);
+        os << "{\"models\":[{\"id\":\"lrc-placeholder\",\"name\":\"P\","
+              "\"filename\":\"lrc-test-placeholder-unused.onnx\","
+              "\"download_url\":\"https://invalid.example/lrc-test-placeholder-unused.onnx\","
+              "\"sha256\":\"TBD_ON_FIRST_UPLOAD\",\"size_bytes\":0}]}";
+    }
+    ModelManager mm(manifest);
+    const auto entry = mm.findModel("lrc-placeholder");
+    QVERIFY(entry.has_value());
+    QVERIFY2(!mm.isModelReady(*entry),
+             "the fixture model must not exist in the real cache");
+
+    bool called = false;
+    bool finished = false;
+    std::string error;
+    mm.downloadModel(*entry, [&](uint64_t, uint64_t, bool done,
+                                 const std::string& msg) {
+        called = true;
+        finished = done;
+        error = msg;
+    });
+    QVERIFY2(called && finished,
+             "an entry without a usable SHA256 must fail synchronously");
+    QVERIFY2(error.find("no verifiable SHA256") != std::string::npos,
+             error.c_str());
+}
+
+void ModelManagerTest::zipEntryEscapingTheTargetIsRejected() {
+    const auto dir = std::filesystem::temp_directory_path() / "lrc_mm_zip";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    // A benign archive must still extract (positive control): the entry is
+    // stored, so the extractor only has to copy it.
+    const auto goodZip = dir / "good.zip";
+    QVERIFY(writeFileBytes(goodZip, makeStoredZip("nested/model.onnx", "fake-onnx")));
+    const auto goodTarget = dir / "out-good" / "model.onnx";
+    std::string goodErr;
+    QVERIFY2(ModelManager::extractOnnxFromZip(goodZip, goodTarget, goodErr),
+             goodErr.c_str());
+    QVERIFY(std::filesystem::exists(goodTarget));
+
+    // A traversal entry must be refused before anything is written. Note that
+    // QZipReader::fileInfoList() reports this entry as "escaped.onnx" (Qt
+    // strips the leading ../) while extractAll() writes with the raw name, so
+    // the check has to come from the archive's own directory records.
+    const auto badZip = dir / "bad.zip";
+    QVERIFY(writeFileBytes(badZip, makeStoredZip("../escaped.onnx", "fake-onnx")));
+    const auto badTarget = dir / "out-bad" / "model.onnx";
+    std::string badErr;
+    QVERIFY2(!ModelManager::extractOnnxFromZip(badZip, badTarget, badErr),
+             "a ZIP entry with .. must be rejected");
+    QVERIFY2(badErr.find("escapes") != std::string::npos, badErr.c_str());
+    QVERIFY(!std::filesystem::exists(dir / "escaped.onnx"));
+    QVERIFY(!std::filesystem::exists(dir / "out-bad" / "escaped.onnx"));
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+
+    // Same default as the application (see src/main.cpp): the [PERF1A]
+    // diagnostics are opt-in, so a plain test run stays quiet. A
+    // user-provided QT_LOGGING_RULES still wins.
+    if (qEnvironmentVariableIsEmpty("QT_LOGGING_RULES"))
+        QLoggingCategory::setFilterRules(QStringLiteral("lrc.perf.info=false"));
 
     // Register the metatype used across the queued worker connection.
     qRegisterMetaType<QList<ExportItem>>("QList<ExportItem>");
@@ -1325,6 +1501,10 @@ int main(int argc, char** argv) {
     }
     {
         FullResHotPathTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        ModelManagerTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
 

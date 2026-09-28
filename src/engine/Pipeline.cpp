@@ -917,7 +917,8 @@ inline void mixVignetteKey(size_t& h, double v) {
 // centre follows a future crop automatically with no extra state. roundness
 // interpolates the distance between a rectangle (-100) and a circle (+100);
 // midpoint places the falloff centre and feather sets its width. Only the
-// Highlight-Priority shape is implemented (styles 0/1 are TODO).
+// Highlight-Priority shape is implemented; the other two styles are not offered
+// by the UI (see DevelopPanel) and fall back to this same geometric weight.
 float postCropVignetteWeight(const Adjustments& a, int w, int h, int x, int y) {
     const float cx = (w > 1) ? static_cast<float>(w - 1) * 0.5f : 0.0f;
     const float cy = (h > 1) ? static_cast<float>(h - 1) * 0.5f : 0.0f;
@@ -1957,8 +1958,8 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
         const auto weightField = Pipeline::postCropVignetteWeightField(a, w, h);
         // Highlight Priority (style 2) protects bright pixels from the
         // darkening (an optical-vignette behaviour). Paint Overlay / Colour
-        // Priority are TODO; they share the geometric weight but
-        // skip the highlight interaction.
+        // Priority are not implemented and are not offered by the UI; if a
+        // legacy edit carries them they fall back to this behaviour.
         const bool highlightPriority = (a.vignetteStyle == 2);
         const float hiNorm = std::clamp(
             static_cast<float>(a.vignetteHighlights) / 100.0f, 0.0f, 1.0f);

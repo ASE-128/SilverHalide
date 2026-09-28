@@ -449,6 +449,15 @@ endif()
 add_library(lrc_catalog STATIC ${LRC_CATALOG_SOURCES})
 target_include_directories(lrc_catalog PUBLIC src)
 target_link_libraries(lrc_catalog PUBLIC lrc_engine)
+# /utf-8 is declared here as well, next to lrc_engine's PUBLIC flag (CMakeLists
+# around line 443), so the catalog layer cannot silently fall back to the ANSI
+# source charset if that visibility ever changes -- the failure mode is a
+# mangled non-ASCII comment swallowing the following line under MSVC.
+if(MSVC)
+  target_compile_options(lrc_catalog PRIVATE /utf-8 /W3)
+else()
+  target_compile_options(lrc_catalog PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif()
 
 # ---------------------------------------------------------------------------
 # Application (GUI)
@@ -475,6 +484,7 @@ if(LRC_ENABLE_QT)
     src/ui/ColorWheelWidget.cpp
     src/ui/ImportWorker.cpp
     src/ui/PreviewWorker.cpp
+    src/ui/Logging.cpp
     src/ui/SnapshotDialog.cpp
     src/ui/PresetDialog.cpp
     src/ui/EditHistoryDialog.cpp

@@ -7,12 +7,17 @@
 #include "utils/Json.h"
 #include "utils/Sha256.h"   // lrc::sha256File (extracted for headless testing)
 
+#include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <sstream>
+#include <system_error>
 #include <unordered_map>
+#include <vector>
 
 #if LRC_ENABLE_QT
 #  include <QCoreApplication>
@@ -208,6 +213,122 @@ static std::optional<ModelManifestEntry> parseEntry(const lrc::json::Value& v) {
 // Impl + download plumbing
 // ---------------------------------------------------------------------------
 #if LRC_ENABLE_QT
+namespace {
+
+uint16_t zipLe16(const uint8_t* p) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(p[0]) |
+                                 (static_cast<uint16_t>(p[1]) << 8));
+}
+uint32_t zipLe32(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
+}
+
+/**
+ * @brief True when a raw archive entry name cannot escape the extraction root.
+ *
+ * Rejects absolute paths, drive-qualified names and any ".." component, both
+ * separator styles. An empty name (a directory marker) is allowed.
+ */
+bool zipEntryNameIsSafe(const std::string& rawName) {
+    if (rawName.empty())
+        return true;
+    if (rawName[0] == '/' || rawName[0] == '\\')
+        return false;
+    if (rawName.size() >= 2 && rawName[1] == ':')
+        return false;
+    std::string name = rawName;
+    for (char& c : name)
+        if (c == '\\')
+            c = '/';
+    size_t start = 0;
+    for (;;) {
+        const size_t end = name.find('/', start);
+        const std::string part =
+            name.substr(start, end == std::string::npos ? std::string::npos
+                                                      : end - start);
+        if (part == "..")
+            return false;
+        if (end == std::string::npos)
+            return true;
+        start = end + 1;
+    }
+}
+
+/**
+ * @brief Raw entry names of a ZIP, read from its central directory.
+ *
+ * These names are read here rather than from QZipReader::fileInfoList(), because
+ * Qt strips a leading "../" from the listed path while QZipReader::extractAll()
+ * writes files using the raw stored name -- a file list that looks clean can
+ * therefore still place files outside the extraction directory. Parsing the
+ * central directory ourselves does not rely on that (non-contractual) sanitising
+ * and needs no decompression.
+ *
+ * @return The names, or nullopt when the archive cannot be parsed (the caller
+ *         must then treat the archive as untrusted and refuse it).
+ */
+std::optional<std::vector<std::string>> rawZipEntryNames(
+    const std::filesystem::path& zipPath) {
+    std::ifstream in(zipPath, std::ios::binary);
+    if (!in)
+        return std::nullopt;
+    in.seekg(0, std::ios::end);
+    const std::streamoff size = in.tellg();
+    if (size < 22)
+        return std::nullopt;
+    // End Of Central Directory: a trailing comment can be up to 64 KiB, so scan
+    // backwards from the end of the file.
+    const std::streamoff scanFrom = std::max<std::streamoff>(0, size - 65557);
+    in.seekg(scanFrom, std::ios::beg);
+    std::vector<uint8_t> tail(static_cast<size_t>(size - scanFrom));
+    in.read(reinterpret_cast<char*>(tail.data()),
+            static_cast<std::streamsize>(tail.size()));
+    if (!in)
+        return std::nullopt;
+    std::streamoff eocd = -1;
+    for (std::streamoff i = static_cast<std::streamoff>(tail.size()) - 22;
+         i >= 0; --i) {
+        if (zipLe32(&tail[static_cast<size_t>(i)]) == 0x06054b50u) {
+            eocd = i;
+            break;
+        }
+    }
+    if (eocd < 0)
+        return std::nullopt;
+    const uint16_t entryCount = zipLe16(&tail[static_cast<size_t>(eocd) + 10]);
+    const uint32_t cdOffset = zipLe32(&tail[static_cast<size_t>(eocd) + 16]);
+
+    in.clear();
+    in.seekg(static_cast<std::streamoff>(cdOffset), std::ios::beg);
+    std::vector<std::string> names;
+    names.reserve(entryCount);
+    for (uint16_t i = 0; i < entryCount; ++i) {
+        uint8_t header[46];
+        in.read(reinterpret_cast<char*>(header), sizeof(header));
+        if (!in || zipLe32(header) != 0x02014b50u)
+            return std::nullopt;
+        const uint16_t nameLen = zipLe16(&header[28]);
+        const uint16_t extraLen = zipLe16(&header[30]);
+        const uint16_t commentLen = zipLe16(&header[32]);
+        std::string name(nameLen, '\0');
+        if (nameLen) {
+            in.read(name.data(), nameLen);
+            if (!in)
+                return std::nullopt;
+        }
+        names.push_back(std::move(name));
+        in.seekg(static_cast<std::streamoff>(extraLen) + commentLen,
+                 std::ios::cur);
+        if (!in)
+            return std::nullopt;
+    }
+    return names;
+}
+
+}  // namespace
+
 // Extract an ONNX model from a ZIP archive into `targetPath`'s directory.
 // Used when a manifest entry's download_url points to a .zip archive rather
 // than a bare .onnx file (currently: qualcomm/NAFNet-DeNoise, which ships as
@@ -243,25 +364,64 @@ bool ModelManager::extractOnnxFromZip(const std::filesystem::path& zipPath,
         return false;
     }
 
-    // Pre-check: is there at least one .onnx entry? Lets us fail fast
-    // before creating a temp dir and extracting gigabytes.
+    // Fail closed on any traversal entry read from the archive's own
+    // directory records, before a single byte is extracted. Extracting
+    // nothing is always preferable to extracting outside the cache.
+    const auto rawNames = rawZipEntryNames(zipPath);
+    if (!rawNames) {
+        errMsg = "cannot read the ZIP central directory: " + zipPath.string();
+        reader.close();
+        return false;
+    }
+    for (const auto& rawName : *rawNames) {
+        if (!zipEntryNameIsSafe(rawName)) {
+            errMsg = "ZIP entry escapes the extraction directory: " + rawName;
+            reader.close();
+            return false;
+        }
+    }
+
+    // Pre-check every entry before extracting anything:
+    //   * at least one .onnx must exist (fail fast before extracting GBs),
+    //   * no entry may escape the extraction directory (absolute path,
+    //     drive letter, ".." component). QZipReader::extractAll is a private
+    //     Qt API whose path sanitising is not part of any contract, so this
+    //     check does not rely on it.
     bool hasOnnx = false;
     for (const auto& fi : reader.fileInfoList()) {
-        if (!fi.isFile) continue;
-        if (fi.filePath.endsWith(QStringLiteral(".onnx"), Qt::CaseInsensitive)) {
-            hasOnnx = true;
-            break;
+        const QString name = fi.filePath;
+        const bool absolute =
+            name.startsWith(QLatin1Char('/')) ||
+            name.startsWith(QLatin1Char('\\')) ||
+            (name.size() >= 2 && name.at(1) == QLatin1Char(':'));
+        const bool traverses =
+            name.split(QLatin1Char('/'), Qt::SkipEmptyParts).contains(
+                QStringLiteral("..")) ||
+            name.split(QLatin1Char('\\'), Qt::SkipEmptyParts).contains(
+                QStringLiteral(".."));
+        if (absolute || traverses) {
+            errMsg = "ZIP entry escapes the extraction directory: " +
+                     name.toStdString();
+            reader.close();
+            return false;
         }
+        if (!fi.isFile) continue;
+        if (name.endsWith(QStringLiteral(".onnx"), Qt::CaseInsensitive))
+            hasOnnx = true;
     }
     if (!hasOnnx) {
         errMsg = "ZIP contains no .onnx entry: " + zipPath.string();
+        reader.close();
         return false;
     }
 
     const auto outDir = targetPath.parent_path();
     // Temp extraction dir next to the final target. Using a leaf suffix that
-    // is unique per-target avoids colliding with concurrent downloads.
-    const auto tmpDir = outDir / (targetPath.filename().string() + ".extract");
+    // is unique per-target avoids colliding with concurrent downloads; the
+    // leaf is appended as a wide string so the path is never re-encoded
+    // through the ANSI code page.
+    const auto tmpDir =
+        outDir / (targetPath.filename().wstring() + L".extract");
     std::error_code ec;
     std::filesystem::remove_all(tmpDir, ec);  // stale from a previous run
     std::filesystem::create_directories(tmpDir, ec);
@@ -742,28 +902,39 @@ uint64_t ModelManager::downloadModel(const ModelManifestEntry& entry,
 void ModelManager::cancelDownload(uint64_t handle) {
 #if LRC_ENABLE_QT
     QNetworkReply* reply = nullptr;
-#endif
+    std::shared_ptr<Impl::QtDownload> entry;
     {
         std::lock_guard<std::mutex> lk(impl_->mu);
-#if LRC_ENABLE_QT
         auto it = impl_->qtDownloads.find(handle);
-        if (it != impl_->qtDownloads.end() && it->second->reply) {
-            reply = it->second->reply;
-            it->second->reply = nullptr;
+        if (it != impl_->qtDownloads.end()) {
+            // Unregister now so no further byte is appended, but keep the entry
+            // alive until its reply object is gone (see below): the entry owns
+            // the QNetworkAccessManager the reply came from.
+            entry = it->second;
+            impl_->qtDownloads.erase(it);
         }
-#endif
         impl_->callbacks.erase(handle);
     }
+    if (entry)
+        reply = entry->reply;
+    if (entry)
+        entry->reply = nullptr;
     // Tear the reply down with the registry lock released, and disconnect
-    // before aborting: the finished handler now takes impl_->mu itself, and
+    // before aborting: the finished handler takes impl_->mu itself, and
     // abort() may deliver finished() synchronously -- aborting while holding
     // the lock would deadlock (and would also report a spurious outcome).
-#if LRC_ENABLE_QT
     if (reply) {
         QObject::disconnect(reply, nullptr, nullptr, nullptr);
+        QObject::connect(reply, &QObject::destroyed, reply,
+                         [entry] { (void)entry; });
         reply->abort();
         reply->deleteLater();
     }
+    // When no reply is pending (cancelled between the primary and the mirror
+    // attempt) `entry` is simply released here.
+#else
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    impl_->callbacks.erase(handle);
 #endif
 }
 

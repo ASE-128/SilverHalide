@@ -438,8 +438,13 @@ private:
     QThread* previewThread_ = nullptr;
     qint64 previewGeneration_ = 0;
     // Catalog backup/optimize run on a std::thread so the UI thread never blocks
-    // on sqlite3_backup_step / VACUUM. Joined in the destructor before catalog_
-    // is destroyed; dbOpRunning_ guards against re-entrant operations.
+    // on sqlite3_backup_step / VACUUM.
+    //
+    // The thread is never detached: the completion slot joins it (the work is
+    // already done by then, so the join cannot block for more than the few
+    // instructions left in the worker), and joinDbOpThread() reclaims the handle
+    // in the destructor, in closeEvent and before a new operation starts.
+    // dbOpRunning_ guards against re-entrant operations.
     std::thread dbOpThread_;
     bool dbOpRunning_ = false;
 

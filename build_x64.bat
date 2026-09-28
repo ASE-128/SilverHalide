@@ -2,6 +2,10 @@
 setlocal
 set "ROOT=%~dp0"
 cd /d "%ROOT%"
+REM %~dp0 ends with a backslash; appending "." keeps that backslash from
+REM escaping the closing quote of -S "..." (which made CMake treat every
+REM following argument as part of the source directory).
+set "SRC=%ROOT%."
 
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 (
@@ -13,7 +17,7 @@ set "QT_PREFIX=%ROOT%qt\6.8.3\msvc2022_64"
 set "ORT_ROOT=%ROOT%onnxruntime\onnxruntime-win-x64-1.23.2"
 
 echo === Configuring x64 ===
-cmake -S "%ROOT%" -B "%ROOT%build_gui" -G Ninja -DCMAKE_PREFIX_PATH="%QT_PREFIX%" -DCMAKE_BUILD_TYPE=Release -DLRC_ENABLE_AI=ON -DONNXRUNTIME_ROOT="%ORT_ROOT%"
+cmake -S "%SRC%" -B "%ROOT%build_gui" -G Ninja -DCMAKE_PREFIX_PATH="%QT_PREFIX%" -DCMAKE_BUILD_TYPE=Release -DLRC_ENABLE_AI=ON -DONNXRUNTIME_ROOT="%ORT_ROOT%"
 if errorlevel 1 (
   echo [ERROR] CMake configure failed
   exit /b 1

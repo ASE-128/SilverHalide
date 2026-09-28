@@ -149,7 +149,7 @@ inline bool directMLAvailable() {
 // Appends the DirectML EP to `opts` when it is present. The append symbol is
 // resolved at runtime (GetProcAddress) rather than linked directly, so this TU
 // builds and runs against ONNX Runtime builds that ship without a DirectML
-// component (e.g. the vcpkg CPU-only port) as long as DirectML is absent —
+// component (e.g. the vcpkg CPU-only port) as long as DirectML is absent --
 // when it is present we call through the resolved function.
 inline void appendDirectMLIfAvailable(Ort::SessionOptions& opts) {
     if (!directMLAvailable())

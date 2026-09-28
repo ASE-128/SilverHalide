@@ -1,0 +1,60 @@
+# Repository line-ending and binary-content policy. Explicit beats implicit:
+# without this file the behaviour depends entirely on each contributor's
+# core.autocrlf, so the same file can be committed as CRLF on one machine and
+# LF on another and show up as a whole-file diff.
+#
+# Text files are normalized to LF *in the repository*; the working tree keeps
+# the platform default chosen by core.autocrlf / core.eol (CRLF on Windows).
+* text=auto
+
+# Binary assets: never line-ending normalized, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.tif binary
+*.tiff binary
+*.raw binary
+*.arw binary
+*.sr2 binary
+*.srf binary
+*.sr3 binary
+*.cr2 binary
+*.cr3 binary
+*.nef binary
+*.dng binary
+*.raf binary
+*.orf binary
+*.rw2 binary
+*.pef binary
+*.srw binary
+*.mrw binary
+
+# Model and archive payloads.
+*.onnx binary
+*.data binary
+*.zip binary
+*.7z binary
+*.tar binary
+*.gz binary
+
+# Build / toolchain artifacts.
+*.exe binary
+*.dll binary
+*.lib binary
+*.pdb binary
+*.obj binary
+*.ilk binary
+*.exp binary
+
+# Color management and catalog payloads.
+*.icc binary
+*.icm binary
+*.dcp binary
+*.shcat binary
+*.lrcat binary
+*.sqlite binary
+*.db binary

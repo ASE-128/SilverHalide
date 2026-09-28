@@ -562,16 +562,17 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     makeEffectsRow("羽化", 0.0, 100.0, 0, &lrc::Adjustments::vignetteFeather);
     makeEffectsRow("高光", 0.0, 100.0, 0, &lrc::Adjustments::vignetteHighlights);
 
-    // Style dropdown: only Highlight Priority is implemented; Paint Overlay /
-    // Color Priority are shown but disabled with a TODO hint.
+    // Style dropdown: only Highlight Priority is implemented. The other two
+    // styles keep their slots (the persisted value is the combo index) but are
+    // disabled and labelled as unsupported rather than advertised with a TODO.
     auto* styleRow = new QHBoxLayout;
     styleRow->setContentsMargins(0, 0, 0, 0);
     styleRow->setSpacing(6);
     auto* styleLabel = new QLabel(tr("样式"), this);
     styleLabel->setFixedWidth(46);
     vignetteStyleCombo_ = new QComboBox(this);
-    vignetteStyleCombo_->addItem(tr("Paint Overlay (TODO)"));
-    vignetteStyleCombo_->addItem(tr("Color Priority (TODO)"));
+    vignetteStyleCombo_->addItem(tr("Paint Overlay（暂不支持）"));
+    vignetteStyleCombo_->addItem(tr("Color Priority（暂不支持）"));
     vignetteStyleCombo_->addItem(tr("Highlight Priority"));
     vignetteStyleCombo_->setCurrentIndex(2);
     if (auto* model = qobject_cast<QStandardItemModel*>(

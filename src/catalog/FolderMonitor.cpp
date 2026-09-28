@@ -231,7 +231,7 @@ bool FolderMonitor::startEventDriven() {
 
     // Issue the first ReadDirectoryChangesW *synchronously* so the watch is
     // already pending when startEventDriven() returns. Otherwise a file change
-    // landing between thread spawn and the first watch would be missed —
+    // landing between thread spawn and the first watch would be missed:
     // ReadDirectoryChangesW only reports changes that occur after the read is
     // queued. The watcher thread then takes over the wait/re-arm loop.
     DWORD bytes = 0;

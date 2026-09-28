@@ -1,3 +1,5 @@
+#include <QLoggingCategory>
+
 #include "app/Application.h"
 #include "catalog/LibraryManager.h"
 #include "ui/MainWindow.h"
@@ -5,6 +7,11 @@
 #include "ui/PreviewWorker.h"
 
 int main(int argc, char** argv) {
+    // The [PERF1A] 1:1 diagnostics are opt-in: QLoggingCategory categories are
+    // enabled by default, so install an explicit "off" rule. A user-provided
+    // QT_LOGGING_RULES is left untouched (an explicit rule always wins).
+    if (qEnvironmentVariableIsEmpty("QT_LOGGING_RULES"))
+        QLoggingCategory::setFilterRules(QStringLiteral("lrc.perf.info=false"));
     qRegisterMetaType<lrc::ImageBufferPtr>();
     qRegisterMetaType<lrc::Adjustments>();
     // P1-4: watermark options cross the queued export connections.

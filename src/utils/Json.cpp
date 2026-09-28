@@ -1,6 +1,7 @@
 #include "utils/Json.h"
 
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
@@ -42,9 +43,13 @@ void Value::push_back(Value v) {
 }
 
 Value& Value::operator[](size_t index) {
-    static Value kNull;
-    if (type_ != Type::Array || index >= arr_.size())
-        return kNull;
+    // Grows on demand, exactly like the object overload inserts a key. Growing
+    // (instead of returning a shared mutable Null) removes the global mutable
+    // state that made an out-of-range write a data race across threads.
+    if (type_ != Type::Array)
+        *this = Value(Value::Type::Array);
+    if (index >= arr_.size())
+        arr_.resize(index + 1);
     return arr_[index];
 }
 
@@ -318,6 +323,16 @@ private:
                 ++pos_;
         }
         const std::string token = text_.substr(start, pos_ - start);
+        // Integer tokens are kept exact (long long); anything with a fraction or
+        // an exponent goes through strtod. A token too large for long long falls
+        // back to double instead of losing the value.
+        if (token.find_first_of(".eE") == std::string::npos) {
+            errno = 0;
+            char* intEnd = nullptr;
+            const long long iv = std::strtoll(token.c_str(), &intEnd, 10);
+            if (intEnd && *intEnd == '\0' && errno != ERANGE)
+                return Value(iv);
+        }
         char* end = nullptr;
         const double v = std::strtod(token.c_str(), &end);
         if (!end || *end != '\0')
@@ -372,7 +387,10 @@ void writeValue(std::ostream& os, const Value& v, bool pretty, int indent) {
         os << (v.asBool() ? "true" : "false");
         break;
     case Value::Type::Number: {
-        os << std::setprecision(17) << v.asNumber();
+        if (v.isInt())
+            os << v.asInt64();
+        else
+            os << std::setprecision(17) << v.asNumber();
         break;
     }
     case Value::Type::String:

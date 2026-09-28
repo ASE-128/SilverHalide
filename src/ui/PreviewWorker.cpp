@@ -7,6 +7,8 @@
 #include <QDebug>
 #include <QElapsedTimer>
 
+#include "ui/Logging.h"
+
 #include "app/Constants.h"
 #include "catalog/CatalogDatabase.h"
 #include "catalog/ThumbnailCache.h"
@@ -506,7 +508,7 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
         fullResAdjHash_ == frameKey) {
         // hit=earlyReturn renders nothing, so it is excluded from the B-1 anchor
         // verdict: a ~0 ms "second entry" is not evidence of a fast hot path.
-        qInfo("[PERF1A] hit=earlyReturn id=%lld gen=%lld",
+        qCInfo(lrcPerf, "[PERF1A] hit=earlyReturn id=%lld gen=%lld",
               static_cast<long long>(imageId),
               static_cast<long long>(generation));
         return;
@@ -530,7 +532,7 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
                 fullResCoarseHash_ = 0; // image switch invalidates coarse dedup.
                 // [PERF1A] fastest hot path: catalog-embedded 1:1 preview, no
                 // raw decode and no pipeline render.
-                qInfo("[PERF1A] hit=embedded id=%lld gen=%lld worker=%lldms",
+                qCInfo(lrcPerf, "[PERF1A] hit=embedded id=%lld gen=%lld worker=%lldms",
                       static_cast<long long>(imageId),
                       static_cast<long long>(generation),
                       static_cast<long long>(perfStampMs() - perfT1));
@@ -549,7 +551,7 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
                 fullResCoarseHash_ = 0; // image switch invalidates coarse dedup.
                 // [PERF1A] legacy disk-cache hot path: JPEG read + decode, still
                 // no raw decode.
-                qInfo("[PERF1A] hit=disk id=%lld gen=%lld worker=%lldms",
+                qCInfo(lrcPerf, "[PERF1A] hit=disk id=%lld gen=%lld worker=%lldms",
                       static_cast<long long>(imageId),
                       static_cast<long long>(generation),
                       static_cast<long long>(perfStampMs() - perfT1));
@@ -574,7 +576,7 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
             fullResCoarseHash_ = 0; // image/adjust change invalidates dedup.
             fullResAdjHash_ = frameKey;
             // [PERF1A] in-memory full-res U8 reuse (non-default adjustments).
-            qInfo("[PERF1A] hit=memU8 id=%lld gen=%lld worker=%lldms",
+            qCInfo(lrcPerf, "[PERF1A] hit=memU8 id=%lld gen=%lld worker=%lldms",
                   static_cast<long long>(imageId),
                   static_cast<long long>(generation),
                   static_cast<long long>(perfStampMs() - perfT1));
@@ -593,12 +595,12 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
             return;  // abort after the full-res decode.
     }
     // [PERF1A] cold-leg attribution: the decode is usually the dominant cost.
-    qInfo("[PERF1A] decode=done id=%lld worker=%lldms",
+    qCInfo(lrcPerf, "[PERF1A] decode=done id=%lld worker=%lldms",
           static_cast<long long>(imageId),
           static_cast<long long>(perfStampMs() - perfT1));
     auto f32 = pipeline_.renderLinearFull(imageId, *fullResLinear_, adjustments);
     // [PERF1A] engine render leg (linear -> full-size), excludes display convert.
-    qInfo("[PERF1A] render=done id=%lld worker=%lldms",
+    qCInfo(lrcPerf, "[PERF1A] render=done id=%lld worker=%lldms",
           static_cast<long long>(imageId),
           static_cast<long long>(perfStampMs() - perfT1));
     if (abort_.load())
@@ -634,7 +636,7 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
     if (generation == fullResLatest_)
         emit fullResReady(imageId, u8);
     // [PERF1A] worker-side completion; the frame is queued to the UI thread here.
-    qInfo("[PERF1A] worker=done id=%lld gen=%lld worker=%lldms",
+    qCInfo(lrcPerf, "[PERF1A] worker=done id=%lld gen=%lld worker=%lldms",
           static_cast<long long>(imageId),
           static_cast<long long>(generation),
           static_cast<long long>(perfStampMs() - perfT1));

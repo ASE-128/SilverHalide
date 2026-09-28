@@ -17,7 +17,12 @@
 //      averaged. The blend streams in row bands to bound peak memory.
 //
 // The output is a linear ProPhoto RGB F32 buffer (the same working space as
-// the inputs). Rotation/scale estimation and multi-band blending are TODO.
+// the inputs).
+//
+// @note Alignment is translation-only: rotation/scale estimation is not
+//       implemented, so sources must already share an orientation. Blending is
+//       feather-weighted rather than multi-band, which can show seams on
+//       exposures with strong gradients.
 
 #include <memory>
 #include <vector>

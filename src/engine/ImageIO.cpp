@@ -165,8 +165,8 @@ std::vector<JpegSegment> parseJpegSegments(const std::vector<uint8_t>& jpg,
 // than one marker are split into *balanced* chunks for the same reason, so that
 // no chunk lands near that threshold.
 //
-// @return The marker bytes, or empty when the profile cannot be represented —
-//         more than 255 chunks, the maximum the 1-byte count field can express.
+// @return The marker bytes, or empty when the profile cannot be represented,
+//         i.e. more than 255 chunks (the 1-byte count field's maximum).
 //         The caller then embeds no profile rather than a corrupt one.
 //
 // @note Reassembly is caller-side; each chunk carries its own 1-based sequence
