@@ -56,6 +56,7 @@
 #include "ui/PreviewWorker.h"
 #include "ui/SnapshotDialog.h"
 #include "ui/SoftProofingDialog.h"
+#include "ui/WheelGuard.h"
 
 // ui/ImportWorker.h pulls in ui/MetaTypes.h, the single declaration point for
 // every cross-thread engine type (ImportMode, SoftProofParams, ...), so this file
@@ -1433,6 +1434,65 @@ void ModelManagerTest::zipEntryEscapingTheTargetIsRejected() {
 }
 
 // ---------------------------------------------------------------------------
+// Mouse wheel must not rewrite values it merely passes over
+//
+// The develop panel is ~3000px tall, so reaching a section means scrolling past
+// dozens of sliders and spin boxes. The guarded widgets ignore wheel events
+// (rather than consuming them) so Qt forwards the event to the enclosing scroll
+// area: the panel scrolls, the adjustment stays put.
+// ---------------------------------------------------------------------------
+class WheelGuardTest : public QObject {
+    Q_OBJECT
+private slots:
+    void sliderIgnoresWheel();
+    void spinBoxesIgnoreWheel();
+};
+
+namespace {
+
+// A single notch of wheel movement. Ignored by the guarded widgets; without the
+// guard QAbstractSlider/QAbstractSpinBox would step the value.
+QWheelEvent makeWheelNotch() {
+    const QPointF pos(5, 5);
+    return QWheelEvent(pos, pos, QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+                       Qt::NoModifier, Qt::NoScrollPhase, false);
+}
+
+} // namespace
+
+void WheelGuardTest::sliderIgnoresWheel() {
+    NoWheelSlider slider;
+    slider.setRange(0, 100);
+    slider.setValue(50);
+
+    QWheelEvent wheel = makeWheelNotch();
+    QApplication::sendEvent(&slider, &wheel);
+
+    QCOMPARE(slider.value(), 50);
+    // Ignored, not consumed: an accepted event would stop the scroll area from
+    // ever seeing it, trading one annoyance for another.
+    QVERIFY(!wheel.isAccepted());
+}
+
+void WheelGuardTest::spinBoxesIgnoreWheel() {
+    NoWheelDoubleSpinBox doubleSpin;
+    doubleSpin.setRange(0.0, 100.0);
+    doubleSpin.setValue(42.0);
+    QWheelEvent doubleWheel = makeWheelNotch();
+    QApplication::sendEvent(&doubleSpin, &doubleWheel);
+    QCOMPARE(doubleSpin.value(), 42.0);
+    QVERIFY(!doubleWheel.isAccepted());
+
+    NoWheelSpinBox intSpin;
+    intSpin.setRange(0, 100);
+    intSpin.setValue(7);
+    QWheelEvent intWheel = makeWheelNotch();
+    QApplication::sendEvent(&intSpin, &intWheel);
+    QCOMPARE(intSpin.value(), 7);
+    QVERIFY(!intWheel.isAccepted());
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1505,6 +1565,10 @@ int main(int argc, char** argv) {
     }
     {
         ModelManagerTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        WheelGuardTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
 

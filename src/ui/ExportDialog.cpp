@@ -5,6 +5,7 @@
 
 #include "catalog/CatalogDatabase.h"
 #include "engine/ExportEngine.h"
+#include "ui/WheelGuard.h"
 #include "utils/RenameTemplate.h"
 
 #include <QCheckBox>
@@ -111,7 +112,7 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
     auto* qualityLayout = new QHBoxLayout(qualityRow_);
     qualityLayout->setContentsMargins(0, 0, 0, 0);
     qualityLayout->setSpacing(6);
-    qualitySlider_ = new QSlider(Qt::Horizontal, qualityRow_);
+    qualitySlider_ = new NoWheelSlider(Qt::Horizontal, qualityRow_);
     qualitySlider_->setRange(0, 100);
     qualitySlider_->setValue(92);
     qualityLayout->addWidget(qualitySlider_, 1);
@@ -156,12 +157,12 @@ ExportDialog::ExportDialog(const QString& suggestedPath, QWidget* parent)
     wmPosition_->setCurrentIndex(4);
     wmLayout->addRow(tr("位置:"), wmPosition_);
 
-    wmOpacity_ = new QSlider(Qt::Horizontal, wmRow);
+    wmOpacity_ = new NoWheelSlider(Qt::Horizontal, wmRow);
     wmOpacity_->setRange(1, 100);
     wmOpacity_->setValue(100);
     wmLayout->addRow(tr("不透明度:"), wmOpacity_);
 
-    wmScale_ = new QSlider(Qt::Horizontal, wmRow);
+    wmScale_ = new NoWheelSlider(Qt::Horizontal, wmRow);
     wmScale_->setRange(1, 50);
     wmScale_->setValue(20);  // ~0.20 of the output's long edge
     wmLayout->addRow(tr("大小:"), wmScale_);

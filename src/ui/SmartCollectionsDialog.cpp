@@ -19,6 +19,7 @@
 #include <utility>
 
 #include "utils/Json.h"
+#include "ui/WheelGuard.h"
 
 // This translation unit is not inside `namespace lrc` (the dialog class lives at
 // global scope), so alias the JSON namespace for the shorthand used below.
@@ -107,7 +108,7 @@ public:
         lineEdit_ = new QLineEdit(this);
         lineEdit_->setPlaceholderText(tr("值"));
         enumCombo_ = new QComboBox(this);
-        spinBox_ = new QSpinBox(this);
+        spinBox_ = new NoWheelSpinBox(this);
         spinBox_->setRange(0, 5);
         valueStack_->addWidget(lineEdit_);
         valueStack_->addWidget(enumCombo_);

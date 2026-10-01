@@ -34,6 +34,7 @@
 #include "ui/CurveEditor.h"
 #include "ui/HistogramWidget.h"
 #include "ui/PanelSection.h"
+#include "ui/WheelGuard.h"
 
 namespace {
 
@@ -50,14 +51,6 @@ void repolish(QWidget* widget) {
     widget->style()->polish(widget);
     widget->update();
 }
-
-class NoWheelSlider final : public QSlider {
-public:
-    using QSlider::QSlider;
-
-protected:
-    void wheelEvent(QWheelEvent* event) override { event->ignore(); }
-};
 
 const char* kColorNames[8] = {
     QT_TR_NOOP("红"), QT_TR_NOOP("橙"), QT_TR_NOOP("黄"), QT_TR_NOOP("绿"),
@@ -118,7 +111,7 @@ QWidget* makeSliderRow(QWidget* parent, QSlider*& slider,
     auto* lbl = new QLabel(parent->tr(label), parent);
     lbl->setFixedWidth(46);
     slider = new NoWheelSlider(Qt::Horizontal, parent);
-    spin = new QDoubleSpinBox(parent);
+    spin = new NoWheelDoubleSpinBox(parent);
     spin->setDecimals(decimals);
     spin->setSingleStep(std::pow(10.0, -static_cast<double>(decimals)));
     spin->setRange(min, max);
@@ -335,7 +328,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     aiDenoiseStrengthSlider_ = new NoWheelSlider(Qt::Horizontal, this);
     aiDenoiseStrengthSlider_->setRange(0, 100);
     aiDenoiseStrengthSlider_->setValue(0);
-    aiDenoiseStrengthSpin_ = new QDoubleSpinBox(this);
+    aiDenoiseStrengthSpin_ = new NoWheelDoubleSpinBox(this);
     aiDenoiseStrengthSpin_->setRange(0.0, 100.0);
     aiDenoiseStrengthSpin_->setDecimals(0);
     aiDenoiseStrengthSpin_->setSingleStep(1.0);
@@ -1199,7 +1192,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     spotRadiusSlider_ = new NoWheelSlider(Qt::Horizontal, this);
     spotRadiusSlider_->setRange(0, 10000);
     spotRadiusSlider_->setSingleStep(100);
-    spotRadiusSpin_ = new QDoubleSpinBox(this);
+    spotRadiusSpin_ = new NoWheelDoubleSpinBox(this);
     spotRadiusSpin_->setDecimals(3);
     spotRadiusSpin_->setRange(kSpotRadiusMin, kSpotRadiusMax);
     spotRadiusSpin_->setSingleStep(0.001);

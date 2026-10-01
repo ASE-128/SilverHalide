@@ -1,5 +1,6 @@
 #include "ui/PanoramaDialog.h"
 #include "ui/PanoramaWorker.h"
+#include "ui/WheelGuard.h"
 
 #include <algorithm>
 #include <cmath>
@@ -139,7 +140,7 @@ void PanoramaDialog::buildUi() {
 
     auto* focalRow = new QHBoxLayout;
     focalRow->addWidget(new QLabel(tr("焦距估算 (mm):"), this));
-    focalSpin_ = new QDoubleSpinBox(this);
+    focalSpin_ = new NoWheelDoubleSpinBox(this);
     focalSpin_->setRange(8.0, 200.0);
     focalSpin_->setDecimals(1);
     focalSpin_->setSingleStep(1.0);
