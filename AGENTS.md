@@ -47,6 +47,9 @@
   - `qt/6.8.3/msvc2022_64/bin/windeployqt.exe --release --no-translations --compiler-runtime build_gui/SilverHalide.exe`
   - `build_gui/SilverHalide.exe`
 
+- GUI 操作验收：
+  - 改动 UI 行为后，除编译和无头测试外，必须用 kimi-cu 计算机操作 MCP 真实跑一遍受影响的交互，步骤见第 9 节
+
 ## 4. 架构边界
 
 - 引擎与目录层必须保持 Qt-free：
@@ -164,3 +167,40 @@
 - 说明是否与当前代码状态一致，不出现“文档说法与实现不符”
 
 以上约定来自当前 CMake 入口和实际代码状态；更多实现与历史背景请参阅 [README.md](README.md) 与 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## 9. GUI 操作验收（kimi-cu 计算机操作）
+
+本机可用的 kimi-cu MCP 能驱动真实鼠标与键盘。凡是改动 UI 行为，除编译和无头测试外，都应按下列步骤做一次真实的端到端操作，并把观察到的结果（截图、状态栏文案、落盘文件）作为验收证据，不要只报告“编译通过”。
+
+### 9.1 常规步骤
+
+1. 构建：导入 x64 MSVC 环境后执行 `cmake --build build_gui -j`；若无改动会输出 `ninja: no work to do`，此时既有 `build_gui/SilverHalide.exe` 即对应当前源码。首次布局需要先跑 windeployqt 补齐 Qt 运行库，判据是 `build_gui/platforms/qwindows.dll` 存在。
+2. 启动：用 `launch_app` 指向 `build_gui/SilverHalide.exe`；窗口出现可能要等一下，先 `list_apps` 确认进程与窗口。
+3. 定位窗口：不要用 `app` 参数按名字查找。本工作区的终端标题里含 SilverHalide-src，会误命中 WindowsTerminal；正确做法是 `list_apps` 取到 pid，再用 `pid` 或 `window_id` 观察。
+4. 采样：`get_app_state` 用 `mode: image` 做视觉判断、用 `mode: ax` 取控件索引，两者都会返回 snapshot_id，后续动作必须带上它。界面内容变化后要重新采样，不要复用旧索引或旧坐标。
+5. 操作：优先使用 AX 索引（`click` / `set_value` / `perform_secondary_action`）；弹窗、自绘控件和无障碍树缺失时才退化为坐标点击。
+6. 复验：每个关键动作后重新 `get_app_state` 确认状态真的变了。状态栏文案、图片计数、列表项变化是最省事的判据。
+
+### 9.2 标准测试图（本机现成）
+
+- `G:\2026\2026-01-02\_1090017.RW2`：RAW，全分辨率 4608×3464，横幅
+- `G:\2026\2026-06-26\_DSC0112.ARW`：RAW，竖幅
+- `G:\2026\2026-03-09\_DSC0015-HDR.jpg`：JPEG，带文字水印
+
+这组图覆盖了 RAW 与 JPEG 两条解码路径，以及横竖两种版式。
+
+### 9.3 建议的例行路径
+
+按“导入 → 逐张渲染 → 自动 → 导出 → 元数据”跑一遍，覆盖读、显示、编辑、写盘四条链路：
+
+1. 文件 → 导入文件…，选“复制到目录”，在原生文件框的文件名栏一次填入三个带引号的完整路径，确认对话框显示“已选择 3 个文件”后导入。
+2. 依次点选缩略图，确认状态栏给出文件名与像素尺寸、直方图有数据；RAW 与 JPEG 都要看，避免只验证一种解码器。
+3. 在 RAW 上点“自动”，检查滑杆数值变化与状态栏的“编辑已保存”。
+4. 文件 → 导出…，JPEG + 原始尺寸，落盘后用 System.Drawing 或等价手段确认导出尺寸是原始分辨率而不是预览尺寸。
+5. 切到“元数据”页写入一个关键字并回车，确认左侧“关键字列表”同步出现计数。
+
+### 9.4 注意事项
+
+- 目录库默认落在 `%LOCALAPPDATA%\Temp\shcat_layout_test\Library\...`，导出也默认写回该库目录。验收完成后可整体删除这个临时库，不要把测试产物写进仓库。
+- 原生文件对话框的输入必须确认 `type_text` 返回的 `verification.status` 为 `matched` 才算成功；`typed` 的字符数不能作为依据，详见全局笔记的 kimi-cu 小节。
+- 收尾可以调用 `turn_ended` 隐藏覆盖层并清除 Esc 取消状态。
