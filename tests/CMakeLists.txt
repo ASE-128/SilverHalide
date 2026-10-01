@@ -84,6 +84,10 @@ add_test(NAME lrc_tests COMMAND lrc_tests)
 # and drives them with QtTest: PreviewWorker::batchExport produces real JPEG /
 # PNG / TIFF16 files on disk, and the dialogs are constructed + interrogated.
 # Run: build_gui/tests/lrc_qt_tests.exe
+# The Qt runtime is deployed beside the executable by the POST_BUILD step at the
+# end of this block. Windows does not search the parent directory, so without it
+# this target starts with a missing-DLL dialog (Qt6Core.dll) unless the Qt bin
+# directory happens to be on PATH.
 # ---------------------------------------------------------------------------
 if(LRC_ENABLE_QT)
   find_package(Qt6 REQUIRED COMPONENTS Test Widgets Concurrent Network)
@@ -126,4 +130,26 @@ if(LRC_ENABLE_QT)
   endif()
 
   add_test(NAME lrc_qt_tests COMMAND lrc_qt_tests)
+
+  # Deploy the Qt runtime next to the test executable, mirroring the documented
+  # windeployqt step for SilverHalide.exe. Deriving the tool from the imported
+  # Qt package keeps this working across Qt installations.
+  if(WIN32 AND TARGET Qt6::qmake)
+    get_target_property(_lrc_qt_qmake Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(_lrc_qt_bin_dir "${_lrc_qt_qmake}" DIRECTORY)
+    find_program(LRC_WINDEPLOYQT_EXECUTABLE
+      NAMES windeployqt windeployqt.exe
+      HINTS "${_lrc_qt_bin_dir}")
+    if(LRC_WINDEPLOYQT_EXECUTABLE)
+      add_custom_command(TARGET lrc_qt_tests POST_BUILD
+        COMMAND "${LRC_WINDEPLOYQT_EXECUTABLE}"
+                --release --no-translations --compiler-runtime
+                "$<TARGET_FILE:lrc_qt_tests>"
+        COMMENT "Deploying Qt runtime beside lrc_qt_tests.exe"
+        VERBATIM)
+    else()
+      message(WARNING "windeployqt not found: lrc_qt_tests.exe will need the "
+                      "Qt bin directory on PATH")
+    endif()
+  endif()
 endif()
