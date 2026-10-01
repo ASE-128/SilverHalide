@@ -65,16 +65,18 @@
 --compiler-runtime`），工具位置从 `Qt6::qmake` 推导；找不到时降级为警告。实测部署出
 `platforms/qwindows.dll` 等，exe 可正常启动退出。
 
-### 6. 验证与已知缺口
+### 6. 验证
 
 - `cmake --build build_gui` 通过；headless `build_gui/tests/lrc_tests.exe` **480 用例 /
   878871 断言全绿**。
-- `lrc_qt_tests.exe` 退出码 0，且测试体确实执行（运行期间 `%TEMP%\lrc_qt_tests` 被创建）。
+- `build_gui/tests/lrc_qt_tests.exe` **13 类 / 52 项全绿，0 失败 0 跳过**，退出码 0。其中本次
+  改动涉及的 ExportDialog / ImportDialog / SnapshotDialog / DevelopPanel / CurveEditor /
+  SoftProofingDialog / DuplicateResultsDialog 均有覆盖。
 - kimi-cu 实机验收：画布纯色、折叠/分栏跨重启保持、原生保存对话框过滤器中文正确、空状态中文。
-- **缺口（待后续处理）**：该套件的 QTest 报告在本机取不到——stderr 正常但 stdout 无输出，
-  `-o -,txt` 亦为空；改用 `-o file,txt` 只能拿到最后一个测试类，因为 `main()` 把同一份
-  `argc/argv` 传给全部 13 次 `QTest::qExec`，每个类都会重新截断同一文件。因此本次没有取得
-  该套件的用例级计数，不能沿用旧的“12 类 / 48 用例全绿”说法。
+- **采集注意**：该套件的 QTest 报告写到控制台，用管道（`| ...`）或 `> file` 捕获会得到空内容，
+  必须直接运行才可见，例如 `build_gui/tests/lrc_qt_tests.exe 2>&1`。`-o file,txt` 也不适合产出
+  全量报告：`main()` 把同一份 `argc/argv` 传给全部 13 次 `QTest::qExec`，每个类都会重新截断
+  同一个文件，最终只剩最后一个类。
 
 ## 1a 热路径验收工具化：埋点 + worker 级计时 + 运行手册（2026-09-28，工作区未提交）
 
