@@ -13,6 +13,69 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## UI 优化四条 + GUI 测试运行库部署（2026-10-01）
+
+前置提交：`618be00`（UI 与样式，12 文件）、`6806bc2`（AGENTS.md 记录 kimi-cu 验收流程），
+两者已推送。本节的 GUI 测试部署与 STATUS 更新随本提交一并落地。
+
+### 1. 画布背景改为中性灰（`src/ui/ImageViewport.cpp`）
+
+`paintEvent` 与 `paintCompare` 此前对**整块画布**无条件调用 `paintCheckerboard()`，棋盘格原本
+只该用于标示透明区域。现在新增 `paintCanvasBackground()`：仅当图像带 alpha 通道时才画棋盘格，
+普通不透明照片铺 `#333333` 中性灰（比窗口底色 `#2b2b2b` 略亮，图像边界更清楚）。实测：竖幅图在
+“适合窗口”下左右留白为纯色，无格纹。
+
+### 2. 界面状态持久化（`src/ui/MainWindow.*`、`src/ui/DevelopPanel.cpp`）
+
+此前只有 `catalogPath` 一个键落盘，窗口几何、分栏比例、分区折叠状态每次启动都重置。现在：
+
+- 窗口几何与两条分栏状态写入 QSettings 的 `ui/windowGeometry`、`ui/mainSplitterState`、
+  `ui/centerSplitterState`；在 `closeEvent` 保存，析构函数再兜一次。
+- 11 个调色分区的折叠状态按**稳定 ASCII 键**存取（`develop/section/<key>`，如 `basic`、
+  `toneCurve`），与翻译无关；面板内容高约 3000px，此前全部分区默认展开。
+- 存的状态不可用时（Qt 会对 blob 做版本校验）回落到 `buildUi()` 里的默认尺寸，不产生空布局。
+
+实测往返：折叠“基本”并拖宽面板 → 关闭（注册表出现 `develop\section\basic=false` 与三条几何 blob）
+→ 重启后折叠状态与宽度均保持。
+
+### 3. 主题颜色收敛（`resources/styles/dark.qss`）
+
+新增 `QLabel[role="subTitle"|"subLabel"|"hint"]` 与 `[role="hint"][state="ok"]` 规则。`DevelopPanel`
+的内联 `setStyleSheet` 由 16 处降至 6 处；余下 6 处是**数据驱动色板**（显示取样/拾取到的颜色），
+背景属于用户数据而非主题，已加注释说明；`SoftProofingDialog` 的 2 处同理。动态状态用
+`setProperty` + `repolish()`（Qt 只在 polish 时解析属性选择器）。
+
+### 4. 中英混排与 i18n 收口
+
+- 数组型显示名统一为 `QT_TR_NOOP(...)` + 使用处 `tr(...)`：`CurveEditor` 音区名、
+  `FilmstripWidget` 色标名、`MainWindow` 旗标/色标名、`SmartCollectionsDialog` 三张表。
+- 未包裹的显示中文字面量清零（剩余 65 处是传给内部已调 `tr()` 的辅助函数的参数，属正确写法）。
+- **两个整块英文对话框改中文**：软打样、重复项检测结果（ICC 配置文件名、渲染意图等专有名词
+  按惯例保留/单独处理）。视口空状态、直方图提示同样改中文。
+- **顺带修复两个真 bug**：(a) `ExportDialog::browse()` 用 `QString::fromLatin1` 解码 UTF-8
+  中文字面量，保存对话框的“保存类型”显示乱码（已改为 `tr()`，实机确认显示 `图像 (*.jpg)`）；
+  (b) `CurveEditor::paintEvent` 里局部变量 `tr` 遮蔽 `QObject::tr()`，重命名为 `topRight`。
+
+### 5. GUI 测试缺 DLL（`tests/CMakeLists.txt`）
+
+`build_gui/tests/` 内**没有任何 Qt DLL**，且 Qt bin 不在 PATH；Windows 不搜索父目录，因此直接运行
+`lrc_qt_tests.exe` 会弹缺 DLL 对话框并停住，外观与“假卡死”一致（CPU 占用为 0）。
+
+修法：给 `lrc_qt_tests` 增加 POST_BUILD `windeployqt`（`--release --no-translations
+--compiler-runtime`），工具位置从 `Qt6::qmake` 推导；找不到时降级为警告。实测部署出
+`platforms/qwindows.dll` 等，exe 可正常启动退出。
+
+### 6. 验证与已知缺口
+
+- `cmake --build build_gui` 通过；headless `build_gui/tests/lrc_tests.exe` **480 用例 /
+  878871 断言全绿**。
+- `lrc_qt_tests.exe` 退出码 0，且测试体确实执行（运行期间 `%TEMP%\lrc_qt_tests` 被创建）。
+- kimi-cu 实机验收：画布纯色、折叠/分栏跨重启保持、原生保存对话框过滤器中文正确、空状态中文。
+- **缺口（待后续处理）**：该套件的 QTest 报告在本机取不到——stderr 正常但 stdout 无输出，
+  `-o -,txt` 亦为空；改用 `-o file,txt` 只能拿到最后一个测试类，因为 `main()` 把同一份
+  `argc/argv` 传给全部 13 次 `QTest::qExec`，每个类都会重新截断同一文件。因此本次没有取得
+  该套件的用例级计数，不能沿用旧的“12 类 / 48 用例全绿”说法。
+
 ## 1a 热路径验收工具化：埋点 + worker 级计时 + 运行手册（2026-09-28，工作区未提交）
 
 - **埋点**：`src/ui` 新增 `[PERF1A]` 计时日志。t0 = `MainWindow::requestFullRes()` 请求下发，t7 =
