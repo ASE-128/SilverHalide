@@ -292,7 +292,9 @@ QString ExportDialog::defaultFileName(const QString& baseName, int formatIndex) 
 
 void ExportDialog::browse() {
     const int idx = formatIndex();
-    const QString filter = QString::fromLatin1("图像 (*%1)").arg(
+    // tr(), not fromLatin1(): the literal is UTF-8 source text, and decoding it
+    // as Latin-1 turned the Chinese filter caption into mojibake in the dialog.
+    const QString filter = tr("图像 (*%1)").arg(
         QString::fromLatin1(kFormatSuffixes[idx]));
     const QString chosen = QFileDialog::getSaveFileName(
         this, tr("选择导出路径"), pathEdit_->text(), filter);

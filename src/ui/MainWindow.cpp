@@ -212,6 +212,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     buildUi();
     buildMenus();
     buildToolbar();
+    // After the panes exist and before the first show(), so the window never
+    // flashes the default layout before snapping to the stored one.
+    restoreUiState();
     startWorkers();
 
     // Watch the last imported folder for new files.
@@ -269,6 +272,9 @@ MainWindow::~MainWindow() {
     // Safety net -- a debounced edit that was never flushed (e.g. the window was
     // destroyed without a closeEvent) must still be persisted.
     flushPendingSave();
+    // Same reasoning as above: a window destroyed without a closeEvent (or one
+    // whose close was deferred past the worker join) still persists its layout.
+    saveUiState();
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -300,7 +306,42 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         event->ignore();
         return;
     }
+    saveUiState();
     QMainWindow::closeEvent(event);
+}
+
+// Window and pane layout live in the application-wide QSettings store (the same
+// one that already holds catalogPath), so the shape of the workspace follows the
+// user rather than a single catalog.
+void MainWindow::saveUiState() {
+    QSettings settings;
+    settings.setValue(QStringLiteral("ui/windowGeometry"), saveGeometry());
+    if (mainSplitter_ != nullptr)
+        settings.setValue(QStringLiteral("ui/mainSplitterState"),
+                          mainSplitter_->saveState());
+    if (centerSplitter_ != nullptr)
+        settings.setValue(QStringLiteral("ui/centerSplitterState"),
+                          centerSplitter_->saveState());
+}
+
+void MainWindow::restoreUiState() {
+    QSettings settings;
+    const QByteArray geometry =
+        settings.value(QStringLiteral("ui/windowGeometry")).toByteArray();
+    if (!geometry.isEmpty())
+        restoreGeometry(geometry);
+    // Qt versions these blobs, and restoreState() returns false when a stored
+    // state does not match the current widget set. In that case the sizes set in
+    // buildUi() stay in effect, so a stale blob degrades to the default layout
+    // instead of an empty one.
+    const QByteArray mainState =
+        settings.value(QStringLiteral("ui/mainSplitterState")).toByteArray();
+    if (mainSplitter_ != nullptr && !mainState.isEmpty())
+        mainSplitter_->restoreState(mainState);
+    const QByteArray centerState =
+        settings.value(QStringLiteral("ui/centerSplitterState")).toByteArray();
+    if (centerSplitter_ != nullptr && !centerState.isEmpty())
+        centerSplitter_->restoreState(centerState);
 }
 
 void MainWindow::buildUi() {
@@ -321,12 +362,12 @@ void MainWindow::buildUi() {
     filmstrip_->setFixedHeight(150);
     fl->addWidget(filmstrip_);
 
-    auto* center = new QSplitter(Qt::Vertical, this);
-    center->addWidget(viewport_);
-    center->addWidget(filmstripContainer);
-    center->setStretchFactor(0, 1);
-    center->setStretchFactor(1, 0);
-    center->setSizes({600, 160});
+    centerSplitter_ = new QSplitter(Qt::Vertical, this);
+    centerSplitter_->addWidget(viewport_);
+    centerSplitter_->addWidget(filmstripContainer);
+    centerSplitter_->setStretchFactor(0, 1);
+    centerSplitter_->setStretchFactor(1, 0);
+    centerSplitter_->setSizes({600, 160});
 
     // The develop panel scrolls when the window is short.
     developScroll_ = new QScrollArea(this);
@@ -334,15 +375,15 @@ void MainWindow::buildUi() {
     developScroll_->setFrameShape(QFrame::NoFrame);
     developScroll_->setWidget(developPanel_);
 
-    auto* splitter = new QSplitter(Qt::Horizontal, this);
-    splitter->addWidget(navigator_);
-    splitter->addWidget(center);
-    splitter->addWidget(developScroll_);
-    splitter->setStretchFactor(0, 0);
-    splitter->setStretchFactor(1, 1);
-    splitter->setStretchFactor(2, 0);
-    splitter->setSizes({180, 780, 320});
-    setCentralWidget(splitter);
+    mainSplitter_ = new QSplitter(Qt::Horizontal, this);
+    mainSplitter_->addWidget(navigator_);
+    mainSplitter_->addWidget(centerSplitter_);
+    mainSplitter_->addWidget(developScroll_);
+    mainSplitter_->setStretchFactor(0, 0);
+    mainSplitter_->setStretchFactor(1, 1);
+    mainSplitter_->setStretchFactor(2, 0);
+    mainSplitter_->setSizes({180, 780, 320});
+    setCentralWidget(mainSplitter_);
 
     connect(filmstrip_, &FilmstripWidget::selectionChanged, this,
             &MainWindow::onImageSelected);
@@ -2559,11 +2600,15 @@ void MainWindow::onColorSampled(int colorRangeIndex, const QColor& color) {
     viewport_->setSamplerBase(
         idx, currentAdjustments_.hsl[static_cast<size_t>(idx)].saturation,
         currentAdjustments_.hsl[static_cast<size_t>(idx)].luminance);
-    static const char* kNames[8] = {"红", "橙", "黄", "绿",
-                                    "青", "蓝", "紫", "品红"};
+    // QT_TR_NOOP keeps the names extractable for translation; tr() below does
+    // the actual lookup.
+    static const char* kNames[8] = {
+        QT_TR_NOOP("红"), QT_TR_NOOP("橙"), QT_TR_NOOP("黄"), QT_TR_NOOP("绿"),
+        QT_TR_NOOP("青"), QT_TR_NOOP("蓝"), QT_TR_NOOP("紫"),
+        QT_TR_NOOP("品红")};
     statusBar()->showMessage(
         tr("已选取颜色范围：%1  (#%2%3%4)")
-            .arg(QString::fromUtf8(kNames[idx]))
+            .arg(tr(kNames[idx]))
             .arg(color.red(), 2, 16, QLatin1Char('0'))
             .arg(color.green(), 2, 16, QLatin1Char('0'))
             .arg(color.blue(), 2, 16, QLatin1Char('0')),
@@ -3097,10 +3142,11 @@ void MainWindow::onSetFlag(int imageId, int flag) {
     }
     filmstrip_->setFlag(imageId, flag);
     const char* name = flag == lrc::ImageFlag::FlagPicked
-                           ? "已选取"
-                           : (flag == lrc::ImageFlag::FlagRejected ? "已拒绝"
-                                                                   : "无旗标");
-    statusBar()->showMessage(tr("旗标: %1").arg(QString::fromUtf8(name)), 2000);
+                           ? QT_TR_NOOP("已选取")
+                           : (flag == lrc::ImageFlag::FlagRejected
+                                  ? QT_TR_NOOP("已拒绝")
+                                  : QT_TR_NOOP("无旗标"));
+    statusBar()->showMessage(tr("旗标: %1").arg(tr(name)), 2000);
 }
 
 void MainWindow::onSetLabelColor(int imageId, int color) {
@@ -3117,11 +3163,13 @@ void MainWindow::onSetLabelColor(int imageId, int color) {
     filmstrip_->setLabelColor(imageId, color);
     // A label change only updates this tile; no full filmstrip rebuild. 0 = 清除
     // (clear), 1..7 = colour labels.
-    static const char* kLabelNames[8] = {"清除", "红", "橙", "黄",
-                                         "绿", "青", "蓝", "紫"};
+    static const char* kLabelNames[8] = {
+        QT_TR_NOOP("清除"), QT_TR_NOOP("红"), QT_TR_NOOP("橙"),
+        QT_TR_NOOP("黄"), QT_TR_NOOP("绿"), QT_TR_NOOP("青"),
+        QT_TR_NOOP("蓝"), QT_TR_NOOP("紫")};
     const int ci = (color >= 0 && color <= 7) ? color : 0;
     statusBar()->showMessage(
-        tr("色标: %1").arg(QString::fromUtf8(kLabelNames[ci])), 2000);
+        tr("色标: %1").arg(tr(kLabelNames[ci])), 2000);
 }
 
 void MainWindow::onCollectionToggle(int imageId, int collectionId, bool add) {

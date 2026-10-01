@@ -115,7 +115,11 @@ QColor labelColorRgb(int labelColor) {
     }
 }
 
-const char* kLabelColorNames[7] = {"红", "橙", "黄", "绿", "青", "蓝", "紫"};
+// Display names only; the literal is translated with tr() where the context menu
+// is built, so QT_TR_NOOP is what makes it visible to the translation tooling.
+const char* kLabelColorNames[7] = {
+    QT_TR_NOOP("红"), QT_TR_NOOP("橙"), QT_TR_NOOP("黄"), QT_TR_NOOP("绿"),
+    QT_TR_NOOP("青"), QT_TR_NOOP("蓝"), QT_TR_NOOP("紫")};
 
 // Draws the virtual-copy badge: a light "page" with a dog-eared
 // (folded-back) bottom-right corner, carrying the variant number. It sits at

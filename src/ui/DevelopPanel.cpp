@@ -16,9 +16,11 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStandardItemModel>
+#include <QStyle>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -34,6 +36,20 @@
 #include "ui/PanelSection.h"
 
 namespace {
+
+// Re-evaluates the stylesheet for `widget` after one of the dynamic properties
+// used by a QSS selector changed.
+//
+// Qt resolves property selectors such as QLabel[role="hint"][state="ok"] during
+// polish only, so a property written after the widget is already shown has no
+// visual effect until the widget is unpolished and polished again.
+void repolish(QWidget* widget) {
+    if (widget == nullptr)
+        return;
+    widget->style()->unpolish(widget);
+    widget->style()->polish(widget);
+    widget->update();
+}
 
 class NoWheelSlider final : public QSlider {
 public:
@@ -158,8 +174,22 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     histogram_->setFixedHeight(100);
     root->addWidget(histogram_);
 
-    auto addSection = [&](const QString& title) {
+    // Creates one collapsible develop section.
+    //
+    // The eleven sections stack into a panel roughly 3000px tall, so which ones
+    // are open is a real per-user preference rather than cosmetic state: it is
+    // read once here (before the panel is first shown) and written back on every
+    // toggle. `key` is a stable ASCII identifier, deliberately independent of the
+    // translated title, so rewording a heading never orphans the saved state.
+    auto addSection = [&](const QString& key, const QString& title) {
         auto* section = new PanelSection(title, this);
+        section->setObjectName(key);
+        const QString settingKey = QStringLiteral("develop/section/") + key;
+        section->setExpanded(QSettings().value(settingKey, true).toBool());
+        connect(section, &PanelSection::toggled, this,
+                [settingKey](bool expanded) {
+                    QSettings().setValue(settingKey, expanded);
+                });
         sections_.push_back(section);
         root->addWidget(section);
         return section;
@@ -177,7 +207,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             &DevelopPanel::setSectionMode);
 
     // Basic section.
-    PanelSection* basic = addSection(tr("基本"));
+    PanelSection* basic =
+        addSection(QStringLiteral("basic"), tr("基本"));
 
     auto* buttons = new QHBoxLayout;
     buttons->setSpacing(6);
@@ -220,7 +251,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     makeBasicRow("饱和度", -100.0, 100.0, 0, &lrc::Adjustments::saturation);
 
     // Tone curve section.
-    PanelSection* curve = addSection(tr("色调曲线"));
+    PanelSection* curve =
+        addSection(QStringLiteral("toneCurve"), tr("色调曲线"));
     curveEditor_ = new CurveEditor(this);
     curveEditor_->setFixedHeight(100);
     curve->addWidget(curveEditor_);
@@ -256,7 +288,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     });
 
     // Detail section.
-    PanelSection* detail = addSection(tr("细节"));
+    PanelSection* detail =
+        addSection(QStringLiteral("detail"), tr("细节"));
     auto makeDetailRow = [&](const char* label, double min, double max,
                              int decimals, double lrc::Adjustments::*field,
                              uint8_t vizMode = VizNone) {
@@ -278,7 +311,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
 
     // Noise-reduction section, parallel to the sharpening block above.
     auto* nrLabel = new QLabel(tr("降噪"), this);
-    nrLabel->setStyleSheet("color: #c8c8c8; font-weight: 500;");
+    nrLabel->setProperty("role", "subTitle");
     detail->addWidget(nrLabel);
     makeDetailRow("明亮度", 0.0, 100.0, 0, &lrc::Adjustments::luminance);
     makeDetailRow("细节",   0.0, 100.0, 0, &lrc::Adjustments::luminanceDetail);
@@ -292,7 +325,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     // When the model is missing, enabled has no effect (manual NR sliders
     // above remain authoritative) — so the control is always visible.
     auto* aiNrLabel = new QLabel(tr("AI 降噪"), this);
-    aiNrLabel->setStyleSheet("color: #c8c8c8; font-weight: 500;");
+    aiNrLabel->setProperty("role", "subTitle");
     detail->addWidget(aiNrLabel);
     auto* aiNrRow = new QHBoxLayout;
     aiNrRow->setSpacing(6);
@@ -354,7 +387,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             });
 
     // Colour section (HSL per channel).
-    PanelSection* color = addSection(tr("颜色"));
+    PanelSection* color =
+        addSection(QStringLiteral("color"), tr("颜色"));
 
     hslTabs_ = new QTabWidget(this);
     hslTabs_->setTabPosition(QTabWidget::North);
@@ -403,7 +437,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             [this](bool active) { emit colorSamplerRequested(active); });
 
     // Split toning section.
-    PanelSection* st = addSection(tr("色调分离"));
+    PanelSection* st =
+        addSection(QStringLiteral("splitToning"), tr("色调分离"));
     auto addSplitSliderRow = [&](const char* label,
                                  double lrc::SplitTone::*field, double min,
                                  double max, int decimals) {
@@ -416,12 +451,12 @@ DevelopPanel::DevelopPanel(QWidget* parent)
         addSplitToneRow(row);
     };
     auto* hlLabel = new QLabel(tr("高光"), this);
-    hlLabel->setStyleSheet("color: #c8c8c8; font-weight: 500;");
+    hlLabel->setProperty("role", "subTitle");
     st->addWidget(hlLabel);
     addSplitSliderRow("色相", &lrc::SplitTone::highlightHue, 0.0, 360.0, 1);
     addSplitSliderRow("饱和度", &lrc::SplitTone::highlightSaturation, 0.0, 100.0, 0);
     auto* shLabel = new QLabel(tr("阴影"), this);
-    shLabel->setStyleSheet("color: #888888; font-weight: 500;");
+    shLabel->setProperty("role", "subLabel");
     st->addWidget(shLabel);
     addSplitSliderRow("色相", &lrc::SplitTone::shadowHue, 0.0, 360.0, 1);
     addSplitSliderRow("饱和度", &lrc::SplitTone::shadowSaturation, 0.0, 100.0, 0);
@@ -474,7 +509,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             this, wheelChanged(false));
 
     // Point colour section.
-    PanelSection* pc = addSection(tr("点颜色"));
+    PanelSection* pc =
+        addSection(QStringLiteral("pointColor"), tr("点颜色"));
 
     // Target list + add / delete.
     auto* colorTargetComboRow = new QHBoxLayout;
@@ -506,6 +542,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     colorTargetSamplerBtn_->setProperty("secondary", true);
     colorTargetSwatch_ = new QLabel(this);
     colorTargetSwatch_->setFixedSize(34, 18);
+    // A swatch renders user data (the sampled or picked colour), so its
+    // background stays in C++ rather than dark.qss; only the frame is themed.
     colorTargetSwatch_->setStyleSheet(
         "background-color: #2a2a2a; border: 1px solid #666666; border-radius: 3px;");
     colorTargetToolRow->addWidget(colorTargetEnabledCheck_);
@@ -538,7 +576,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     addColorTargetSliderRow("强度", 0.0, 100.0, 0, &lrc::ColorTarget::amount);
 
     // Effects section.
-    PanelSection* effects = addSection(tr("效果"));
+    PanelSection* effects =
+        addSection(QStringLiteral("effects"), tr("效果"));
     auto makeEffectsRow = [&](const char* label, double min, double max,
                               int decimals, double lrc::Adjustments::*field) {
         Row row;
@@ -596,7 +635,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             });
 
     // Lens correction section.
-    PanelSection* lens = addSection(tr("镜头校正"));
+    PanelSection* lens =
+        addSection(QStringLiteral("lensCorrection"), tr("镜头校正"));
     auto makeLensRow = [&](const char* label, double min, double max,
                            int decimals, double lrc::Adjustments::*field) {
         Row row;
@@ -620,7 +660,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     dcpRow->addWidget(dcpProfileCombo_, 1);
     lens->addLayout(dcpRow);
     dcpProfileStatus_ = new QLabel(tr("未加载 DCP"), this);
-    dcpProfileStatus_->setStyleSheet("color: #8f8f8f;");
+    dcpProfileStatus_->setProperty("role", "hint");
     lens->addWidget(dcpProfileStatus_);
     connect(dcpProfileCombo_, &QComboBox::currentIndexChanged, this,
             [this](int index) {
@@ -637,7 +677,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     lensfunEnabledCheck_->setToolTip(
         tr("使用 Lensfun 镜头配置文件校正几何畸变"));
     lensfunStatus_ = new QLabel(tr("未检测镜头"), this);
-    lensfunStatus_->setStyleSheet("color: #8f8f8f;");
+    lensfunStatus_->setProperty("role", "hint");
+    lensfunStatus_->setProperty("state", "muted");
     lensfunRow->addWidget(lensfunEnabledCheck_);
     lensfunRow->addWidget(lensfunStatus_, 1);
     lens->addLayout(lensfunRow);
@@ -654,7 +695,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             });
 
     // Mask (local adjustments) section.
-    PanelSection* maskSec = addSection(tr("蒙版"));
+    PanelSection* maskSec =
+        addSection(QStringLiteral("mask"), tr("蒙版"));
 
         auto* detachMaskBtn = new QPushButton(tr("独立蒙版窗口"), this);
         detachMaskBtn->setProperty("secondary", true);
@@ -929,7 +971,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
 
     auto makeSubTitle = [this](const char* text) {
         auto* lbl = new QLabel(tr(text), this);
-        lbl->setStyleSheet("color: #c8c8c8; font-weight: 500;");
+        lbl->setProperty("role", "subTitle");
         return lbl;
     };
 
@@ -1123,7 +1165,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     addMaskSliderRow("去朦胧", -100.0, 100.0, 0, &lrc::Mask::dehaze);
 
     // Spot removal (healing brush) section.
-    PanelSection* spotSec = addSection(tr("污点去除"));
+    PanelSection* spotSec =
+        addSection(QStringLiteral("spotRemoval"), tr("污点去除"));
 
     // Heal / Clone mode buttons, exclusive (LR: 修复 / 仿制). Heal is default.
     auto* spotToolsRow = new QHBoxLayout;
@@ -1172,7 +1215,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     syncSpotRadius(0.01);  // default 0.01 (blocked, no signal emission).
 
     spotCountLabel_ = new QLabel(tr("污点数: 0"), this);
-    spotCountLabel_->setStyleSheet("color: #888888;");
+    spotCountLabel_->setProperty("role", "hint");
     spotSec->addWidget(spotCountLabel_);
 
     // Visualize spots: temporary invert + high-contrast preview toggle.
@@ -1184,7 +1227,8 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             &DevelopPanel::onSpotVisualizeToggled);
 
     // Metadata (IPTC) section.
-    PanelSection* metaSec = addSection(tr("元数据"));
+    PanelSection* metaSec =
+        addSection(QStringLiteral("metadata"), tr("元数据"));
 
     auto addFieldRow = [&](const char* label, QLineEdit*& edit) {
         auto* h = new QHBoxLayout;
@@ -2098,6 +2142,7 @@ void DevelopPanel::updateColorRangeSwatch(const QColor& color) {
     if (!colorRefSwatch_)
         return;
     if (!color.isValid()) {
+        // Swatch colour is data, not theme -- see the swatch note in dark.qss.
         colorRefSwatch_->setStyleSheet(
             "background-color: #2a2a2a; border: 1px solid #666666; "
             "border-radius: 3px;");
@@ -2452,6 +2497,7 @@ void DevelopPanel::updateSubColorSwatch(const QColor& color) {
     if (!subColorSwatch_)
         return;
     if (!color.isValid()) {
+        // Swatch colour is data, not theme -- see the swatch note in dark.qss.
         subColorSwatch_->setStyleSheet(
             "background-color: #2a2a2a; border: 1px solid #666666; "
             "border-radius: 3px;");
@@ -2686,6 +2732,7 @@ void DevelopPanel::syncColorTargetSection() {
 }
 
 void DevelopPanel::updateColorTargetSwatch(const QColor& color) {
+    // Swatch colour is data, not theme -- see the swatch note in dark.qss.
     colorTargetSwatch_->setStyleSheet(
         QString("background-color: %1; border: 1px solid #666666; "
                 "border-radius: 3px;")
@@ -2964,8 +3011,10 @@ void DevelopPanel::setLensfunProfile(const QString& status, bool available,
     lensfunEnabledCheck_->setEnabled(available);
     lensfunEnabledCheck_->setChecked(available && enabled);
     lensfunStatus_->setText(status);
-    lensfunStatus_->setStyleSheet(available ? "color: #2f7d32;"
-                                            : "color: #8f8f8f;");
+    // Green marks "a profile matched"; the muted gray is the same rule the
+    // initially-constructed label uses (see dark.qss, QLabel[role="hint"]).
+    lensfunStatus_->setProperty("state", available ? "ok" : "muted");
+    repolish(lensfunStatus_);
 }
 
 void DevelopPanel::setSamplerChecked(bool active) {

@@ -82,6 +82,27 @@ void paintCheckerboard(QPainter& painter, const QRect& rect) {
     }
 }
 
+// Neutral canvas gray painted behind opaque imagery (#333333).
+//
+// A patterned backdrop leaks into the viewer's judgement of exposure and white
+// balance, so the checkerboard is only meaningful when the photo itself has
+// transparency to disclose. Opaque photos get this flat tone instead, which
+// also separates the image area from the surrounding chrome (#2b2b2b).
+constexpr int kCanvasGray = 51;
+
+// Fills the photo canvas.
+//
+// @param showCheckerboard True when the displayed image has an alpha channel,
+//        where a flat fill would hide the fact that pixels are transparent.
+void paintCanvasBackground(QPainter& painter, const QRect& rect,
+                           bool showCheckerboard) {
+    if (showCheckerboard) {
+        paintCheckerboard(painter, rect);
+        return;
+    }
+    painter.fillRect(rect, QColor(kCanvasGray, kCanvasGray, kCanvasGray));
+}
+
 ImageViewport::ImageViewport(QWidget* parent) : QWidget(parent) {
     setAttribute(Qt::WA_OpaquePaintEvent);
     setMouseTracking(true);
@@ -781,11 +802,11 @@ void ImageViewport::paintEvent(QPaintEvent*) {
     if (image_.isNull()) {
         painter.setPen(Qt::gray);
         painter.drawText(rect(), Qt::AlignCenter,
-                         tr("No image selected. Import a folder to begin."));
+                         tr("未选择图片。请先导入文件夹。"));
         return;
     }
     const QRectF dst = targetRect();
-    paintCheckerboard(painter, rect());
+    paintCanvasBackground(painter, rect(), image_.hasAlphaChannel());
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     if (spotVisualize_) {
         // "Visualize spots": inverted + high-contrast copy so dust specks stand out.
@@ -1722,7 +1743,11 @@ void ImageViewport::drawDivider(QPainter& painter) {
 }
 
 void ImageViewport::paintCompare(QPainter& painter) {
-    paintCheckerboard(painter, rect());
+    // Both halves show the same photo, so the surround follows the same alpha
+    // rule as the single-image path.
+    paintCanvasBackground(painter, rect(),
+                          beforeImage_.hasAlphaChannel() ||
+                              afterImage().hasAlphaChannel());
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
     switch (compareMode_) {

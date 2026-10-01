@@ -25,7 +25,7 @@ DuplicateResultsDialog::DuplicateResultsDialog(
     groups_.reserve(static_cast<int>(groups.size()));
     for (const auto& g : groups) groups_.push_back(g);
 
-    setWindowTitle(tr("Duplicate Detection Results"));
+    setWindowTitle(tr("重复项检测结果"));
     resize(920, 600);
 
     auto* root = new QVBoxLayout(this);
@@ -44,7 +44,7 @@ DuplicateResultsDialog::DuplicateResultsDialog(
 
     membersTable_ = new QTableWidget(0, 4, this);
     membersTable_->setHorizontalHeaderLabels(
-        QStringList{tr("Photo ID"), tr("File Path"), tr("Similarity"), tr("Notes")});
+        QStringList{tr("照片 ID"), tr("文件路径"), tr("相似度"), tr("备注")});
     membersTable_->horizontalHeader()->setStretchLastSection(true);
     membersTable_->verticalHeader()->setVisible(false);
     membersTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -54,9 +54,9 @@ DuplicateResultsDialog::DuplicateResultsDialog(
     splitter->setStretchFactor(1, 3);
 
     auto* btnBox = new QHBoxLayout();
-    stackBtn_ = new QPushButton(tr("Stack Selected Group"), this);
-    focusBtn_ = new QPushButton(tr("Focus Members in Grid"), this);
-    closeBtn_ = new QPushButton(tr("Close"), this);
+    stackBtn_ = new QPushButton(tr("堆叠所选组"), this);
+    focusBtn_ = new QPushButton(tr("在网格中定位成员"), this);
+    closeBtn_ = new QPushButton(tr("关闭"), this);
     btnBox->addWidget(stackBtn_);
     btnBox->addWidget(focusBtn_);
     btnBox->addStretch(1);
@@ -73,8 +73,8 @@ DuplicateResultsDialog::DuplicateResultsDialog(
     for (const auto& g : groups_) totalImages += static_cast<int>(g.memberIds.size());
 
     groupSummaryLabel_->setText(
-        tr("<b>%1 duplicate group(s)</b> detected across %2 member images. "
-           "Select a group on the left, then Stack or Focus.").arg(groups_.size())
+        tr("共检测到 <b>%1 组重复项</b>，涉及 %2 张图片。"
+           "在左侧选择一组，然后执行堆叠或定位。").arg(groups_.size())
             .arg(totalImages));
 
     connect(groupList_, &QListWidget::currentRowChanged, this,
@@ -93,7 +93,7 @@ DuplicateResultsDialog::DuplicateResultsDialog(
 QString DuplicateResultsDialog::describeGroup(int index,
                                               const DuplicateGroup& g) const {
     // Scannable one-liner: group number, member count, mean cosine sim.
-    return tr("Group %1 — %2 members — mean sim %3")
+    return tr("组 %1 — %2 张 — 平均相似度 %3")
         .arg(index + 1)
         .arg(g.memberIds.size())
         .arg(static_cast<double>(g.meanSimilarity), 0, 'f', 3);
@@ -127,10 +127,10 @@ void DuplicateResultsDialog::rebuildTableForGroup(int groupIndex) {
             if (auto rec = db_->findImageById(photoId)) {
                 pathText = QString::fromStdString(rec->filePath);
             } else {
-                pathText = tr("(not found in catalog)");
+                pathText = tr("（目录库中未找到）");
             }
         } else {
-            pathText = tr("(no catalog connection)");
+            pathText = tr("（无目录库连接）");
         }
         auto* pathItem = new QTableWidgetItem(pathText);
 
@@ -142,7 +142,7 @@ void DuplicateResultsDialog::rebuildTableForGroup(int groupIndex) {
 
         QString notes;
         if (r == 0) {
-            notes += tr("(representative)");
+            notes += tr("（代表）");
         }
         auto* notesItem = new QTableWidgetItem(notes);
 
@@ -156,8 +156,8 @@ void DuplicateResultsDialog::rebuildTableForGroup(int groupIndex) {
 
 void DuplicateResultsDialog::onStackClicked() {
     if (!db_) {
-        QMessageBox::warning(this, tr("Stack"),
-                             tr("No catalog connection available."));
+        QMessageBox::warning(this, tr("堆叠"),
+                             tr("没有可用的目录库连接。"));
         return;
     }
     const QListWidgetItem* cur = groupList_->currentItem();
@@ -167,8 +167,8 @@ void DuplicateResultsDialog::onStackClicked() {
     if (!ok || idx < 0 || idx >= groups_.size()) return;
     const auto& g = groups_[idx];
     if (g.memberIds.size() < 2) {
-        QMessageBox::information(this, tr("Stack"),
-                                 tr("Need at least 2 images to form a stack."));
+        QMessageBox::information(this, tr("堆叠"),
+                                 tr("至少需要 2 张图片才能组成堆叠。"));
         return;
     }
     const int64_t stackId = db_->nextStackId();
@@ -181,13 +181,13 @@ void DuplicateResultsDialog::onStackClicked() {
     }
     if (!allOk) {
         const QString err = QString::fromStdString(db_->lastError());
-        QMessageBox::warning(this, tr("Stack"),
-                             tr("Could not commit stack IDs.  Catalog error: %1")
-                                 .arg(err.isEmpty() ? tr("unknown") : err));
+        QMessageBox::warning(this, tr("堆叠"),
+                             tr("无法提交堆叠 ID。目录库错误：%1")
+                                 .arg(err.isEmpty() ? tr("未知") : err));
         return;
     }
-    QMessageBox::information(this, tr("Stack"),
-                             tr("Stacked %1 images into stack #%2.")
+    QMessageBox::information(this, tr("堆叠"),
+                             tr("已将 %1 张图片堆叠为堆叠 #%2。")
                                  .arg(static_cast<int>(g.memberIds.size()))
                                  .arg(stackId));
     emit groupStacked(stackId);

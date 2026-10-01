@@ -16,8 +16,11 @@ constexpr double kMargin = 6.0;      // plot inset, px
 constexpr double kLabelStrip = 13.0;  // bottom strip holding the zone names, px
 
 // Zone display names, in shadows..highlights order (match Lightroom).
+// QT_TR_NOOP keeps the literals extractable for translation; the lookup itself
+// happens at the draw site, where a QObject translation context exists.
 const char* kZoneNames[lrc::zonecurve::kZoneCount] = {
-    "阴影", "暗色调", "亮色调", "高光"};
+    QT_TR_NOOP("阴影"), QT_TR_NOOP("暗色调"), QT_TR_NOOP("亮色调"),
+    QT_TR_NOOP("高光")};
 
 // The x-range a zone handle may be dragged over. Each zone is confined to its
 // own band (bounded by the midpoints of its neighbours), so the four handles
@@ -142,13 +145,15 @@ void CurveEditor::paintEvent(QPaintEvent*) {
     painter.setPen(QPen(QColor(200, 200, 220), 1.6));
     painter.drawPath(path);
 
-    // Fixed endpoints as small squares.
+    // Fixed endpoints as small squares. Named topRight rather than the obvious
+    // `tr`, which would shadow QObject::tr() for the rest of paintEvent.
     const QPointF bl = toWidget(points_.front());
-    const QPointF tr = toWidget(points_.back());
+    const QPointF topRight = toWidget(points_.back());
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(255, 255, 255, 180));
     painter.drawRect(QRectF(bl.x() - 2.5, bl.y() - 2.5, 5, 5));
-    painter.drawRect(QRectF(tr.x() - 2.5, tr.y() - 2.5, 5, 5));
+    painter.drawRect(
+        QRectF(topRight.x() - 2.5, topRight.y() - 2.5, 5, 5));
 
     // Zone handles; the one being dragged is highlighted.
     for (size_t i = 0; i < lrc::zonecurve::kZoneCount; ++i) {
@@ -167,7 +172,7 @@ void CurveEditor::paintEvent(QPaintEvent*) {
         const double x = area.left() + points_[i + 1].x * area.width();
         const QRectF lr(x - area.width() * 0.25, labelY - 7,
                         area.width() * 0.5, 14);
-        painter.drawText(lr, Qt::AlignCenter, QString::fromUtf8(kZoneNames[i]));
+        painter.drawText(lr, Qt::AlignCenter, tr(kZoneNames[i]));
     }
 }
 

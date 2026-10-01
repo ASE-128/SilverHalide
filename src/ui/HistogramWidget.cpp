@@ -28,7 +28,7 @@ std::array<HistogramWidget::ChannelBins, 3> histogramFromRgb8(
 
 HistogramWidget::HistogramWidget(QWidget* parent) : QWidget(parent) {
     setMinimumSize(120, 80);
-    setToolTip(tr("RGB histogram. Double-click to toggle log scale."));
+    setToolTip(tr("RGB 直方图。双击可切换对数刻度。"));
 }
 
 void HistogramWidget::setHistogram(

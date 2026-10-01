@@ -20,6 +20,7 @@
 #include <QImage>
 #include <QMainWindow>
 #include <QSet>
+#include <QSplitter>
 #include <QStringList>
 #include <QVector>
 
@@ -301,6 +302,13 @@ private:
     void buildMenus();
     void startWorkers();
     void stopWorkers();
+    // Write the window geometry and pane proportions to QSettings. Idempotent,
+    // and safe to call when the window has never been shown.
+    void saveUiState();
+    // Restore what saveUiState() wrote. Silently keeps the built-in defaults
+    // (resize(1320, 820) and the splitter sizes set in buildUi) on a first run
+    // or whenever a stored value is missing or unusable.
+    void restoreUiState();
     // Request abort + quit the event loops of every background worker.
     void requestWorkersStop();
     // True once no worker thread is still running.
@@ -454,6 +462,10 @@ private:
     DevelopPanel* developPanel_ = nullptr;
     FilmstripWidget* filmstrip_ = nullptr;
     QScrollArea* developScroll_ = nullptr;  // scroll area wrapping developPanel_
+    // Pane proportions are user state: both splitters are restored from
+    // QSettings on startup and written back on close.
+    QSplitter* mainSplitter_ = nullptr;    // navigator | center | develop panel
+    QSplitter* centerSplitter_ = nullptr;  // viewport | filmstrip
     QDialog* maskWindow_ = nullptr;
     // Modeless soft-proofing dialog (视图 → 软打样…). Parented to the window so
     // it is destroyed with it. Lives in namespace lrc, hence the qualification.

@@ -373,3 +373,27 @@ QRadioButton::indicator:disabled {
     border-color: #3a3a3a;
     background-color: #2b2b2b;
 }
+
+/* Develop panel sub-headings and status hints.
+
+   These roles used to be applied with per-widget setStyleSheet() calls from
+   C++, which let two near-duplicate grays (#888888 and #8f8f8f) drift apart and
+   buried the palette inside a 3000-line source file. Widgets now declare only
+   which role they play; the colors live here.
+
+   Data-driven swatches (measured or picker-chosen colors) stay in C++ on
+   purpose: their background is user data, not theme. */
+QLabel[role="subTitle"] {
+    color: #c8c8c8;
+    font-weight: 500;
+}
+QLabel[role="subLabel"] {
+    color: #888888;
+    font-weight: 500;
+}
+QLabel[role="hint"] {
+    color: #8f8f8f;
+}
+QLabel[role="hint"][state="ok"] {
+    color: #2f7d32;
+}

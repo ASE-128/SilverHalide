@@ -28,19 +28,21 @@ namespace {
 
 // Rule builder metadata. `id` is the JSON field name; `label` is the Chinese
 // display text shown in the field dropdown.
+// QT_TR_NOOP marks the display strings for extraction; the actual lookup uses
+// tr() at the point where the combo boxes are filled.
 const struct { const char* id; const char* label; } kRuleFields[] = {
-    {"rating", "评分"},
-    {"label", "色标"},
-    {"flag", "旗标"},
-    {"keyword", "关键字"},
-    {"date_taken", "拍摄日期"},
-    {"file_type", "文件类型"},
-    {"has_adjustments", "已调整"},
-    {"camera", "相机"},
-    {"lens", "镜头"},
-    {"folder_path", "文件夹"},
-    {"title", "标题"},
-    {"caption", "说明"},
+    {"rating", QT_TR_NOOP("评分")},
+    {"label", QT_TR_NOOP("色标")},
+    {"flag", QT_TR_NOOP("旗标")},
+    {"keyword", QT_TR_NOOP("关键字")},
+    {"date_taken", QT_TR_NOOP("拍摄日期")},
+    {"file_type", QT_TR_NOOP("文件类型")},
+    {"has_adjustments", QT_TR_NOOP("已调整")},
+    {"camera", QT_TR_NOOP("相机")},
+    {"lens", QT_TR_NOOP("镜头")},
+    {"folder_path", QT_TR_NOOP("文件夹")},
+    {"title", QT_TR_NOOP("标题")},
+    {"caption", QT_TR_NOOP("说明")},
 };
 
 const char* const kOpsNumeric[] = {"==", "!=", "<",     "<=",
@@ -51,16 +53,19 @@ const char* const kOpsString[] = {"==",     "!=", "contains", "starts_with",
 const char* const kOpsKeyword[] = {"==", "!=", "contains", "starts_with", "in"};
 const char* const kOpsBool[] = {"==", "!="};
 
-const char* const kFlagNames[] = {"已拒绝", "无旗标", "已选取"};
+const char* const kFlagNames[] = {QT_TR_NOOP("已拒绝"), QT_TR_NOOP("无旗标"),
+                                  QT_TR_NOOP("已选取")};
 const int kFlagValues[] = {-1, 0, 1};
 
-const char* const kLabelNames[] = {"无", "红", "橙", "黄", "绿", "青", "蓝", "紫"};
+const char* const kLabelNames[] = {
+    QT_TR_NOOP("无"), QT_TR_NOOP("红"), QT_TR_NOOP("橙"), QT_TR_NOOP("黄"),
+    QT_TR_NOOP("绿"), QT_TR_NOOP("青"), QT_TR_NOOP("蓝"), QT_TR_NOOP("紫")};
 const char* const kLabelValues[] = {"none",   "red",   "orange", "yellow",
                                     "green",  "cyan",  "blue",   "purple"};
 
 const char* const kFileTypes[] = {"dng", "arw",  "cr2", "nef", "rw2",
                                   "jpg", "jpeg", "png", "tif", "tiff"};
-const char* const kBoolNames[] = {"是", "否"};
+const char* const kBoolNames[] = {QT_TR_NOOP("是"), QT_TR_NOOP("否")};
 
 bool isNumericField(const QString& field) {
     return field == QStringLiteral("rating") ||
@@ -91,7 +96,7 @@ public:
 
         fieldCombo_ = new QComboBox(this);
         for (const auto& f : kRuleFields)
-            fieldCombo_->addItem(QString::fromUtf8(f.label),
+            fieldCombo_->addItem(tr(f.label),
                                  QString::fromLatin1(f.id));
         layout->addWidget(fieldCombo_, 1);
 
@@ -100,7 +105,7 @@ public:
 
         valueStack_ = new QStackedWidget(this);
         lineEdit_ = new QLineEdit(this);
-        lineEdit_->setPlaceholderText(QStringLiteral("值"));
+        lineEdit_->setPlaceholderText(tr("值"));
         enumCombo_ = new QComboBox(this);
         spinBox_ = new QSpinBox(this);
         spinBox_->setRange(0, 5);
@@ -111,7 +116,7 @@ public:
 
         removeButton_ = new QPushButton(QStringLiteral("✕"), this);
         removeButton_->setFixedWidth(26);
-        removeButton_->setToolTip(QStringLiteral("删除该规则"));
+        removeButton_->setToolTip(tr("删除该规则"));
         layout->addWidget(removeButton_);
 
         connect(fieldCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -201,9 +206,9 @@ private:
             enumKind_ = 4;
             if (enumCombo_->itemData(0).toString() != QStringLiteral("bool")) {
                 enumCombo_->clear();
-                enumCombo_->addItem(QString::fromUtf8(kBoolNames[0]),
+                enumCombo_->addItem(tr(kBoolNames[0]),
                                     QStringLiteral("bool"));
-                enumCombo_->addItem(QString::fromUtf8(kBoolNames[1]),
+                enumCombo_->addItem(tr(kBoolNames[1]),
                                     QStringLiteral("bool"));
                 enumCombo_->setEditable(false);
             }
@@ -215,7 +220,7 @@ private:
             if (enumCombo_->itemData(0).toString() != QStringLiteral("flag")) {
                 enumCombo_->clear();
                 for (int i = 0; i < 3; ++i)
-                    enumCombo_->addItem(QString::fromUtf8(kFlagNames[i]),
+                    enumCombo_->addItem(tr(kFlagNames[i]),
                                         QStringLiteral("flag"));
                 enumCombo_->setEditable(false);
             }
@@ -225,7 +230,7 @@ private:
             if (enumCombo_->itemData(0).toString() != QStringLiteral("label")) {
                 enumCombo_->clear();
                 for (int i = 0; i < 8; ++i)
-                    enumCombo_->addItem(QString::fromUtf8(kLabelNames[i]),
+                    enumCombo_->addItem(tr(kLabelNames[i]),
                                         QStringLiteral("label"));
                 enumCombo_->setEditable(false);
             }

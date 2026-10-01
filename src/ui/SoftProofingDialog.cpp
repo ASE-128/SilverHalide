@@ -25,10 +25,10 @@ namespace {
 
 QString intentLabel(RenderingIntent intent) {
     switch (intent) {
-        case RenderingIntent::Perceptual:          return SoftProofingDialog::tr("Perceptual");
-        case RenderingIntent::RelativeColorimetric:return SoftProofingDialog::tr("Relative Colorimetric");
-        case RenderingIntent::AbsoluteColorimetric:return SoftProofingDialog::tr("Absolute Colorimetric");
-        case RenderingIntent::Saturation:          return SoftProofingDialog::tr("Saturation");
+        case RenderingIntent::Perceptual:          return SoftProofingDialog::tr("感知");
+        case RenderingIntent::RelativeColorimetric:return SoftProofingDialog::tr("相对比色");
+        case RenderingIntent::AbsoluteColorimetric:return SoftProofingDialog::tr("绝对比色");
+        case RenderingIntent::Saturation:          return SoftProofingDialog::tr("饱和度");
     }
     return {};
 }
@@ -37,43 +37,43 @@ QString intentLabel(RenderingIntent intent) {
 
 SoftProofingDialog::SoftProofingDialog(ColorManager* cm, QWidget* parent)
     : QDialog(parent), cm_(cm) {
-    setWindowTitle(tr("Soft Proofing"));
+    setWindowTitle(tr("软打样"));
     resize(520, 440);
 
     auto* root = new QVBoxLayout(this);
 
-    enableCheck_ = new QCheckBox(tr("Enable soft proofing on the preview"), this);
+    enableCheck_ = new QCheckBox(tr("在预览上启用软打样"), this);
     enableCheck_->setChecked(false);
     root->addWidget(enableCheck_);
 
-    auto* formBox = new QGroupBox(tr("Proof parameters"), this);
+    auto* formBox = new QGroupBox(tr("打样参数"), this);
     auto* form = new QFormLayout(formBox);
     profileCombo_ = new QComboBox(this);
     populateProfileCombo();
-    auto* loadProfileBtn = new QPushButton(tr("Load from file…"), this);
+    auto* loadProfileBtn = new QPushButton(tr("从文件加载…"), this);
     auto* profileRow = new QHBoxLayout();
     profileRow->addWidget(profileCombo_, 1);
     profileRow->addWidget(loadProfileBtn);
     auto* profileWrap = new QWidget(this);
     profileWrap->setLayout(profileRow);
-    form->addRow(tr("Destination profile:"), profileWrap);
+    form->addRow(tr("目标配置文件："), profileWrap);
 
     intentCombo_ = new QComboBox(this);
     populateIntentCombo();
-    form->addRow(tr("Rendering intent:"), intentCombo_);
+    form->addRow(tr("渲染意图："), intentCombo_);
 
-    bpcCheck_ = new QCheckBox(tr("Use black-point compensation (BPC)"), this);
+    bpcCheck_ = new QCheckBox(tr("使用黑场补偿（BPC）"), this);
     bpcCheck_->setChecked(true);
-    paperCheck_ = new QCheckBox(tr("Simulate paper & ink (absolute intent)"), this);
+    paperCheck_ = new QCheckBox(tr("模拟纸张与油墨（绝对意图）"), this);
     form->addRow(QString(), bpcCheck_);
     form->addRow(QString(), paperCheck_);
     root->addWidget(formBox);
 
-    auto* gamutBox = new QGroupBox(tr("Out-of-gamut warning"), this);
+    auto* gamutBox = new QGroupBox(tr("色域警告"), this);
     auto* gamutLayout = new QFormLayout(gamutBox);
-    highlightCheck_ = new QCheckBox(tr("Highlight out-of-gamut pixels"), this);
+    highlightCheck_ = new QCheckBox(tr("高亮超出色域的像素"), this);
     highlightCheck_->setChecked(false);
-    highlightColorBtn_ = new QPushButton(tr("Pick color…"), this);
+    highlightColorBtn_ = new QPushButton(tr("选择颜色…"), this);
     highlightColorBtn_->setStyleSheet(
         QString("background: %1; color: white;").arg(highlightColor_.name()));
     auto* highlightRow = new QHBoxLayout();
@@ -83,14 +83,14 @@ SoftProofingDialog::SoftProofingDialog(ColorManager* cm, QWidget* parent)
     highlightWrap->setLayout(highlightRow);
     gamutLayout->addRow(highlightWrap);
     previewLabel_ = new QLabel(
-        tr("Tip: adjust the parameters; the viewport re-renders live."), this);
+        tr("提示：调整参数后，预览会实时重新渲染。"), this);
     previewLabel_->setWordWrap(true);
     gamutLayout->addRow(previewLabel_);
     root->addWidget(gamutBox);
 
     auto* btnRow = new QHBoxLayout();
-    exportBtn_ = new QPushButton(tr("Export gamut report…"), this);
-    closeBtn_ = new QPushButton(tr("Close"), this);
+    exportBtn_ = new QPushButton(tr("导出色域报告…"), this);
+    closeBtn_ = new QPushButton(tr("关闭"), this);
     btnRow->addWidget(exportBtn_);
     btnRow->addStretch(1);
     btnRow->addWidget(closeBtn_);
@@ -147,20 +147,20 @@ void SoftProofingDialog::emitChanged() {
 
 void SoftProofingDialog::onLoadProfileFromFile() {
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("Load ICC profile"), QString(),
-        tr("ICC Profiles (*.icc *.icm);;All Files (*)"));
+        this, tr("加载 ICC 配置文件"), QString(),
+        tr("ICC 配置文件 (*.icc *.icm);;所有文件 (*)"));
     if (path.isEmpty()) return;
     // Verify it decodes before committing.
     SoftProofing sp;
     if (!sp.loadProofProfile(path.toStdString())) {
-        QMessageBox::warning(this, tr("Soft Proofing"),
-                             tr("The file at\n%1\nis not a valid ICC profile.")
+        QMessageBox::warning(this, tr("软打样"),
+                             tr("文件\n%1\n不是有效的 ICC 配置文件。")
                                  .arg(path));
         return;
     }
     customProfilePath_ = path;
     // Append a synthetic entry so the dropdown reflects the active source.
-    const QString label = tr("Custom: %1").arg(path);
+    const QString label = tr("自定义：%1").arg(path);
     // Replace any prior custom entry (we use -1 as a sentinel) to avoid
     // endlessly appending new rows every time the user re-picks a file.
     for (int i = 0; i < profileCombo_->count(); ++i) {
@@ -178,7 +178,7 @@ void SoftProofingDialog::onLoadProfileFromFile() {
 
 void SoftProofingDialog::onHighlightColor() {
     const QColor chosen = QColorDialog::getColor(highlightColor_, this,
-                                                 tr("Out-of-gamut highlight"));
+                                                 tr("超出色域的高亮"));
     if (!chosen.isValid()) return;
     highlightColor_ = chosen;
     highlightColorBtn_->setStyleSheet(
@@ -214,7 +214,7 @@ void SoftProofingDialog::populateProfileCombo() {
                                    QString::fromStdString(key),
                                    Qt::UserRole + 1);
     };
-    add(tr("sRGB IEC61966-2.1 (default)"), "srgb");
+    add(tr("sRGB IEC61966-2.1（默认）"), "srgb");
     add(tr("Display P3"), "display_p3");
     add(tr("Adobe RGB (1998)"), "adobe_rgb");
     add(tr("ProPhoto RGB (ROMM RGB)"), "prophoto");
