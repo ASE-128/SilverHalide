@@ -4,6 +4,8 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -51,35 +53,51 @@ public:
             return;
         }
 
-        std::atomic<size_t> next{0};
+        // Shared completion state.
+        //
+        // This MUST live on the heap rather than in this stack frame. The last
+        // task's guard decrements `remaining` and then wakes the waiter, so the
+        // caller can observe a zero count, return, and destroy its frame while
+        // that same task is still inside notify_all() -- a use-after-free on the
+        // mutex/condition_variable that shows up intermittently as a crash
+        // inside Cnd_broadcast, as heap corruption, or as a hang. Owning the
+        // state through a shared_ptr keeps it alive until the late notifier is
+        // finished with it.
+        struct ForState {
+            std::atomic<size_t> next{0};
+            std::atomic<size_t> remaining{0};
+            std::mutex doneMutex;
+            std::condition_variable doneCondition;
+        };
         // Counts down from the number of submitted tasks; the caller must not
         // return until every enqueued task has actually run (a task left in the
         // queue would still hold references to this stack frame).
         const size_t taskCount = workers_.size();
-        std::atomic<size_t> remaining{taskCount};
-        std::mutex doneMutex;
-        std::condition_variable doneCondition;
+        auto st = std::make_shared<ForState>();
+        st->remaining.store(taskCount);
 
         {
             std::unique_lock<std::mutex> lock(mutex_);
             size_t enqueued = 0;
             try {
                 for (; enqueued < taskCount; ++enqueued) {
-                    tasks_.emplace_back([&] {
+                    // `n`, `g` and `fn` stay by reference: every task has left
+                    // them before `remaining` can reach zero. The shared state
+                    // itself is captured by value so it outlives this frame.
+                    tasks_.emplace_back([st, &n, &g, &fn] {
                         // RAII so `remaining` is released even if fn throws.
                         struct Guard {
-                            std::atomic<size_t>& counter;
-                            std::mutex& m;
-                            std::condition_variable& cv;
+                            std::shared_ptr<ForState> st;
                             ~Guard() {
-                                if (counter.fetch_sub(1) == 1) {
-                                    std::lock_guard<std::mutex> lock(m);
-                                    cv.notify_all();
+                                if (st->remaining.fetch_sub(1) == 1) {
+                                    std::lock_guard<std::mutex> lock(
+                                        st->doneMutex);
+                                    st->doneCondition.notify_all();
                                 }
                             }
-                        } guard{remaining, doneMutex, doneCondition};
+                        } guard{st};
                         for (;;) {
-                            const size_t b = next.fetch_add(g);
+                            const size_t b = st->next.fetch_add(g);
                             if (b >= n)
                                 break;
                             fn(b, std::min(b + g, n));
@@ -88,17 +106,18 @@ public:
                 }
             } catch (...) {
                 // Enqueueing a task threw (e.g. bad_alloc). The tasks already
-                // pushed capture this stack frame by reference, so before this
-                // frame unwinds we must wait until every one of them has run,
-                // or a worker would execute fn on a dead stack frame. Fix
+                // pushed still hold references to this stack frame, so before
+                // this frame unwinds we must wait until every one of them has
+                // run, or a worker would execute fn on a dead stack frame. Fix
                 // `remaining` to the number actually enqueued (workers cannot
                 // pop while we hold the pool lock), release the pool lock so
                 // the workers can drain them, then rethrow. Tasks belonging to
                 // other concurrent parallelFor calls are left untouched.
-                remaining.store(enqueued);
+                st->remaining.store(enqueued);
                 lock.unlock();
-                std::unique_lock<std::mutex> dl(doneMutex);
-                doneCondition.wait(dl, [&] { return remaining.load() == 0; });
+                std::unique_lock<std::mutex> dl(st->doneMutex);
+                st->doneCondition.wait(dl,
+                                       [&] { return st->remaining.load() == 0; });
                 throw;
             }
         }
@@ -106,26 +125,27 @@ public:
 
         // The calling thread joins in on the remaining chunks.
         for (;;) {
-            const size_t b = next.fetch_add(g);
+            const size_t b = st->next.fetch_add(g);
             if (b >= n)
                 break;
             try {
                 fn(b, std::min(b + g, n));
             } catch (...) {
-                // fn threw, but worker tasks still capture these locals by
-                // reference and may still be running fn. Before unwinding this
-                // frame we must wait until every task has finished (each task's
-                // Guard releases `remaining`), or a worker would keep executing
-                // fn on a dead stack frame (use-after-free). Then rethrow the
-                // original exception unchanged.
-                std::unique_lock<std::mutex> lock(doneMutex);
-                doneCondition.wait(lock, [&] { return remaining.load() == 0; });
+                // fn threw, but worker tasks may still be running fn. Before
+                // unwinding this frame we must wait until every task has
+                // finished (each task's Guard releases `remaining`), or a
+                // worker would keep executing fn on a dead stack frame
+                // (use-after-free). Then rethrow the original exception
+                // unchanged.
+                std::unique_lock<std::mutex> lock(st->doneMutex);
+                st->doneCondition.wait(lock,
+                                       [&] { return st->remaining.load() == 0; });
                 throw;
             }
         }
 
-        std::unique_lock<std::mutex> lock(doneMutex);
-        doneCondition.wait(lock, [&] { return remaining.load() == 0; });
+        std::unique_lock<std::mutex> lock(st->doneMutex);
+        st->doneCondition.wait(lock, [&] { return st->remaining.load() == 0; });
     }
 
 private:
@@ -151,8 +171,9 @@ private:
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 condition_.wait(lock, [&] { return stop_ || !tasks_.empty(); });
-                if (stop_ && tasks_.empty())
+                if (stop_ && tasks_.empty()) {
                     return;
+                }
                 task = std::move(tasks_.front());
                 tasks_.pop_front();
             }
