@@ -13,6 +13,171 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## 蒙版显示修复：AI 真实权重、几何引导填充、颜色范围默认叠加（2026-10-01 ~ 10-02，工作区未提交）
+
+### 1. AI 蒙版叠加是假的：整幅恒定 50%
+
+`Pipeline::maskWeight` 对 `MaskType::AiMask` 直接 `return 0.5f`（占位），视口叠加因此把**整幅画面**
+涂成 50% 红色——看起来像"全选"，与主体/天空/背景/点选的实际语义毫无关系。真实权重只在渲染时由
+`AiMaskGenerator::generate` 产生，叠加层拿不到。
+
+更根本的问题是这份权重在多数构建里**根本产生不了**：`Pipeline::applyLocalAdjustments` 里那道
+`if (engine && (promptMask || engine->hasModel(modelId)))` 门槛，在没有模型时直接 `continue`，而
+`AiMaskGenerator.h` 明确承诺"模型不可用时回落到纯 C++ 启发式，让 `LRC_ENABLE_AI=OFF` 的构建仍能
+产出可叠加的可视结果"（`AiInference.h` 也写着"调用方永远不需要 `#ifdef`"）。实现与两处契约都不符。
+
+修法：新增 `Pipeline::aiMaskWeightField(const Mask&, const ImageBuffer&)` 作为**唯一入口**，
+渲染与叠加都走它——内部调用 `AiMaskGenerator::generate`（有模型用模型，无模型自动回落启发式）；
+`applyLocalAdjustments` 去掉 `hasModel` 门槛并改调该函数；`ImageViewport` 对 AI 草稿用降采样后的
+预览调用同一函数。视口侧加**一条缓存**（掩码 geometryHash + `QImage::cacheKey` + 尺寸四元组），
+避免重绘时重复推理。`AiMaskGenerator.h` 的 include 也从 `#ifdef LRC_ENABLE_AI` 里移出。
+
+`Mask::geometryHash()` 本就已覆盖 AI 的 target/threshold/feather/modelOverride 与点击点，故缓存键
+无需改动，只更新了那里的注释。
+
+### 2. 径向/画笔的几何引导被白色实心填充
+
+`ImageViewport::paintEvent` 画引导前设了 `painter.setBrush(QColor(255,255,255,210))`——这个画刷本来
+只给线性蒙版两端的控制点用，但径向分支紧接着用它画**大椭圆**、画笔分支画**光标圆**，于是径向的整个
+选区被近乎不透明的白色盖住（把照片和红色叠加都挡住了），画笔光标变成实心白圆盘。
+
+修法：画外框前 `painter.setBrush(Qt::NoBrush)`，只在画控制点小圆时临时恢复白色画刷。实测径向现在是
+虚线轮廓、红色叠加清晰可见。
+
+### 3. 颜色范围在未采样时显示噪声
+
+叠加构建时无条件 `colorRange.hasReference = true` 并用尚未采集的参考色计算 HSL 距离，于是默认状态
+下出现一片无意义的红色噪点。引擎侧 `Pipeline::colorRangeWeight` 的语义是"没有参考色即为惰性(0)"，
+故改为仅在 `colorRangeSrgbRef_.isValid()` 为真时发布参考色；未采样时呈现**空叠加**。
+
+### 4. 评审后续修复：子蒙版分支与 GUI 线程推理（2026-10-02 ~ 10-05）
+
+上一轮改动被代码评审指出两处 P2 与一处 P3，本轮全部修掉：
+
+1. **AI 蒙版 + 范围子蒙版仍画恒定 0.5（P2）**。`rebuildMaskOverlay` 只在
+   `!colorRangeMask && !hasSubMask` 分支里把 AI 草稿路由到 `aiOverlayField`；一旦开启色彩/亮度子蒙版
+   就走 `brushWeightField` → `maskWeight` → AiMask 恒定 `0.5f`，于是整幅被 `0.5 × 子蒙版` 涂满，
+   而渲染用的却是真实权重，重现"整幅都被选中"的症状。修法：子蒙版分支同样按掩码类型分流，AI 走
+   `aiOverlayField`；确实取不到权重时清空叠加，而不是退回"整幅权重 1"。
+
+2. **AI 叠加在 GUI 线程按参数逐帧推理（P2）**。`aiOverlayField` 的缓存键包含
+   feather/threshold/点击点，拖动 AI 羽化滑杆每个 tick 都是 miss；装了分割模型时就是一次全尺寸 ONNX
+   前向，界面会在拖动时卡死。修法：当旧权重仍可用于当前叠加尺寸时，**先继续显示旧叠加**，用 150 ms
+   单发定时器（`app::throttle::kAiOverlayFieldDebounceMs`）合并重算；没有可复用的旧权重（首帧 / 换尺寸）
+   才同步计算。定时器到期后清 `lastOverlayHash_` 强制重建，保证新权重一定画出来。
+
+   （2026-10-05 补修）第一版把"丢弃缓存"挂在 `setImageKeepView` 上，而这个函数正是每次预览重渲染的
+   入口：拖动滑杆时面板约每 30 ms 触发一次粗预览重渲染，于是每一帧又把缓存清掉、把定时器停掉，防抖
+   在真实拖动中被架空（退化成"每次重渲染后第一个 tick 再冷启动一次推理"）。现在 `setImageKeepView`
+   改为**保留旧权重并重启定时器**（同尺寸重渲染只是同一张照片重绘），只有 `setImage`（真正换照片）
+   才清空缓存。
+
+3. **注释与实现不符（P3）**。`Pipeline.cpp` 中"AI 关闭或模型缺失时跳过该掩码"的说明已随行为改变作废，
+   `maskWeight` 里"0.5 会在叠加中可见"的说法也不再成立，两处说明都已改写。
+
+为便于测试，`ImageViewport` 增加只读访问器 `maskOverlayImage()`（与既有的 `diagnosticOverlay()`
+同一模式），让测试直接检查叠加栅格而不依赖未显示窗口的截屏行为。
+
+### 5. 验证
+
+- headless `build_gui/tests/lrc_tests.exe`：**482 用例 / 878877 断言全绿**（含新增的 2 个 AI 权重用例：
+  权重必须随内容变化而非恒定值、天空启发式上三分量必须高于下三分量、非 AI 掩码必须返回 null）。
+- kimi-cu 实机：径向=虚线轮廓且叠加可见；AI 天空=内容驱动叠加（不再整幅色块）；颜色范围未采样=无叠加。
+- 画笔光标为同一处修复（同一画刷、同一分支写法），未单独截图复验。
+- （2026-10-02 追加）`build_gui/tests/lrc_qt_tests.exe` 新增 `MaskOverlayRenderTest` 两例，直接驱动
+  真实 `ImageViewport` 并读取它构建的叠加栅格：AI 蒙版在**范围子蒙版**开启时必须跟随真实权重
+  （还原旧写法即失败：`top=75 bottom=75`，正是旧的恒定 0.5 占位），参数改动后叠加必须**先沿用旧权重**
+  （去掉防抖即失败：同步重算会把顶部 alpha 从 97 直接掉到 29）。两例都做了反向验证。
+- （2026-10-02 追加）AI 开启的无头树 `build_headless_ai/tests/lrc_tests.exe`：**482 用例 / 878892
+  断言全绿**，`[ai]` 子集 58 用例 / 438 断言全绿；`build_gui` 全量套件与 Qt 套件退出码均为 0。
+- （2026-10-05 追加）**kimi-cu 实机复验**（`build_gui/SilverHalide.exe`，temp 库重新导入三张测试图）。
+  本会话 MCP 审批已放开，之前那条"目录数据库只读"的报错不再出现，确认是当时沙箱只允许写工作区所致。
+  结论不用截图比对，而用**进程内临时插桩**（复核后已撤除）取内部数值：在同一张 RW2 上建 AI 天空蒙版，
+  再开启"明亮度范围"子蒙版后，重建日志显示子蒙版分支实际取到的 `geo` 统计为
+  `mean=0.1839 max=0.8074`，与 AI 权重场完全一致而不是占位的 `0.5`；`subGtGeo=0`（子蒙版权重从未超过
+  AI 权重）、`lumaGt1=0`；"先沿用旧权重、再定时重算"两次重建的 alpha 统计逐位相同
+  （`nz=153904 sumAlpha=20866.373 maxAlpha=109`），证明防抖收敛到同一结果而非停在错误权重上。
+  对照实验：把目标换成"AI 点选"且不落任何点（AI 权重恒为 0）后切换同一子蒙版，整幅**逐像素零差异**，
+  证明该开关不会改动底图，差异确实来自叠加层。
+
+### 6. 状态与遗留
+
+代码已落地并自测通过，**工作区未提交**。
+
+遗留（本次未改）：
+- **裁剪页空白**：`DevelopPanel::setSectionMode` 只处理 mode 0/2/3，`mode==1`（裁剪）时所有分区都被
+  隐藏，而仓库里没有裁剪分区，于是该标签页点进去是空的。
+- **蒙版工具激活时高亮不同步**：工具栏与面板的按钮组都只有 4 个几何工具按钮，AI 蒙版没有对应按钮，
+  于是 `maskToolActivated(AiMask)` 无法镜像，界面会停留在上一个几何工具的高亮状态。
+
+验证缺口：
+- 2026-10-02 那次确实没做成实机（MCP 审批被拒 + 应用弹"目录数据库只读"）；2026-10-05 已补做，见上。
+- 跨状态**截图 A/B 不能用来判定叠加**：同一状态连续两次截图逐像素相同（说明截图是确定性的），但改动
+  调整栈会让预览重渲染，重渲染在物体边缘产生的差异远大于叠加量级（实测 R−G 超限像素 `max≈248`，而叠加
+  alpha 上限只有 150）。所以子蒙版那条结论依据的是进程内插桩；截图只用于确认"叠加随内容局部化、不是
+  整幅色块"。
+- 无头套件的偶发崩溃**已定位并修复**，见下一节；此前记录为"无法复现"的失败与此同源。
+
+## 修复线程池完成态的 use-after-free（2026-10-05，工作区未提交）
+
+### 1. 现象
+
+`build_gui/tests/lrc_tests.exe` 全量运行约 1/5 概率异常终止，退出码在 `0xC0000005`（访问冲突）、
+`0xC0000409`（栈 Cookie）、`0xC0000374`（堆损坏）之间跳变，另有一次进程挂住并持续烧 CPU（32 s）。
+WER 中同类崩溃最早可追到 2026-09-22，**远早于本轮蒙版改动**，也与 `[ai]` 用例无关（`[ai]` 连跑 10 次全过，
+非 AI 子集 5 次里挂 1 次）。
+
+### 2. 定位过程
+
+- Catch2 自带 SEH 捕获，但 stdout 是块缓冲，异常终止时输出整体丢失。先用 `setvbuf` 关掉缓冲，
+  拿到崩溃用例名（`renderPreview: incremental cache honours the memory budget`、
+  `Pipeline: pooled gaussian blur is byte-identical across calls`）。
+- 单用例高频复现：上面那个 `renderPreview` 用例 **200 次崩 2 次**（每次约 80 ms），成为快速复现器。
+- MSVC AddressSanitizer 跑 60 次不复现（本机 ASan 存在 interception 失败的已知限制，可能失明）。
+- 最后在进程内装 **VEH**（向量化异常处理器，先于框架级处理器）并用 dbghelp 解析符号，拿到崩溃栈：
+
+```
+code=0xC0000005   Cnd_broadcast+0xE   …   BaseThreadInitThunk
+```
+
+### 3. 根因
+
+`lrc::parallel::Pool::parallelFor` 把完成态（`remaining` 计数、`doneMutex`、`doneCondition`）放在
+**调用者的栈帧**上，而 worker 任务的完成守卫顺序是「计数减一 → 加锁 → `notify_all`」，调用者的等待
+谓词却是「计数归零」。于是最后一个 worker 把计数减到 0 之后、`notify_all` 尚未执行完，调用者就可能
+醒来、返回并销毁自己的栈帧——worker 随后操作的 `mutex` / `condition_variable` 已经是已析构对象。
+
+这是标准的 use-after-free；落在不同位置就表现为上面三种退出码或直接卡死。
+
+### 4. 修法（`src/utils/Parallel.cpp`）
+
+把完成态移到堆上，由 `shared_ptr` 在调用者与各任务之间共享：
+
+```cpp
+struct ForState { std::atomic<size_t> next, remaining;
+                  std::mutex doneMutex; std::condition_variable doneCondition; };
+auto st = std::make_shared<ForState>();
+tasks_.emplace_back([st, &n, &g, &fn] { /* Guard{st} … */ });
+```
+
+晚到的 `notify_all` 不再触碰已析构的栈对象。代价是每次 `parallelFor` 多一次小分配（每个任务本来就会为
+`std::function` 分配），可忽略。`n` / `g` / `fn` 仍按引用捕获：所有任务在 `remaining` 归零前就已用完它们，
+归零之后唯一还会执行的代码只有守卫里的通知。
+
+### 5. 验证
+
+- 快速复现器：修复前 200 次崩 2 次 → 修复后 **600 次 0 失败**。
+- 全量套件：修复前约 150 次里 1 崩 2 挂 → 修复后 **×12 全过，无崩溃、无卡死**。
+- shard-0（前 97 个用例）：修复前 150 次里 3 次失败 → 修复后 **150 次 0 失败**。
+- 断言数不变：`build_gui` 482 用例 / 878877 断言，AI 树 482 用例 / 878892 断言，Qt 套件退出码 0。
+- 临时插桩（stderr 轨迹、环形缓冲 + 看门狗、VEH 崩溃栈、Catch2 监听器、Pipeline 标记、ASan 构建树）
+  已全部撤除，工作区只留下这一处真实修复。
+
+### 6. 影响面
+
+`parallelFor` 是渲染热路径的并行原语（模糊、局部调整、增量预览都在用），所以这不只是测试问题：应用侧
+同样可能随机崩溃、堆损坏，或**渲染直接卡住**。修复后此前"偶发、无法复现"的无头失败一并消失。
+
 ## UI 优化四条 + GUI 测试运行库部署（2026-10-01）
 
 前置提交：`618be00`（UI 与样式，12 文件）、`6806bc2`（AGENTS.md 记录 kimi-cu 验收流程），
