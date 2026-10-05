@@ -113,6 +113,18 @@ inline constexpr int kSliderCoarseDebounceMs = 30;
 inline constexpr int kMaskGeometryCommitMs = 150;
 
 /**
+ * @brief ImageViewport AI-mask overlay recompute debounce (ms).
+ *
+ * An AI mask's overlay weight is content-driven, so its cache key covers the
+ * mask parameters (feather / threshold / click prompts) as well as the image.
+ * Dragging the AI feather slider therefore invalidates the memo on every tick,
+ * which without this timer means one segmentation pass per tick on the GUI
+ * thread -- a full model inference when a segmentation model is installed. The
+ * viewport keeps showing the previous weights and coalesces the recompute here.
+ */
+inline constexpr int kAiOverlayFieldDebounceMs = 150;
+
+/**
  * @brief Develop panel metadata (caption/title/keywords) commit debounce (ms)
  *        while the user types.
  *

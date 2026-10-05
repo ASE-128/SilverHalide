@@ -12,6 +12,8 @@
  */
 
 #include <cstddef>
+#include <memory>
+#include <vector>
 
 #include <QColor>
 #include <QImage>
@@ -19,6 +21,7 @@
 #include <QPoint>
 #include <QPointF>
 #include <QSize>
+#include <QTimer>
 #include <QWidget>
 
 #include "engine/Adjustments.h"
@@ -65,6 +68,12 @@ public:
     // image.
     void setDiagnosticOverlay(const QImage& overlay);
     const QImage& diagnosticOverlay() const { return overlay_; }
+
+    // The current mask weight overlay: the downscaled red raster of the active
+    // tool's mask draft (longer edge <= 480 px), or a null image while no mask
+    // tool is armed. Exposed for inspection the same way diagnosticOverlay() is;
+    // the widget owns it and rebuilds it on the next draft/geometry change.
+    const QImage& maskOverlayImage() const { return maskOverlay_; }
 
     // B-1 content-aware crop guidance: draws a dashed rectangle over the preview
     // at the normalized [0,1] rect suggested by the last auto-develop run. It is
@@ -282,6 +291,33 @@ private:
     QPointF normToWidget(const QPointF& n) const;
     // Rebuilds the red weight overlay for the current mask draft.
     void rebuildMaskOverlay();
+    /**
+     * @brief Weight field for the current AI mask draft, memoised.
+     *
+     * Segments a downscaled copy of the current preview through the engine's
+     * single AI entry point (model when available, heuristic otherwise) and
+     * caches the result so a repaint never re-runs inference. The cache is
+     * invalidated by a mask-geometry change, a new image, or a new size.
+     *
+     * @param ow,oh Overlay dimensions in pixels; must be positive.
+     * @return ow*oh weights in [0,1], or null when there is nothing to segment.
+     */
+    std::shared_ptr<const std::vector<float>> aiOverlayField(int ow, int oh);
+    /**
+     * @brief Uncached AI overlay weight for the current draft.
+     *
+     * Runs the segmentation (model or heuristic) against a downscaled copy of
+     * the preview at the overlay resolution and replaces the memo. Called on a
+     * cold memo and by the debounce timer.
+     *
+     * @param ow,oh Overlay dimensions in pixels; must be positive.
+     * @return ow*oh weights in [0,1], or null when the buffer cannot be built.
+     */
+    std::shared_ptr<const std::vector<float>> recomputeAiField(int ow, int oh);
+    // Debounce-expired handler: recompute with the latest draft and repaint the
+    // overlay, defeating the geometry-hash dedup so the fresh weights show.
+    void onAiFieldTimer();
+
     void beginMaskGesture(const QPointF& widgetPos);
     void moveMaskGesture(const QPointF& widgetPos);
     void endMaskGesture();
@@ -369,6 +405,24 @@ private:
     double maskBrushSoftness_ = 0.5;  // brush dab softness (0..1)
     int maskPromptLabel_ = 1;         // label for the next click-prompt point (1=fg,0=bg)
     size_t lastOverlayHash_ = 0;      // geometry hash of the built mask overlay
+
+    // One-entry memo for an AI mask's overlay weight.
+    //
+    // AI weights are content-driven and cost a segmentation pass, so the field
+    // is reused while the mask, the source image and the overlay size all stay
+    // the same. The four inputs are compared explicitly rather than folded into
+    // one hash: Mask::geometryHash() already covers the AI target, threshold,
+    // feather and click-prompt points, so comparing it plus the image cache key
+    // and the dimensions is enough to prove the field is still valid.
+    std::shared_ptr<const std::vector<float>> aiField_;
+    size_t aiFieldHash_ = 0;       // maskDraft_.geometryHash() used for aiField_
+    qint64 aiFieldImageKey_ = 0;   // image_.cacheKey() used for aiField_
+    int aiFieldW_ = 0;             // overlay width used for aiField_
+    int aiFieldH_ = 0;             // overlay height used for aiField_
+    // Coalesces the segmentation passes triggered by rapid mask-parameter edits
+    // (the AI feather slider emits on every tick). A pending timer means the
+    // overlay on screen is intentionally showing the previous weights.
+    QTimer aiFieldTimer_;
 
     // --- Spot removal / healing brush --------------------------------------
     bool spotToolActive_ = false;

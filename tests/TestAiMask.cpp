@@ -18,6 +18,7 @@
 #include "engine/Adjustments.h"
 #include "engine/AiMaskGenerator.h"
 #include "engine/ImageBuffer.h"
+#include "engine/Pipeline.h"
 
 namespace lrc::tests {
 
@@ -184,6 +185,60 @@ TEST_CASE("Mask::hasEffect considers MaskType::AiMask",
     CHECK(m.hasEffect());
     m.opacity = 0.0;
     CHECK_FALSE(m.hasEffect());
+}
+
+// The viewport overlay and the render must agree, so both go through
+// Pipeline::aiMaskWeightField. It used to be impossible to reach the AI weight
+// at all outside a build with a loaded model, and the UI compensated by
+// painting a constant 0.5 placeholder over the whole frame — which read as
+// "everything is selected". These cases pin the real, content-driven field.
+TEST_CASE("Pipeline::aiMaskWeightField is content-driven, not a constant",
+          "[ai][mask][pipeline]") {
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 48;
+    const ImageBuffer scene = makeSyntheticScene(kWidth, kHeight);
+
+    Mask m;
+    m.type = MaskType::AiMask;
+    m.ai.target = AiMaskTarget::Sky;
+    m.ai.cachedWeightVersion = 1;  // distinct from a default-constructed mask
+
+    const auto field = Pipeline::aiMaskWeightField(m, scene);
+    REQUIRE(field != nullptr);
+    REQUIRE(field->size() ==
+            static_cast<size_t>(kWidth) * static_cast<size_t>(kHeight));
+
+    // A constant field is exactly the bug: the old placeholder was 0.5
+    // everywhere, which carries no information about the image at all.
+    const float first = (*field)[0];
+    const bool allEqual = std::all_of(
+        field->begin(), field->end(),
+        [first](float v) { return std::fabs(v - first) < 1e-6f; });
+    CHECK_FALSE(allEqual);
+
+    // The sky heuristic keys on the upper part of the frame, so the top third
+    // must outweigh the bottom third for a synthetic sky/ground scene.
+    const int horizon = kHeight / 3;
+    double topSum = 0.0, bottomSum = 0.0;
+    for (int y = 0; y < horizon; ++y)
+        for (int x = 0; x < kWidth; ++x)
+            topSum += (*field)[static_cast<size_t>(y) * kWidth + x];
+    for (int y = 2 * horizon; y < kHeight; ++y)
+        for (int x = 0; x < kWidth; ++x)
+            bottomSum += (*field)[static_cast<size_t>(y) * kWidth + x];
+    CHECK(topSum / horizon > bottomSum / (kHeight - 2 * horizon));
+}
+
+TEST_CASE("Pipeline::aiMaskWeightField rejects non-AI masks",
+          "[ai][mask][pipeline]") {
+    const ImageBuffer scene = makeSyntheticScene(32, 24);
+
+    Mask linear;
+    linear.type = MaskType::LinearGradient;
+    CHECK(Pipeline::aiMaskWeightField(linear, scene) == nullptr);
+
+    Mask none;
+    CHECK(Pipeline::aiMaskWeightField(none, scene) == nullptr);
 }
 
 } // namespace lrc::tests

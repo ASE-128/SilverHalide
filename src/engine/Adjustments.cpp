@@ -218,9 +218,11 @@ size_t Mask::geometryHash() const {
     mixFloat(h, luminanceRange);
     mixFloat(h, luminanceSmoothness);
     h = hashCombine(h, static_cast<size_t>(maskUnion));
-    // AI mask geometry.  target/threshold/feather/invert and the
-    // cachedWeightVersion all contribute directly to the per-pixel weight
-    // raster that is keyed by geometryHash() in Pipeline::brushWeightField.
+    // AI mask geometry.  target/threshold/feather/invert, the model override and
+    // the click-prompt points all contribute to the per-pixel weight raster, so
+    // they belong to the key even though AI weights are produced by
+    // Pipeline::aiMaskWeightField rather than brushWeightField. The viewport
+    // overlay memoises on geometryHash() for the same reason.
     h = hashCombine(h, static_cast<size_t>(ai.target));
     mixFloat(h, ai.threshold);
     mixFloat(h, ai.feather);

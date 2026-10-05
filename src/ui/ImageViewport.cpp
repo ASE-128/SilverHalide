@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QTimer>
 #include <QWheelEvent>
 
+#include "app/Constants.h"
 #include "engine/Pipeline.h"
 #include "utils/MathUtils.h"
 #include "utils/ViewportMath.h"
@@ -107,6 +110,12 @@ ImageViewport::ImageViewport(QWidget* parent) : QWidget(parent) {
     setAttribute(Qt::WA_OpaquePaintEvent);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
+    // Coalesces the AI overlay's segmentation passes while a mask parameter is
+    // dragged; see aiOverlayField().
+    aiFieldTimer_.setSingleShot(true);
+    aiFieldTimer_.setInterval(lrc::app::throttle::kAiOverlayFieldDebounceMs);
+    connect(&aiFieldTimer_, &QTimer::timeout, this,
+            &ImageViewport::onAiFieldTimer);
 }
 
 void ImageViewport::setImage(const QImage& image) {
@@ -117,6 +126,10 @@ void ImageViewport::setImage(const QImage& image) {
     // re-evaluates the geometry against the new dimensions. The overlay image
     // itself stays until a rebuild so mid-stroke preview updates don't flicker.
     lastOverlayHash_ = 0;
+    // The AI overlay memo is keyed on the image as well; drop it and cancel any
+    // deferred recompute so a stale segmentation cannot land on the new frames.
+    aiFieldTimer_.stop();
+    aiField_ = nullptr;
     // New image -> the cached spot-visualization copy is stale.
     spotViz_ = QImage();
     spotVizValid_ = false;
@@ -158,6 +171,13 @@ void ImageViewport::setImageKeepView(const QImage& image) {
     // The sub-mask weight overlay depends on the pixel colours, so a swapped
     // image invalidates the cached overlay (mirrors setImage).
     lastOverlayHash_ = 0;
+    // A same-image re-render (edit preview) changes pixels but not the mask or
+    // the overlay geometry, and it happens on every coarse preview frame while a
+    // slider is dragged. Dropping the AI memo here would turn each of those
+    // frames into a fresh segmentation pass -- exactly what the debounce exists
+    // to prevent -- so keep the memo and let the timer coalesce the refresh.
+    if (maskTool_ != lrc::MaskType::None && aiField_)
+        aiFieldTimer_.start();
     // New image -> the cached spot-visualization copy is stale.
     spotViz_ = QImage();
     spotVizValid_ = false;
@@ -424,6 +444,76 @@ QPointF ImageViewport::normToWidget(const QPointF& n) const {
                    dst.top() + n.y() * dst.height());
 }
 
+std::shared_ptr<const std::vector<float>>
+ImageViewport::aiOverlayField(int ow, int oh) {
+    if (ow <= 0 || oh <= 0 || image_.isNull())
+        return {};
+    const size_t geomHash = maskDraft_.geometryHash();
+    const qint64 imageKey = image_.cacheKey();
+    if (aiField_ && aiFieldHash_ == geomHash && aiFieldImageKey_ == imageKey &&
+        aiFieldW_ == ow && aiFieldH_ == oh)
+        return aiField_;
+
+    // Cache miss. When a field for the same image and overlay size is still
+    // available, the change came from a mask parameter (feather / threshold /
+    // click prompt) rather than from a new context: keep showing those weights
+    // and coalesce the recompute. A model-backed segmentation would otherwise
+    // run once per slider tick on the GUI thread and freeze the window.
+    // The image key is deliberately not required to match: setImageKeepView
+    // swaps in a re-rendered preview of the same photo, and the refresh is
+    // handled by the timer started there. A genuinely new photo goes through
+    // setImage, which clears the memo outright.
+    if (aiField_ && aiFieldW_ == ow && aiFieldH_ == oh) {
+        aiFieldTimer_.start();
+        return aiField_;
+    }
+    // No usable previous field (first build, new image or new size): the overlay
+    // would be blank, so pay for the pass now instead of deferring it.
+    aiFieldTimer_.stop();
+    return recomputeAiField(ow, oh);
+}
+
+std::shared_ptr<const std::vector<float>>
+ImageViewport::recomputeAiField(int ow, int oh) {
+    if (ow <= 0 || oh <= 0 || image_.isNull())
+        return {};
+    // Segment a small copy of the preview: AiMaskGenerator accepts any
+    // ImageBuffer format and normalises internally, and sizing the input to the
+    // overlay keeps the inference input as small as what we can display.
+    const QImage small =
+        image_.scaled(ow, oh, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+            .convertToFormat(QImage::Format_RGB888);
+    if (small.isNull())
+        return {};
+    auto src = lrc::ImageBuffer::create(ow, oh, lrc::PixelFormat::U8);
+    if (!src)
+        return {};
+    auto& dst = src->data();
+    for (int y = 0; y < oh; ++y) {
+        std::memcpy(dst.data() + static_cast<size_t>(y) * ow * 3,
+                    small.constScanLine(y), static_cast<size_t>(ow) * 3);
+    }
+
+    aiField_ = lrc::Pipeline::aiMaskWeightField(maskDraft_, *src);
+    aiFieldHash_ = maskDraft_.geometryHash();
+    aiFieldImageKey_ = image_.cacheKey();
+    aiFieldW_ = ow;
+    aiFieldH_ = oh;
+    return aiField_;
+}
+
+void ImageViewport::onAiFieldTimer() {
+    if (image_.isNull() || aiFieldW_ <= 0 || aiFieldH_ <= 0)
+        return;
+    recomputeAiField(aiFieldW_, aiFieldH_);
+    // The overlay on screen was painted from the stale weights, and its
+    // geometry hash already equals the current draft's, so clear the dedup key
+    // to make the recomputed field visible.
+    lastOverlayHash_ = 0;
+    rebuildMaskOverlay();
+    update();
+}
+
 void ImageViewport::rebuildMaskOverlay() {
     if (image_.isNull() || maskTool_ == lrc::MaskType::None) {
         maskOverlay_ = QImage();
@@ -442,7 +532,11 @@ void ImageViewport::rebuildMaskOverlay() {
     const bool hasSubMask =
         maskDraft_.useColorRange || maskDraft_.useLuminance;
     lrc::ColorRangeMask colorRange = maskDraft_.color;
-    if (colorRangeMask) {
+    // A colour-range mask is inert until a reference colour has been sampled:
+    // Pipeline::colorRangeWeight returns 0 without one. Forcing hasReference
+    // with an unset reference (the previous behaviour) produced a meaningless
+    // speckle over dark pixels instead of an empty overlay.
+    if (colorRangeMask && colorRangeSrgbRef_.isValid()) {
         colorRange.hasReference = true;
         colorRange.refR = srgbToLinearChannel(colorRangeSrgbRef_.redF());
         colorRange.refG = srgbToLinearChannel(colorRangeSrgbRef_.greenF());
@@ -470,7 +564,12 @@ void ImageViewport::rebuildMaskOverlay() {
         oh = std::max(1, static_cast<int>(h * r));
     }
     if (!colorRangeMask && !hasSubMask) {
-        auto field = lrc::Pipeline::brushWeightField(maskDraft_, ow, oh);
+        // AI masks are content-driven: their weight comes from the pixels, so
+        // they route through the engine's AI entry point (model when available,
+        // heuristic otherwise). Everything else rasterises from geometry alone.
+        auto field = maskDraft_.type == lrc::MaskType::AiMask
+                         ? aiOverlayField(ow, oh)
+                         : lrc::Pipeline::brushWeightField(maskDraft_, ow, oh);
         if (!field)
             return;
         maskOverlay_ = QImage(ow, oh, QImage::Format_ARGB32_Premultiplied);
@@ -494,9 +593,23 @@ void ImageViewport::rebuildMaskOverlay() {
     // combined per pixel with the colour/luminance sub-mask weights (product
     // for intersection, max for union). Using the cached field (instead of
     // Pipeline::maskWeight per pixel) keeps a multi-dab brush overlay cheap.
-    auto field = colorRangeMask
-                     ? nullptr
-                     : lrc::Pipeline::brushWeightField(maskDraft_, ow, oh);
+    // An AI mask is content-driven in this branch too: it needs the same engine
+    // entry point, because brushWeightField has no pixels to segment and would
+    // paint its constant 0.5 placeholder -- i.e. the whole frame selected --
+    // multiplied by the sub-mask, while the render applies the real field.
+    std::shared_ptr<const std::vector<float>> field;
+    if (!colorRangeMask) {
+        field = maskDraft_.type == lrc::MaskType::AiMask
+                    ? aiOverlayField(ow, oh)
+                    : lrc::Pipeline::brushWeightField(maskDraft_, ow, oh);
+        if (!field) {
+            // Nothing to combine the sub-mask with. Leave the overlay empty
+            // rather than substituting a whole-frame weight of 1.
+            maskOverlay_ = QImage();
+            lastOverlayHash_ = 0;
+            return;
+        }
+    }
     maskOverlay_ = QImage(ow, oh, QImage::Format_ARGB32_Premultiplied);
     maskOverlay_.fill(Qt::transparent);
     for (int y = 0; y < oh; ++y) {
@@ -869,15 +982,20 @@ void ImageViewport::paintEvent(QPaintEvent*) {
         if (maskOverlayVisible_)
             painter.drawImage(dst, maskOverlay_, QRectF(maskOverlay_.rect()));
         painter.setPen(QPen(QColor(255, 255, 255, 235), 1.0, Qt::DashLine));
-        painter.setBrush(QColor(255, 255, 255, 210));
+        // Guides are outlines. Filling them (the previous behaviour) painted a
+        // translucent white blob over the mask area, hiding both the photo and
+        // the red weight overlay; only the small handle dots stay filled.
+        painter.setBrush(Qt::NoBrush);
         if (maskTool_ == lrc::MaskType::LinearGradient) {
             const QPointF a = normToWidget(
                 QPointF(maskDraft_.linear.startX, maskDraft_.linear.startY));
             const QPointF b = normToWidget(
                 QPointF(maskDraft_.linear.endX, maskDraft_.linear.endY));
             painter.drawLine(a, b);
+            painter.setBrush(QColor(255, 255, 255, 210));
             painter.drawEllipse(a, 4, 4);
             painter.drawEllipse(b, 4, 4);
+            painter.setBrush(Qt::NoBrush);
         } else if (maskTool_ == lrc::MaskType::RadialGradient) {
             const QPointF c = normToWidget(
                 QPointF(maskDraft_.radial.centerX, maskDraft_.radial.centerY));
@@ -886,7 +1004,9 @@ void ImageViewport::paintEvent(QPaintEvent*) {
             const double rx = maskDraft_.radial.radiusX * image_.width() * sx;
             const double ry = maskDraft_.radial.radiusY * image_.height() * sy;
             painter.drawEllipse(QRectF(c.x() - rx, c.y() - ry, rx * 2, ry * 2));
+            painter.setBrush(QColor(255, 255, 255, 210));
             painter.drawEllipse(c, 4, 4);
+            painter.setBrush(Qt::NoBrush);
         } else if (maskTool_ == lrc::MaskType::Brush) {
             // Brush cursor ring at the pointer.
             const double scale =

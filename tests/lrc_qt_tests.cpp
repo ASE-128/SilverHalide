@@ -526,6 +526,123 @@ void ViewportViewStabilityTest::setImageResetsView() {
 }
 
 // ---------------------------------------------------------------------------
+// Mask overlay rendering (AI weights, including the sub-mask branch)
+//
+// `ImageViewport::rebuildMaskOverlay` used to route AI masks through the
+// geometry-only `Pipeline::brushWeightField`, whose MaskType::AiMask case
+// returns a constant 0.5. The overlay therefore painted one flat 50% red wash
+// over the whole frame -- reading as "everything is selected" -- while the
+// render applied the real content-driven field, and it did so in both the plain
+// branch and the colour/luminance sub-mask branch. These cases drive the real
+// widget and inspect the pixels it composites, so they fail again if the
+// overlay stops following the AI field.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Mean overlay alpha of an image band. The overlay raster encodes its weight as
+// the red alpha (`alpha = weight * 150`), so averaging a band instead of reading
+// one pixel keeps the value stable against the anti-aliased mask edges.
+double meanOverlayAlpha(const QImage& img, double y0Frac, double y1Frac) {
+    const int y0 = static_cast<int>(img.height() * y0Frac);
+    const int y1 = static_cast<int>(img.height() * y1Frac);
+    const int x0 = static_cast<int>(img.width() * 0.3);
+    const int x1 = static_cast<int>(img.width() * 0.7);
+    double sum = 0.0;
+    int count = 0;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            sum += static_cast<double>(qAlpha(img.pixel(x, y)));
+            ++count;
+        }
+    }
+    return count > 0 ? sum / count : 0.0;
+}
+
+// A uniform mid-grey preview: the base is neutral, so every red tint in the
+// overlay comes from the weight field, and the sky heuristic's only signal is
+// its upper-region bias.
+QImage neutralPreview(int w, int h) {
+    QImage img(w, h, QImage::Format_RGB32);
+    img.fill(QColor(128, 128, 128));
+    return img;
+}
+
+} // namespace
+
+class MaskOverlayRenderTest : public QObject {
+    Q_OBJECT
+private slots:
+    void aiMaskOverlayFollowsFieldWithSubMask();
+    void aiOverlayRecomputeIsDebounced();
+};
+
+void MaskOverlayRenderTest::aiMaskOverlayFollowsFieldWithSubMask() {
+    ImageViewport vp;
+    vp.resize(480, 360);
+    vp.setImage(neutralPreview(480, 360));
+
+    lrc::Mask m;
+    m.type = lrc::MaskType::AiMask;
+    m.ai.target = lrc::AiMaskTarget::Sky;
+    // A luminance sub-mask that passes every pixel (widest range, no softness),
+    // so the combined weight is exactly the AI field. This is the branch that
+    // used to multiply the 0.5 placeholder by the sub-mask.
+    m.useLuminance = true;
+    m.luminanceRef = 50.0f;
+    m.luminanceRange = 100.0f;
+    m.luminanceSmoothness = 0.0f;
+
+    vp.setMaskTool(lrc::MaskType::AiMask);
+    vp.setMaskDraft(m);
+
+    const QImage overlay = vp.maskOverlayImage();
+    QVERIFY2(!overlay.isNull(),
+             qPrintable(QStringLiteral("overlay=%1x%2")
+                            .arg(overlay.width())
+                            .arg(overlay.height())));
+    const double top = meanOverlayAlpha(overlay, 0.05, 0.20);
+    const double bottom = meanOverlayAlpha(overlay, 0.80, 0.95);
+    QVERIFY2(top > bottom + 40.0,
+             qPrintable(QStringLiteral("top=%1 bottom=%2").arg(top).arg(bottom)));
+}
+
+void MaskOverlayRenderTest::aiOverlayRecomputeIsDebounced() {
+    ImageViewport vp;
+    vp.resize(480, 360);
+    vp.setImage(neutralPreview(480, 360));
+
+    lrc::Mask m;
+    m.type = lrc::MaskType::AiMask;
+    m.ai.target = lrc::AiMaskTarget::Sky;
+    m.ai.threshold = 0.5f;
+    vp.setMaskTool(lrc::MaskType::AiMask);
+    vp.setMaskDraft(m);
+
+    const double before = meanOverlayAlpha(vp.maskOverlayImage(), 0.05, 0.20);
+    QVERIFY2(before > 40.0, qPrintable(QStringLiteral("before=%1").arg(before)));
+
+    // A parameter edit invalidates the memo, but the segmentation pass must not
+    // run synchronously: the overlay keeps the previous weights and catches up
+    // when the debounce expires. That is what stops a drag of the AI feather
+    // slider from running one inference per tick on the GUI thread.
+    lrc::Mask hot = m;
+    hot.ai.threshold = 0.9f;  // far above the heuristic's upper-region weight
+    vp.setMaskDraft(hot);
+    const double duringDrag = meanOverlayAlpha(vp.maskOverlayImage(), 0.05, 0.20);
+    QVERIFY2(duringDrag > before - 5.0 && duringDrag < before + 5.0,
+             qPrintable(QStringLiteral("during=%1 before=%2")
+                            .arg(duringDrag)
+                            .arg(before)));
+
+    QTest::qWait(2 * lrc::app::throttle::kAiOverlayFieldDebounceMs + 100);
+    const double after = meanOverlayAlpha(vp.maskOverlayImage(), 0.05, 0.20);
+    QVERIFY2(after < duringDrag - 20.0,
+             qPrintable(QStringLiteral("after=%1 during=%2")
+                            .arg(after)
+                            .arg(duringDrag)));
+}
+
+// ---------------------------------------------------------------------------
 // AI model availability surfacing
 //
 // Regression coverage for "every AI feature silently does nothing": with no
@@ -1533,6 +1650,10 @@ int main(int argc, char** argv) {
     }
     {
         ViewportViewStabilityTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        MaskOverlayRenderTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
     {

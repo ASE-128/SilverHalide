@@ -19,10 +19,15 @@
 // heuristic mask paths run instead (see AiDenoiseProcessor / AiMaskGenerator
 // for the contract). When AI is enabled but Pipeline::globalAiEngine() is null
 // (headless tests, pre-MainWindow init), the same fallbacks run.
+// AiMaskGenerator is included unconditionally: it is pure C++ and its contract
+// (AiMaskGenerator.h) is to fall back to a heuristic mask when the model is
+// unavailable, so LRC_ENABLE_AI=OFF builds still get a usable weight. Guarding
+// the include made that fallback unreachable and left AI masks weightless.
+#include "engine/AiMaskGenerator.h"
+
 #ifdef LRC_ENABLE_AI
 #  include "engine/AiDenoiseProcessor.h"
 #  include "engine/AiInference.h"
-#  include "engine/AiMaskGenerator.h"
 #endif
 
 // M4-3 optional SIMD batches. Defined by CMake only when the SIMD path is
@@ -2182,11 +2187,11 @@ float Pipeline::maskWeight(const Mask& m, int w, int h, float nx, float ny) {
         }
         case MaskType::AiMask:
             // AiMask is content-driven (semantic segmentation) and can only
-            // be evaluated with pixel access in applyLocalAdjustments. The
-            // pure-geometry maskWeight path has no buffer to run the model
-            // on, so return a neutral 0.5 weight — visible in the Alt-overlay
-            // but non-authoritative. The real weight is generated inline in
-            // applyLocalAdjustments via AiMaskGenerator::generate.
+            // be evaluated with pixel access, which this pure-geometry path does
+            // not have. Return a neutral placeholder for any geometry-only
+            // caller; the render (applyLocalAdjustments) and the UI overlay both
+            // route AI masks through Pipeline::aiMaskWeightField instead, so this
+            // value is never used as an AI mask's weight.
             return 0.5f;
         case MaskType::None:
         default:
@@ -2231,6 +2236,27 @@ Pipeline::brushWeightField(const Mask& mask, int w, int h) {
     g_weightCache.push_back(WeightEntry{keyHash, w, h, field});
     g_weightCacheBytes += bytes;
     evictWeightCacheLocked();
+    return field;
+}
+
+std::shared_ptr<const std::vector<float>>
+Pipeline::aiMaskWeightField(const Mask& mask, const ImageBuffer& src) {
+    if (mask.type != MaskType::AiMask || src.width() <= 0 || src.height() <= 0)
+        return {};
+    // A null engine is the normal state for LRC_ENABLE_AI=OFF builds and for
+    // headless tests; AiMaskGenerator then resolves to its heuristic fallback
+    // instead of failing, which is what its header contract promises.
+    AiMaskGenerator generator(globalAiEngine());
+    auto maskBuf = generator.generate(src, mask.ai);
+    if (!maskBuf || maskBuf->width() != src.width() ||
+        maskBuf->height() != src.height())
+        return {};
+    // generate() packs the single-channel weight into R=G=B.
+    const size_t n = static_cast<size_t>(src.width()) * src.height();
+    const float* mp = reinterpret_cast<const float*>(maskBuf->data().data());
+    auto field = std::make_shared<std::vector<float>>(n);
+    for (size_t i = 0; i < n; ++i)
+        (*field)[i] = mp[i * 3];
     return field;
 }
 
@@ -2438,46 +2464,28 @@ void Pipeline::applyLocalAdjustments(const Adjustments& a, float* p, int w,
         //   • Colour-range masks: HSL distance evaluated per pixel in the blend
         //     loop below (no field needed).
         //   • AiMask : semantic segmentation requires pixel
-        //     content, so the field is generated here from the current buffer.
-        //     NOT cached globally — the result depends on image pixels and
-        //     caching would thrash on every preview frame, evicting geometry
-        //     masks. When LRC_ENABLE_AI is off or the engine/model is
-        //     unavailable, the mask is skipped (manual geometry masks remain
-        //     the user's primary tool).
+        //     content, so the field is generated here from the current buffer via
+        //     aiMaskWeightField. That entry point runs the segmentation model
+        //     when one is loaded and AiMaskGenerator's heuristic fallback
+        //     otherwise, so the mask still contributes weight in builds without
+        //     AI (LRC_ENABLE_AI=OFF) or before a model is downloaded. NOT cached
+        //     globally — the result depends on image pixels and caching would
+        //     thrash on every preview frame, evicting geometry masks.
         std::shared_ptr<const std::vector<float>> field;
         if (m.type == MaskType::ColorRange) {
             // Handled in the blend loop below (per-pixel HSL distance).
         } else if (m.type == MaskType::AiMask) {
-#ifdef LRC_ENABLE_AI
-            auto* engine = Pipeline::globalAiEngine();
-            const std::string modelId = m.ai.modelIdOverride.empty()
-                ? std::string(defaultModelIdFor(m.ai.target))
-                : m.ai.modelIdOverride;
-            // Prompt masks use an encoder+decoder pair rather than a single
-            // model, so defaultModelIdFor(Prompt)=="" would fail hasModel().
-            // Route them through generate() unconditionally — AiMaskGenerator
-            // falls back to a zero mask when the models are unavailable.
-            const bool promptMask = (m.ai.target == AiMaskTarget::Prompt);
-            if (engine && (promptMask || engine->hasModel(modelId))) {
-                // Wrap p into a fresh F32 buffer (single memcpy; the
-                // segmentation inference cost dominates). AiMaskGenerator
-                // returns an RGB buffer where R=G=B=weight; collapse to a
-                // single-channel weight field for the blend loop.
-                auto buf = ImageBuffer::create(w, h, PixelFormat::F32);
-                std::memcpy(buf->data().data(), p, n * 3 * sizeof(float));
-                AiMaskGenerator gen(engine);
-                auto maskBuf = gen.generate(*buf, m.ai);
-                if (maskBuf) {
-                    auto f = std::make_shared<std::vector<float>>(n);
-                    const float* mp = reinterpret_cast<const float*>(
-                        maskBuf->data().data());
-                    for (size_t i = 0; i < n; ++i)
-                        (*f)[i] = mp[i * 3];
-                    field = f;
-                }
-            }
-#endif
-            if (!field) continue;  // AI off / model missing / generation failed
+            // Content-driven weight: hand the current pixels to the generator,
+            // which uses the segmentation model when it is loaded and its
+            // heuristic fallback otherwise. Gating this on hasModel() (as the
+            // previous implementation did) silently turned every AI mask into a
+            // no-op whenever the model was missing, contradicting both
+            // AiMaskGenerator's contract and the "heuristicFallback when the
+            // model is unavailable" note in DevelopPanel::addAiMask.
+            auto buf = ImageBuffer::create(w, h, PixelFormat::F32);
+            std::memcpy(buf->data().data(), p, n * 3 * sizeof(float));
+            field = Pipeline::aiMaskWeightField(m, *buf);
+            if (!field) continue;  // only for a degenerate buffer
         } else {
             field = Pipeline::brushWeightField(m, w, h);
             if (!field) continue;  // defensive only: never null for valid w/h

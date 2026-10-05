@@ -230,6 +230,30 @@ public:
     static std::shared_ptr<const std::vector<float>> brushWeightField(
         const Mask& mask, int width, int height);
 
+    /**
+     * @brief Rasterizes an AI mask's per-pixel weight against real pixel data.
+     *
+     * AI masks are content-driven, so their weight cannot come from
+     * `brushWeightField` (which is geometry-only and deliberately returns a
+     * neutral placeholder for them). This is the single entry point both the
+     * render and the UI overlay use, so what the user sees is what gets applied.
+     *
+     * @param mask Mask with `type == MaskType::AiMask`; `mask.ai` selects the
+     *        target, threshold, feather and click prompts.
+     * @param src Source pixels to segment (any ImageBuffer format: F32 / U16 /
+     *        U8 RGB).
+     * @return A width*height weight buffer matching `src`'s dimensions, or null
+     *         when `mask` is not an AI mask or `src` is empty. Never null for a
+     *         valid AI mask: AiMaskGenerator falls back to its pure-C++ heuristic
+     *         when the model is unavailable, and to a zero mask beyond that.
+     *
+     * @note Runs the generator on the calling thread. The UI overlay must
+     *       memoise the result (ImageViewport keeps a one-entry cache) so a
+     *       repaint never re-runs inference.
+     */
+    static std::shared_ptr<const std::vector<float>> aiMaskWeightField(
+        const Mask& mask, const ImageBuffer& src);
+
     // Post-crop vignette weight field for the render buffer. Entry y*w+x is the
     // geometric vignette weight in [0,1] (0 at the buffer's geometric centre,
     // 1 at the corners). It depends only on midpoint/roundness/feather/style and
