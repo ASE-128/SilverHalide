@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 namespace lrc {
@@ -27,7 +28,7 @@ std::optional<std::string> readAll(const std::filesystem::path& path) {
 // MoveFileExW(MOVEFILE_REPLACE_EXISTING), so an existing target is replaced;
 // if that is not supported, a remove-then-rename fallback is attempted.
 bool writeFileAtomic(const std::filesystem::path& path,
-                     const std::string& text) {
+                     std::string_view text) {
     std::filesystem::path tmpPath = path;
     tmpPath += ".tmp";
 
@@ -174,22 +175,27 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
         mo["luminanceRange"] = m.luminanceRange;
         mo["luminanceSmoothness"] = m.luminanceSmoothness;
         mo["maskUnion"] = m.maskUnion;
+        // Geometry accessors never throw: a type/alternative mismatch reads as
+        // the alternative's defaults, so the emitted keys and values are
+        // unchanged from the pre-variant serialiser.
         if (m.type == MaskType::LinearGradient) {
-            mo["startX"] = m.linear.startX;
-            mo["startY"] = m.linear.startY;
-            mo["endX"] = m.linear.endX;
-            mo["endY"] = m.linear.endY;
-            mo["feather"] = m.linear.feather;
+            const LinearGradientMask& lg = m.linear();
+            mo["startX"] = lg.startX;
+            mo["startY"] = lg.startY;
+            mo["endX"] = lg.endX;
+            mo["endY"] = lg.endY;
+            mo["feather"] = lg.feather;
         } else if (m.type == MaskType::RadialGradient) {
-            mo["centerX"] = m.radial.centerX;
-            mo["centerY"] = m.radial.centerY;
-            mo["radiusX"] = m.radial.radiusX;
-            mo["radiusY"] = m.radial.radiusY;
-            mo["feather"] = m.radial.feather;
-            mo["radialInvert"] = m.radial.invert;
+            const RadialGradientMask& rg = m.radial();
+            mo["centerX"] = rg.centerX;
+            mo["centerY"] = rg.centerY;
+            mo["radiusX"] = rg.radiusX;
+            mo["radiusY"] = rg.radiusY;
+            mo["feather"] = rg.feather;
+            mo["radialInvert"] = rg.invert;
         } else if (m.type == MaskType::Brush) {
             json::Value dabs = json::Value::array();
-            for (const BrushDab& d : m.brush) {
+            for (const BrushDab& d : m.brush()) {
                 json::Value dObj = json::Value::array();
                 dObj.push_back(json::Value(d.x));
                 dObj.push_back(json::Value(d.y));
@@ -199,14 +205,15 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
             }
             mo["brush"] = std::move(dabs);
         } else if (m.type == MaskType::ColorRange) {
-            mo["hasReference"] = m.color.hasReference;
-            mo["refR"] = m.color.refR;
-            mo["refG"] = m.color.refG;
-            mo["refB"] = m.color.refB;
-            mo["hueTolerance"] = m.color.hueTolerance;
-            mo["satTolerance"] = m.color.satTolerance;
-            mo["lumaTolerance"] = m.color.lumaTolerance;
-            mo["softness"] = m.color.softness;
+            const ColorRangeMask& cr = m.color();
+            mo["hasReference"] = cr.hasReference;
+            mo["refR"] = cr.refR;
+            mo["refG"] = cr.refG;
+            mo["refB"] = cr.refB;
+            mo["hueTolerance"] = cr.hueTolerance;
+            mo["satTolerance"] = cr.satTolerance;
+            mo["lumaTolerance"] = cr.lumaTolerance;
+            mo["softness"] = cr.softness;
         }
         masks.push_back(std::move(mo));
     }
@@ -269,14 +276,15 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
         for (const Mask& m : a.masks) {
             if (m.type != MaskType::AiMask)
                 continue;
+            const AiMaskParams& aip = m.ai();
             json::Value ao = json::Value::object();
-            ao["aiTarget"] = static_cast<int>(m.ai.target);
-            ao["aiThreshold"] = m.ai.threshold;
-            ao["aiFeather"] = m.ai.feather;
-            ao["aiInvert"] = m.ai.invert;
-            ao["aiModelInputSize"] = m.ai.modelInputSize;
-            ao["aiCachedWeightVersion"] = m.ai.cachedWeightVersion;
-            ao["aiModelIdOverride"] = m.ai.modelIdOverride;
+            ao["aiTarget"] = static_cast<int>(aip.target);
+            ao["aiThreshold"] = aip.threshold;
+            ao["aiFeather"] = aip.feather;
+            ao["aiInvert"] = aip.invert;
+            ao["aiModelInputSize"] = aip.modelInputSize;
+            ao["aiCachedWeightVersion"] = aip.cachedWeightVersion;
+            ao["aiModelIdOverride"] = aip.modelIdOverride;
             aiMaskArr.push_back(std::move(ao));
         }
         root["aiMasks"] = std::move(aiMaskArr);
@@ -423,24 +431,30 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
             m.luminanceSmoothness =
                 static_cast<float>(mo["luminanceSmoothness"].asNumber(50.0));
             m.maskUnion = mo["maskUnion"].asBool(false);
+            // Fill the alternative selected by `type`. The mutable accessors
+            // re-seat the variant on first use, so a missing geometry block
+            // keeps the same per-field defaults as the pre-variant members.
             if (m.type == MaskType::LinearGradient) {
-                m.linear.startX = static_cast<float>(mo["startX"].asNumber(0.0));
-                m.linear.startY = static_cast<float>(mo["startY"].asNumber(0.0));
-                m.linear.endX = static_cast<float>(mo["endX"].asNumber(1.0));
-                m.linear.endY = static_cast<float>(mo["endY"].asNumber(0.0));
-                m.linear.feather = static_cast<float>(mo["feather"].asNumber(0.5));
+                LinearGradientMask& lg = m.linear();
+                lg.startX = static_cast<float>(mo["startX"].asNumber(0.0));
+                lg.startY = static_cast<float>(mo["startY"].asNumber(0.0));
+                lg.endX = static_cast<float>(mo["endX"].asNumber(1.0));
+                lg.endY = static_cast<float>(mo["endY"].asNumber(0.0));
+                lg.feather = static_cast<float>(mo["feather"].asNumber(0.5));
             } else if (m.type == MaskType::RadialGradient) {
-                m.radial.centerX = static_cast<float>(mo["centerX"].asNumber(0.5));
-                m.radial.centerY = static_cast<float>(mo["centerY"].asNumber(0.5));
-                m.radial.radiusX = static_cast<float>(mo["radiusX"].asNumber(0.4));
-                m.radial.radiusY = static_cast<float>(mo["radiusY"].asNumber(0.4));
-                m.radial.feather = static_cast<float>(mo["feather"].asNumber(0.5));
-                m.radial.invert = mo["radialInvert"].asBool(false);
+                RadialGradientMask& rg = m.radial();
+                rg.centerX = static_cast<float>(mo["centerX"].asNumber(0.5));
+                rg.centerY = static_cast<float>(mo["centerY"].asNumber(0.5));
+                rg.radiusX = static_cast<float>(mo["radiusX"].asNumber(0.4));
+                rg.radiusY = static_cast<float>(mo["radiusY"].asNumber(0.4));
+                rg.feather = static_cast<float>(mo["feather"].asNumber(0.5));
+                rg.invert = mo["radialInvert"].asBool(false);
             } else if (m.type == MaskType::Brush) {
                 if (mo.contains("brush") && mo["brush"].isArray()) {
+                    std::vector<BrushDab>& dabs = m.brush();
                     for (const json::Value& dArr : mo["brush"].items()) {
                         if (dArr.isArray() && dArr.size() == 4) {
-                            m.brush.push_back(BrushDab{
+                            dabs.push_back(BrushDab{
                                 static_cast<float>(dArr[0].asNumber(0.0)),
                                 static_cast<float>(dArr[1].asNumber(0.0)),
                                 static_cast<float>(dArr[2].asNumber(0.1)),
@@ -449,14 +463,15 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
                     }
                 }
             } else if (m.type == MaskType::ColorRange) {
-                m.color.hasReference = mo["hasReference"].asBool(false);
-                m.color.refR = static_cast<float>(mo["refR"].asNumber(0.0));
-                m.color.refG = static_cast<float>(mo["refG"].asNumber(0.0));
-                m.color.refB = static_cast<float>(mo["refB"].asNumber(0.0));
-                m.color.hueTolerance = mo["hueTolerance"].asNumber(40.0);
-                m.color.satTolerance = mo["satTolerance"].asNumber(0.5);
-                m.color.lumaTolerance = mo["lumaTolerance"].asNumber(0.5);
-                m.color.softness = mo["softness"].asNumber(0.5);
+                ColorRangeMask& cr = m.color();
+                cr.hasReference = mo["hasReference"].asBool(false);
+                cr.refR = static_cast<float>(mo["refR"].asNumber(0.0));
+                cr.refG = static_cast<float>(mo["refG"].asNumber(0.0));
+                cr.refB = static_cast<float>(mo["refB"].asNumber(0.0));
+                cr.hueTolerance = mo["hueTolerance"].asNumber(40.0);
+                cr.satTolerance = mo["satTolerance"].asNumber(0.5);
+                cr.lumaTolerance = mo["lumaTolerance"].asNumber(0.5);
+                cr.softness = mo["softness"].asNumber(0.5);
             }
             a.masks.push_back(std::move(m));
         }
@@ -525,15 +540,17 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
             for (size_t j = 0; j < a.masks.size(); ++j) {
                 if (a.masks[j].type == MaskType::AiMask) {
                     if (targetIdx == i) {
-                        // Fill the AiMask params.
-                        a.masks[j].ai.target = static_cast<AiMaskTarget>(
+                        // Fill the AiMask params. The mutable accessor re-seats
+                        // the variant to AiMaskParams on first use.
+                        AiMaskParams& aip = a.masks[j].ai();
+                        aip.target = static_cast<AiMaskTarget>(
                             std::clamp(ao["aiTarget"].asInt(0), 0, 2));
-                        a.masks[j].ai.threshold = ao["aiThreshold"].asNumber(0.5);
-                        a.masks[j].ai.feather = ao["aiFeather"].asNumber(0.05);
-                        a.masks[j].ai.invert = ao["aiInvert"].asBool(false);
-                        a.masks[j].ai.modelInputSize = ao["aiModelInputSize"].asInt(1024);
-                        a.masks[j].ai.cachedWeightVersion = ao["aiCachedWeightVersion"].asInt(0);
-                        a.masks[j].ai.modelIdOverride = ao["aiModelIdOverride"].asString();
+                        aip.threshold = ao["aiThreshold"].asNumber(0.5);
+                        aip.feather = ao["aiFeather"].asNumber(0.05);
+                        aip.invert = ao["aiInvert"].asBool(false);
+                        aip.modelInputSize = ao["aiModelInputSize"].asInt(1024);
+                        aip.cachedWeightVersion = ao["aiCachedWeightVersion"].asInt(0);
+                        aip.modelIdOverride = ao["aiModelIdOverride"].asString();
                         break;
                     }
                     ++targetIdx;

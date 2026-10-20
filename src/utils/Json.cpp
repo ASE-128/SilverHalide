@@ -1,63 +1,81 @@
 #include "utils/Json.h"
 
 #include <cctype>
-#include <cerrno>
+#include <charconv>
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 
 namespace lrc::json {
 
-Value& Value::operator[](const std::string& key) {
-    if (type_ != Type::Object)
-        *this = Value(Value::Type::Object);
-    return obj_[key];
+Value& Value::operator[](std::string_view key) {
+    if (!isObject())
+        data_ = Object();
+    auto& obj = std::get<Object>(data_);
+    // Look the key up first so an existing entry costs no allocation; the key
+    // is only copied out of the borrowed view when it must be inserted.
+    const auto it = obj.find(key);
+    if (it != obj.end())
+        return it->second;
+    return obj.emplace(std::string(key), Value()).first->second;
 }
 
-const Value& Value::operator[](const std::string& key) const {
+const Value& Value::operator[](std::string_view key) const {
     static const Value kNull;
-    if (type_ != Type::Object)
-        return kNull;
-    auto it = obj_.find(key);
-    return it == obj_.end() ? kNull : it->second;
-}
-
-bool Value::contains(const std::string& key) const {
-    return type_ == Type::Object && obj_.count(key) != 0;
-}
-
-size_t Value::size() const {
-    switch (type_) {
-    case Type::Array: return arr_.size();
-    case Type::Object: return obj_.size();
-    case Type::String: return str_.size();
-    default: return 0;
+    if (const auto* obj = std::get_if<Object>(&data_)) {
+        // Heterogeneous lookup through the transparent comparator: no
+        // temporary std::string for literal or string_view keys.
+        const auto it = obj->find(key);
+        return it == obj->end() ? kNull : it->second;
     }
+    return kNull;
+}
+
+bool Value::contains(std::string_view key) const noexcept {
+    if (const auto* obj = std::get_if<Object>(&data_))
+        return obj->find(key) != obj->end();
+    return false;
+}
+
+size_t Value::size() const noexcept {
+    if (const auto* str = std::get_if<std::string>(&data_))
+        return str->size();
+    if (const auto* arr = std::get_if<Array>(&data_))
+        return arr->size();
+    if (const auto* obj = std::get_if<Object>(&data_))
+        return obj->size();
+    return 0;
 }
 
 void Value::push_back(Value v) {
-    if (type_ != Type::Array)
-        *this = Value(Value::Type::Array);
-    arr_.push_back(std::move(v));
+    if (!isArray())
+        data_ = Array();
+    std::get<Array>(data_).push_back(std::move(v));
 }
 
 Value& Value::operator[](size_t index) {
     // Grows on demand, exactly like the object overload inserts a key. Growing
     // (instead of returning a shared mutable Null) removes the global mutable
     // state that made an out-of-range write a data race across threads.
-    if (type_ != Type::Array)
-        *this = Value(Value::Type::Array);
-    if (index >= arr_.size())
-        arr_.resize(index + 1);
-    return arr_[index];
+    if (!isArray())
+        data_ = Array();
+    auto& arr = std::get<Array>(data_);
+    if (index >= arr.size())
+        arr.resize(index + 1);
+    return arr[index];
 }
 
 const Value& Value::operator[](size_t index) const {
     static const Value kNull;
-    if (type_ != Type::Array || index >= arr_.size())
-        return kNull;
-    return arr_[index];
+    if (const auto* arr = std::get_if<Array>(&data_)) {
+        if (index < arr->size())
+            return (*arr)[index];
+    }
+    return kNull;
 }
 
 namespace {
@@ -66,10 +84,14 @@ namespace {
 // Parser
 // ---------------------------------------------------------------------------
 
+// Parser over a non-owning view of the source text. The view must stay valid
+// for the whole parse call; Value::parse guarantees that by borrowing the
+// caller's std::string for the duration of the call only.
 class Parser {
 public:
-    explicit Parser(const std::string& text) : text_(text) {}
+    explicit Parser(std::string_view text) : text_(text) {}
 
+    /** @brief Parses a whole document; trailing non-space input is an error. */
     std::optional<Value> parseRoot() {
         skipWs();
         auto v = parseValue();
@@ -82,7 +104,7 @@ public:
     }
 
 private:
-    const std::string& text_;
+    std::string_view text_;
     size_t pos_ = 0;
 
     void skipWs() {
@@ -264,11 +286,11 @@ private:
     }
 
     std::optional<Value> parseBool() {
-        if (text_.compare(pos_, 4, "true") == 0) {
+        if (text_.substr(pos_, 4) == "true") {
             pos_ += 4;
             return Value(true);
         }
-        if (text_.compare(pos_, 5, "false") == 0) {
+        if (text_.substr(pos_, 5) == "false") {
             pos_ += 5;
             return Value(false);
         }
@@ -276,7 +298,7 @@ private:
     }
 
     std::optional<Value> parseNull() {
-        if (text_.compare(pos_, 4, "null") == 0) {
+        if (text_.substr(pos_, 4) == "null") {
             pos_ += 4;
             return Value(nullptr);
         }
@@ -322,22 +344,39 @@ private:
                    std::isdigit(static_cast<unsigned char>(text_[pos_])))
                 ++pos_;
         }
-        const std::string token = text_.substr(start, pos_ - start);
-        // Integer tokens are kept exact (long long); anything with a fraction or
-        // an exponent goes through strtod. A token too large for long long falls
-        // back to double instead of losing the value.
-        if (token.find_first_of(".eE") == std::string::npos) {
-            errno = 0;
-            char* intEnd = nullptr;
-            const long long iv = std::strtoll(token.c_str(), &intEnd, 10);
-            if (intEnd && *intEnd == '\0' && errno != ERANGE)
+        // The token is a validated JSON number, so the conversion below only
+        // has to deal with representability, not with malformed input.
+        const std::string_view token = text_.substr(start, pos_ - start);
+        const char* const first = token.data();
+        const char* const last = first + token.size();
+        // Integer tokens are kept exact (long long); anything with a fraction
+        // or an exponent - and integers too large for long long - goes through
+        // the floating-point path, mirroring the previous strtoll/strtod code.
+        if (token.find_first_of(".eE") == std::string_view::npos) {
+            long long iv = 0;
+            const auto intResult = std::from_chars(first, last, iv);
+            if (intResult.ec == std::errc{} && intResult.ptr == last)
                 return Value(iv);
+            if (intResult.ec == std::errc::invalid_argument)
+                return std::nullopt;
         }
-        char* end = nullptr;
-        const double v = std::strtod(token.c_str(), &end);
-        if (!end || *end != '\0')
-            return std::nullopt;
-        return Value(v);
+        double dv = 0.0;
+        const auto fpResult = std::from_chars(first, last, dv);
+        if (fpResult.ec == std::errc{} && fpResult.ptr == last)
+            return Value(dv);
+        if (fpResult.ec == std::errc::result_out_of_range) {
+            // The previous implementation accepted magnitudes outside the
+            // double range as +/-inf (strtod returns HUGE_VAL); preserve that
+            // behavior. std::from_chars leaves the destination unmodified on
+            // range errors, so fall back to the C conversion for this rare
+            // path only.
+            const std::string copy(token);
+            char* end = nullptr;
+            const double value = std::strtod(copy.c_str(), &end);
+            if (end && *end == '\0')
+                return Value(value);
+        }
+        return std::nullopt;
     }
 };
 
@@ -345,88 +384,109 @@ private:
 // Serializer
 // ---------------------------------------------------------------------------
 
-void escapeString(std::ostream& os, const std::string& s) {
-    os << '"';
-    for (char c : s) {
+void appendEscapedString(std::string& out, const std::string& s) {
+    out += '"';
+    for (const char c : s) {
         switch (c) {
-        case '"': os << "\\\""; break;
-        case '\\': os << "\\\\"; break;
-        case '\b': os << "\\b"; break;
-        case '\f': os << "\\f"; break;
-        case '\n': os << "\\n"; break;
-        case '\r': os << "\\r"; break;
-        case '\t': os << "\\t"; break;
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
         default:
-            if (static_cast<unsigned char>(c) < 0x20)
-                os << "\\u" << std::hex << std::setw(4) << std::setfill('0')
-                   << static_cast<unsigned>(static_cast<unsigned char>(c))
-                   << std::dec << std::setfill(' ');
-            else
-                os << c;
+            if (static_cast<unsigned char>(c) < 0x20) {
+                // Match the historical stream output: \u followed by four
+                // lowercase hex digits (the high two are always 0 here).
+                static constexpr char kHex[] = "0123456789abcdef";
+                const auto v = static_cast<unsigned char>(c);
+                out += "\\u00";
+                out += kHex[(v >> 4) & 0x0F];
+                out += kHex[v & 0x0F];
+            } else {
+                out += c;
+            }
+            break;
         }
     }
-    os << '"';
+    out += '"';
 }
 
-void writeValue(std::ostream& os, const Value& v, bool pretty, int indent) {
+void appendNumber(std::string& out, const Value& v) {
+    if (v.isInt()) {
+        char buf[24];
+        const auto result = std::to_chars(buf, buf + sizeof(buf), v.asInt64());
+        out.append(buf, static_cast<size_t>(result.ptr - buf));
+        return;
+    }
+    // Floating-point formatting intentionally keeps the historical
+    // ostringstream + setprecision(17) form: the serialized bytes are part of
+    // the persisted preset / catalog format, and std::to_chars' shortest
+    // representation is not byte-compatible with it.
+    std::ostringstream os;
+    os << std::setprecision(17) << v.asNumber();
+    out += os.str();
+}
+
+void writeValue(std::string& out, const Value& v, bool pretty, int indent) {
     const auto pad = [&]() {
         if (pretty)
-            os << std::string(static_cast<size_t>(indent) * 2, ' ');
+            out.append(static_cast<size_t>(indent) * 2, ' ');
     };
-    const auto padNl = [&](int delta) {
+    // A separator is a newline followed by the *current* indent level (not the
+    // child level). The exact spacing is part of the persisted format, so it
+    // must not be corrected.
+    const auto padNl = [&]() {
         if (pretty) {
-            os << '\n';
+            out += '\n';
             pad();
         }
     };
     switch (v.type()) {
     case Value::Type::Null:
-        os << "null";
+        out += "null";
         break;
     case Value::Type::Bool:
-        os << (v.asBool() ? "true" : "false");
+        out += v.asBool() ? "true" : "false";
         break;
-    case Value::Type::Number: {
-        if (v.isInt())
-            os << v.asInt64();
-        else
-            os << std::setprecision(17) << v.asNumber();
+    case Value::Type::Number:
+        appendNumber(out, v);
         break;
-    }
     case Value::Type::String:
-        escapeString(os, v.asString());
+        appendEscapedString(out, v.asString());
         break;
     case Value::Type::Array: {
-        os << '[';
+        out += '[';
         const auto& items = v.items();
         for (size_t i = 0; i < items.size(); ++i) {
             if (i)
-                os << ',';
-            padNl(indent + 1);
-            writeValue(os, items[i], pretty, indent + 1);
+                out += ',';
+            padNl();
+            writeValue(out, items[i], pretty, indent + 1);
         }
         if (pretty && !items.empty())
-            os << '\n';
+            out += '\n';
         pad();
-        os << ']';
+        out += ']';
         break;
     }
     case Value::Type::Object: {
-        os << '{';
+        out += '{';
         const auto& members = v.members();
         size_t i = 0;
         for (const auto& [key, val] : members) {
             if (i++)
-                os << ',';
-            padNl(indent + 1);
-            escapeString(os, key);
-            os << (pretty ? ": " : ":");
-            writeValue(os, val, pretty, indent + 1);
+                out += ',';
+            padNl();
+            appendEscapedString(out, key);
+            out += (pretty ? ": " : ":");
+            writeValue(out, val, pretty, indent + 1);
         }
         if (pretty && !members.empty())
-            os << '\n';
+            out += '\n';
         pad();
-        os << '}';
+        out += '}';
         break;
     }
     }
@@ -435,12 +495,13 @@ void writeValue(std::ostream& os, const Value& v, bool pretty, int indent) {
 } // namespace
 
 std::string Value::serialize(bool pretty) const {
-    std::ostringstream os;
-    writeValue(os, *this, pretty, 0);
-    return os.str();
+    std::string out;
+    out.reserve(64);
+    writeValue(out, *this, pretty, 0);
+    return out;
 }
 
-std::optional<Value> Value::parse(const std::string& text) {
+std::optional<Value> Value::parse(std::string_view text) {
     Parser parser(text);
     return parser.parseRoot();
 }

@@ -243,21 +243,29 @@ bool FolderMonitor::startEventDriven() {
         return false;
     }
 
-    stopRequested_.store(false, std::memory_order_relaxed);
     eventState_ = std::move(state);
     eventDrivenActive_.store(true, std::memory_order_release);
-    eventThread_ =
-        std::thread(&FolderMonitor::eventThreadMain, this, eventState_.get());
+    // A lambda (rather than a member-function pointer) keeps the argument
+    // order explicit: std::jthread passes its stop_token before the callable
+    // arguments, so eventThreadMain() receives (stopToken, state).
+    eventThread_ = std::jthread(
+        [this, watcherState = eventState_.get()](std::stop_token stopToken) {
+            eventThreadMain(stopToken, watcherState);
+        });
     return true;
 }
 
 void FolderMonitor::stopEventDriven() {
-    std::thread t;
+    std::jthread t;
     {
         std::lock_guard<std::mutex> lock(eventMutex_);
         if (!eventThread_.joinable())
             return;
-        stopRequested_.store(true, std::memory_order_release);
+        // The stop token replaces the old hand-rolled atomic flag. The
+        // manual-reset stop event is still signalled so the thread can leave
+        // its blocking WaitForMultipleObjects instead of waiting for the next
+        // filesystem change.
+        eventThread_.request_stop();
         if (eventState_ && eventState_->stopEvent)
             SetEvent(eventState_->stopEvent);
         t = std::move(eventThread_);
@@ -271,7 +279,7 @@ void FolderMonitor::stopEventDriven() {
     eventState_.reset();
 }
 
-bool FolderMonitor::eventDrivenActive() const {
+bool FolderMonitor::eventDrivenActive() const noexcept {
     return eventDrivenActive_.load(std::memory_order_acquire);
 }
 
@@ -294,7 +302,8 @@ void FolderMonitor::requestRecalc() {
         wake();
 }
 
-void FolderMonitor::eventThreadMain(EventDrivenState* st) {
+void FolderMonitor::eventThreadMain(std::stop_token stopToken,
+                                   EventDrivenState* st) {
     // The first ReadDirectoryChangesW was queued by startEventDriven(); this
     // loop only waits for completion, notifies, then re-arms the next read.
     HANDLE waits[2] = {st->overlapped.hEvent, st->stopEvent};
@@ -302,7 +311,7 @@ void FolderMonitor::eventThreadMain(EventDrivenState* st) {
     // The owner relies on this to resume the polling fallback.
     bool abnormalExit = false;
 
-    while (!stopRequested_.load(std::memory_order_relaxed)) {
+    while (!stopToken.stop_requested()) {
         const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
         if (wait == WAIT_OBJECT_0 + 1) {  // stopEvent -> graceful shutdown
             CancelIoEx(st->directory, &st->overlapped);

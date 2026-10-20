@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #include "engine/Adjustments.h"
 #include "engine/ImageBuffer.h"
@@ -48,20 +49,25 @@ public:
 
     // Renders a preview whose longest side fits maxDim. When maxDim <= 0 the
     // full resolution is processed (export / 1:1). Results are cached.
-    ImageBufferPtr render(uint64_t imageId, const ImageBuffer& linear,
-                          const Adjustments& adjustments, int maxDim);
-    ImageBufferPtr renderFull(uint64_t imageId, const ImageBuffer& linear,
-                              const Adjustments& adjustments);
+    [[nodiscard]] ImageBufferPtr render(uint64_t imageId,
+                                        const ImageBuffer& linear,
+                                        const Adjustments& adjustments,
+                                        int maxDim);
+    [[nodiscard]] ImageBufferPtr renderFull(uint64_t imageId,
+                                            const ImageBuffer& linear,
+                                            const Adjustments& adjustments);
     // Renders at full resolution but stays in *linear ProPhoto* F32 space (no
     // sRGB conversion). Used for 16-bit TIFF and linear DNG export.
-    ImageBufferPtr renderLinearFull(uint64_t imageId, const ImageBuffer& linear,
-                                    const Adjustments& adjustments);
+    [[nodiscard]] ImageBufferPtr renderLinearFull(
+        uint64_t imageId, const ImageBuffer& linear,
+        const Adjustments& adjustments);
     // Renders at full resolution to display-ready sRGB U8, but does NOT write
     // the result into the LRU cache (renderFull would). This is the 1:1 view
     // entry point: a full-size U8 buffer is far too large for the preview LRU
     // and would evict every thumbnail.
-    ImageBufferPtr renderFullDisplay(uint64_t imageId, const ImageBuffer& linear,
-                                     const Adjustments& adjustments);
+    [[nodiscard]] ImageBufferPtr renderFullDisplay(
+        uint64_t imageId, const ImageBuffer& linear,
+        const Adjustments& adjustments);
 
     // Renders to an F32 linear ProPhoto buffer at a bounded resolution: no sRGB
     // conversion and no LRU interaction. Soft proofing uses it to feed the
@@ -73,9 +79,9 @@ public:
     //
     // @param linear  Linear ProPhoto source; never modified.
     // @param maxDim  Longest-edge cap; <= 0 keeps the source resolution.
-    ImageBufferPtr renderLinearBounded(const ImageBuffer& linear,
-                                       const Adjustments& adjustments,
-                                       int maxDim) const;
+    [[nodiscard]] ImageBufferPtr renderLinearBounded(
+        const ImageBuffer& linear, const Adjustments& adjustments,
+        int maxDim) const;
 
     // Preview-resolution render with per-stage incremental caching.
     // `source` is a linear ProPhoto buffer (F32 preferred; U16/U8 are converted);
@@ -92,12 +98,10 @@ public:
     // can derive a linear-light histogram without a second render pass. On a
     // full cache hit it is left untouched (nullptr); callers fall back to the
     // returned U8 buffer for the histogram.
-    ImageBufferPtr renderPreview(const ImageBuffer& source,
-                                 const Adjustments& adjustments,
-                                 const Size& targetSize,
-                                 int fullLongEdge = 0,
-                                 uint64_t imageId = 0,
-                                 ImageBufferPtr* linearDisplayOut = nullptr);
+    [[nodiscard]] ImageBufferPtr renderPreview(
+        const ImageBuffer& source, const Adjustments& adjustments,
+        const Size& targetSize, int fullLongEdge = 0, uint64_t imageId = 0,
+        ImageBufferPtr* linearDisplayOut = nullptr);
 
     // Computes a display-encoded RGB histogram by traversing the ENTIRE buffer
     // (no sampling), so bin counts are exact.
@@ -141,7 +145,8 @@ public:
     // sigma-scale factor for a preview whose working long edge is
     // `workingLongEdge` and whose native full-res long edge is `fullLongEdge`.
     // 0 / negative edges (unknown) -> 1.0 (no scaling); never exceeds 1.0.
-    static float previewSigmaScale(int workingLongEdge, int fullLongEdge);
+    static float previewSigmaScale(int workingLongEdge,
+                                   int fullLongEdge) noexcept;
 
     // Effective spatial-kernel sizes (px) for a working buffer of w*h at the
     // given sigma scale. Single source of truth for applySpatialAdjustments and
@@ -156,8 +161,8 @@ public:
         float colorNRSigma = 0.0f;     // chroma noise-reduction sigma (scaled)
         float grainCell = 0.0f;        // film-grain cell size (scaled)
     };
-    static SpatialKernels spatialKernels(const Adjustments& adjustments,
-                                         int w, int h, float sigmaScale);
+    static SpatialKernels spatialKernels(const Adjustments& adjustments, int w,
+                                         int h, float sigmaScale) noexcept;
 
     void clearCache();
     void setCacheCapacity(size_t capacityBytes);
@@ -183,8 +188,8 @@ public:
     //          setGlobalAiEngine() before any preview/export thread starts and
     //          must never replace it at runtime. setGlobalAiEngine() is meant
     //          to be called once from the main thread at startup.
-    static AiInferenceEngine* globalAiEngine();
-    static void setGlobalAiEngine(AiInferenceEngine* engine);
+    static AiInferenceEngine* globalAiEngine() noexcept;
+    static void setGlobalAiEngine(AiInferenceEngine* engine) noexcept;
 
     // LRU cache budget and current usage in bytes (thread-safe).
     size_t cacheCapacityBytes() const;
@@ -218,8 +223,8 @@ public:
 
     // Returns the mask weight in [0,1] at normalized image coordinates
     // (nx, ny in [0,1]). Exposed for tests and for the Alt-preview overlay.
-    static float maskWeight(const Mask& mask, int width, int height,
-                            float nx, float ny);
+    static float maskWeight(const Mask& mask, int width, int height, float nx,
+                            float ny) noexcept;
 
     // Rasterizes the mask's per-pixel weight into a w*h buffer (values in
     // [0,1]). Entry y*w+x is bit-identical to maskWeight at the same sample
@@ -227,8 +232,8 @@ public:
     // Results are cached globally, keyed by (Mask::geometryHash, w, h), so a
     // brush stroke / local-slider change that leaves the geometry intact hits
     // the cache. Returns null only for non-positive dimensions.
-    static std::shared_ptr<const std::vector<float>> brushWeightField(
-        const Mask& mask, int width, int height);
+    [[nodiscard]] static std::shared_ptr<const std::vector<float>>
+    brushWeightField(const Mask& mask, int width, int height);
 
     /**
      * @brief Rasterizes an AI mask's per-pixel weight against real pixel data.
@@ -238,8 +243,8 @@ public:
      * neutral placeholder for them). This is the single entry point both the
      * render and the UI overlay use, so what the user sees is what gets applied.
      *
-     * @param mask Mask with `type == MaskType::AiMask`; `mask.ai` selects the
-     *        target, threshold, feather and click prompts.
+     * @param mask Mask with `type == MaskType::AiMask`; `mask.ai()` selects
+     *        the target, threshold, feather and click prompts.
      * @param src Source pixels to segment (any ImageBuffer format: F32 / U16 /
      *        U8 RGB).
      * @return A width*height weight buffer matching `src`'s dimensions, or null
@@ -251,8 +256,8 @@ public:
      *       memoise the result (ImageViewport keeps a one-entry cache) so a
      *       repaint never re-runs inference.
      */
-    static std::shared_ptr<const std::vector<float>> aiMaskWeightField(
-        const Mask& mask, const ImageBuffer& src);
+    [[nodiscard]] static std::shared_ptr<const std::vector<float>>
+    aiMaskWeightField(const Mask& mask, const ImageBuffer& src);
 
     // Post-crop vignette weight field for the render buffer. Entry y*w+x is the
     // geometric vignette weight in [0,1] (0 at the buffer's geometric centre,
@@ -261,14 +266,14 @@ public:
     // reuses the cached field. Results are cached globally, keyed by those
     // parameters and w/h. Returns null only for non-positive
     // dimensions.
-    static std::shared_ptr<const std::vector<float>>
+    [[nodiscard]] static std::shared_ptr<const std::vector<float>>
     postCropVignetteWeightField(const Adjustments& adjustments, int width,
                                 int height);
 
     // Per-pixel weight [0,1] for a colour-range mask, compared in HSL space.
     // r/g/b are linear RGB [0,1]. Exposed for tests and the UI weight overlay.
     static float colorRangeWeight(const ColorRangeMask& mask, float r, float g,
-                                  float b);
+                                  float b) noexcept;
 
     // --- Sub-mask weight helpers ---------------------------------------------
     // Per-pixel weight [0,1] of a geometry mask's colour-range modifier. The
@@ -276,14 +281,15 @@ public:
     // reference; `colorRange` sets the band width and `colorSmoothness` its
     // transition softness. Returns 1.0 (the identity element of the product)
     // when the modifier is disabled. r/g/b are linear ProPhoto RGB [0,1].
-    static float colorSubMaskWeight(const Mask& mask, float r, float g, float b);
+    static float colorSubMaskWeight(const Mask& mask, float r, float g,
+                                    float b) noexcept;
 
     // Per-pixel weight [0,1] of a geometry mask's luminance-range modifier:
     // |L - luminanceRef| with L = 0.2126R + 0.7152G + 0.0722B. `luminanceRange`
     // sets the band width, `luminanceSmoothness` its softness. Returns 1.0
     // when the modifier is disabled.
     static float luminanceSubMaskWeight(const Mask& mask, float r, float g,
-                                        float b);
+                                        float b) noexcept;
 
     // Combined final weight [0,1] at normalized image coordinates (nx, ny):
     // the geometry weight (invert folded in) combined with the enabled
@@ -293,7 +299,7 @@ public:
     // and the viewport's combined weight overlay.
     static float combinedMaskWeight(const Mask& mask, int width, int height,
                                     float nx, float ny, float r, float g,
-                                    float b);
+                                    float b) noexcept;
 
     // Computes an automatic exposure/contrast/vibrance suggestion by analysing
     // the linear buffer's luminance (mean -> mid-gray, percentile stretch,
@@ -359,7 +365,7 @@ public:
     // neutralise it (the exact inverse of the pipeline's white-balance gains,
     // see estimateWhiteBalance in Pipeline.cpp for the derivation).
     static WhiteBalanceEstimate estimateWhiteBalance(float lr, float lg,
-                                                     float lb);
+                                                     float lb) noexcept;
 
     // --- LR-style Alt-key visualization ------------------------------------
     // While holding Alt over a slider, Lightroom replaces the preview with a
@@ -374,9 +380,9 @@ public:
 
     // Renders the diagnostic overlay described by `mode` from the linear
     // working-space buffer. Returns an empty buffer on failure.
-    ImageBufferPtr visualizeOverlay(const ImageBuffer& linear,
-                                    const Adjustments& adjustments,
-                                    VisualizeMode mode, int maxDim) const;
+    [[nodiscard]] ImageBufferPtr visualizeOverlay(
+        const ImageBuffer& linear, const Adjustments& adjustments,
+        VisualizeMode mode, int maxDim) const;
 
 private:
     struct CacheKey {
@@ -421,18 +427,75 @@ private:
     // the final conversion and always recomputes after E), so caching it would
     // only consume the memory budget. Reuse rule: find the first changed stage,
     // reuse every retained stage before it as input, recompute from there.
+    //
+    // Ownership model (this is what removes the per-stage deep copies):
+    //  * `retained[0..3]` hold stage outputs as shared_ptr<const ImageBuffer>.
+    //    The const type is the ownership guarantee: once a stage output is
+    //    cached no writer exists, so later stages and later renders may read it
+    //    directly instead of cloning it first.
+    //  * A stage whose parameters are neutral is bit-identical to its input, so
+    //    its output *is* the previous stage's snapshot: two retained slots may
+    //    therefore alias one buffer. Every reader is const, so that is safe;
+    //    the byte accounting counts each distinct allocation once.
+    //  * Writable buffers only ever come from `WorkBufferPool`, which lives
+    //    under the same mutex. A buffer is only pooled when it has no other
+    //    owner, so a pooled (writable) buffer can never alias a retained
+    //    (read-only) snapshot. Writes therefore cannot corrupt a cached stage.
+    //
+    // Stage buffers are exact-size F32 (width * height * 3 * 4 bytes).
+    struct WorkBufferPool {
+        // Idle F32 working buffers, all exactly width x height. Deliberately
+        // small: the retained stages are the steady-state working set, and the
+        // pool only exists to make a full recompute allocation-free.
+        std::vector<ImageBufferPtr> idle;
+        int width = 0;
+        int height = 0;
+
+        // Returns a writable F32 buffer of exactly w x h. Reuses an idle buffer
+        // (no allocation, no zero-fill) or allocates one. A working-size change
+        // drops the idle set, which only happens when the preview size changes.
+        //
+        // @note Caller must hold renderStateMutex_.
+        ImageBufferPtr acquire(int w, int h);
+        // Returns an exclusively owned buffer to the pool. A buffer with any
+        // other owner (retained snapshot, caller-owned linear display buffer)
+        // is dropped instead of pooled so it can never be written through a
+        // live alias.
+        //
+        // @note Caller must hold renderStateMutex_; pass the only reference
+        //       (std::move) so the no-other-owner check is meaningful.
+        void release(ImageBufferPtr buffer);
+        // Drops every idle buffer, releasing their memory.
+        void clear();
+    };
     struct RenderState {
         uint64_t sourceKey = 0;        // imageId + working size + content fingerprint
         uint64_t stageHashes[6] = {};  // last computed per-stage hashes
-        ImageBufferPtr stages[6];      // 0..3 F32, 4 unused (E), 5 U8 (F)
-        bool present[6] = {};          // which stages are currently retained
-        uint32_t accessTick[6] = {};   // LRU timestamp per retained stage
+        // Immutable stage outputs A..D (index 4 / stage E is never retained).
+        std::shared_ptr<const ImageBuffer> retained[4];
+        bool present[4] = {};          // which stages are currently retained
+        uint32_t accessTick[4] = {};   // LRU timestamp per retained stage
         uint32_t tick = 0;
-        size_t bytes = 0;              // sum of retained stage sizes
+        // Stage F (display-ready U8 sRGB). Mutable because renderPreview
+        // returns it to callers, who may hold it across renders (existing
+        // contract: a full cache hit hands back the same frame object).
+        ImageBufferPtr finalFrame;
         bool valid = false;
+        WorkBufferPool work;
     };
     void touchStageLocked(int stage);
     void evictIncrementalLocked();
+    // Sum of the retained buffers' bytes, counting each distinct allocation
+    // once (consecutive no-op stages share one immutable snapshot).
+    //
+    // @note Caller must hold renderStateMutex_.
+    size_t retainedBytesLocked() const;
+    // Releases retained[stage] (if present). `poolBuffer == true` recycles an
+    // exclusively owned buffer into WorkBufferPool; `false` drops it so the
+    // memory is actually given back (the eviction policy).
+    //
+    // @note Caller must hold renderStateMutex_.
+    void dropRetainedStageLocked(int stage, bool poolBuffer);
     uint64_t computeSourceKey(const ImageBuffer& source, int workingW,
                               int workingH, int fullLongEdge,
                               uint64_t imageId) const;

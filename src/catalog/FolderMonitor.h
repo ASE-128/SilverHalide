@@ -23,10 +23,12 @@
  *
  * Threading: poll()/start()/currentFiles() are serialized by an internal
  * mutex. The event watcher thread only touches its own state plus the wake
- * callback (guarded by a separate mutex); it is stopped by stopEventDriven()
- * or by the destructor, which joins the thread. The change callback always
- * runs on the thread that calls poll() — typically the UI thread — never on
- * the watcher thread.
+ * callback (guarded by a separate mutex); it runs as a std::jthread and is
+ * stopped through its stop token (std::jthread::request_stop(), with the
+ * Win32 stop event signalled so the blocking wait returns promptly).
+ * stopEventDriven() and the destructor join the thread. The change callback
+ * always runs on the thread that calls poll(), typically the UI thread,
+ * never on the watcher thread.
  */
 
 #include <atomic>
@@ -37,6 +39,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <stop_token>
 #include <thread>
 #include <vector>
 
@@ -91,9 +94,14 @@ public:
     ///        destructor calls it automatically. Safe from any thread.
     void stopEventDriven();
 
-    /// @brief Whether the event watcher thread is currently active.
-    /// @return True while the watcher thread is running.
-    bool eventDrivenActive() const;
+    /** @brief Whether the event watcher thread is currently active.
+     *
+     *  @return True while the watcher thread is running (an atomic flag read,
+     *          so a call racing stopEventDriven() may still observe the old
+     *          value).
+     *  @note noexcept: one atomic load, no lock and no allocation.
+     */
+    bool eventDrivenActive() const noexcept;
 
     /** @brief Installs the wake callback invoked from the watcher thread.
      *
@@ -155,9 +163,12 @@ private:
     // runs, destroyed after the thread is joined in stopEventDriven()/dtor.
     struct EventDrivenState;
     std::unique_ptr<EventDrivenState> eventState_;
-    std::thread eventThread_;
-    // Set by stopEventDriven() to ask the watcher thread to exit.
-    std::atomic<bool> stopRequested_{false};
+    // Watcher thread. Shutdown is expressed with the std::jthread stop token:
+    // stopEventDriven() calls request_stop() and additionally signals the
+    // Win32 stop event so the thread can leave WaitForMultipleObjects
+    // promptly. The jthread destructor also requests stop and joins, so no
+    // manual join is needed on any teardown path.
+    std::jthread eventThread_;
     // Coalescing flag: true while a wake notification is still unconsumed by
     // poll(). Lets the watcher thread drop redundant wakes (poll() rescans the
     // whole folder, so one wake covers any burst of changes).
@@ -171,7 +182,10 @@ private:
 
     // Watcher thread body: waits on ReadDirectoryChangesW, then coalesces a
     // single wake notification via requestRecalc(). Runs on the event thread.
-    void eventThreadMain(EventDrivenState* state);
+    // @param stopToken jthread stop token; request_stop() ends the wait loop.
+    // @param state Win32 watcher state owned by this monitor; non-null while
+    //        the thread runs.
+    void eventThreadMain(std::stop_token stopToken, EventDrivenState* state);
     // Coalesced wake: sets recalcPending_ and, if it was clear, calls wake_.
     // Called from the watcher thread only.
     void requestRecalc();

@@ -93,7 +93,7 @@ std::shared_ptr<ImageBuffer> ImageBuffer::create(int width, int height,
     return std::make_shared<ImageBuffer>(width, height, format);
 }
 
-float ImageBuffer::pixel(int x, int y, int channel) const {
+float ImageBuffer::pixel(int x, int y, int channel) const noexcept {
     if (x < 0 || x >= width_ || y < 0 || y >= height_ ||
         channel < 0 || channel >= channels_)
         return 0.0f;
@@ -109,7 +109,7 @@ float ImageBuffer::pixel(int x, int y, int channel) const {
     return 0.0f;
 }
 
-void ImageBuffer::setPixel(int x, int y, int channel, float value) {
+void ImageBuffer::setPixel(int x, int y, int channel, float value) noexcept {
     if (x < 0 || x >= width_ || y < 0 || y >= height_ ||
         channel < 0 || channel >= channels_)
         return;
@@ -125,6 +125,29 @@ void ImageBuffer::setPixel(int x, int y, int channel, float value) {
         data_[idx] = toU8(value);
         break;
     }
+}
+
+std::span<const float> ImageBuffer::asFloatSpan() const noexcept {
+    // U16/U8 are not directly viewable (their storage is narrower and needs
+    // the normalized conversion), so they keep going through pixel() and get
+    // an empty span here. Empty buffers report an empty span too, so callers
+    // can test size() uniformly instead of special-casing null data.
+    if (format_ != PixelFormat::F32 || data_.empty())
+        return {};
+    // The length is derived from the allocation so the view can never address
+    // past it, even if data() was resized directly. For a well-formed F32
+    // buffer this equals width() * height() * channels(), which matches the
+    // index math of pixel() exactly (interleaved RGB, row-major).
+    return std::span<const float>(
+        reinterpret_cast<const float*>(data_.data()),
+        data_.size() / sizeof(float));
+}
+
+std::span<float> ImageBuffer::asMutableFloatSpan() noexcept {
+    if (format_ != PixelFormat::F32 || data_.empty())
+        return {};
+    return std::span<float>(reinterpret_cast<float*>(data_.data()),
+                            data_.size() / sizeof(float));
 }
 
 std::shared_ptr<ImageBuffer> ImageBuffer::crop(int x, int y, int width,

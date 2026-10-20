@@ -28,7 +28,7 @@ Silver Halide 是一个基于 C++20 + Qt 6 的 RAW 摄影工作流桌面应用�
 
 - **AI 组件**：ONNX Runtime 后端，NAFNet 去噪、BiRefNet 主体分割、U²Net 天空近似蒙版；模型按需下载、SHA-256 校验、UI 管理。U²Net 是通用显著性模型，并非天空专用模型，天空结果不可用时仍回退到内置启发式蒙版
 
-- **性能**：导入 / 预览 / 编辑 / 导出四段路径均有增量加速；coarse-then-refine 双路径预览；sqlite 语句复用
+- **性能**：导入 / 预览 / 编辑 / 导出四段路径均有增量加速；coarse-then-refine 双路径预览；sqlite 语句复用；预览管线的逐级增量缓存以只读共享持有保留阶段（不再每级整幅深拷贝），1920 精帧单帧约 −17%~−33%（同机 A/B）
 
 ## 系统要求
 
@@ -135,6 +135,8 @@ src/
 - AI 模型分发状态：[docs/archive/AI\_MODEL\_DISTRIBUTION\_STATUS\_2026-08-31.md](docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md)
 
 - 四阶段加速报告：[docs/archive/Speedup\_Four\_Stages\_Report.md](docs/archive/Speedup_Four_Stages_Report.md)
+
+- 现代 C++ 审计与实施：[docs/spec/modern-cpp-adoption-audit.md](docs/spec/modern-cpp-adoption-audit.md)、[基线](docs/spec/modern-cpp-adoption-baseline.md)、[实施报告](docs/spec/modern-cpp-adoption-report.md)
 
 - 开发经验与迁移：[docs/DEVELOPMENT\_EXPERIENCE.md](docs/DEVELOPMENT_EXPERIENCE.md)、[docs/MIGRATION.md](docs/archive/MIGRATION.md)
 

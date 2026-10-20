@@ -13,6 +13,41 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## 现代 C++ 改造：IM-1 ~ IM-11 落地（2026-10-19 ~ 10-20，工作区未提交）
+
+按 [docs/spec/modern-cpp-adoption-audit.md](docs/spec/modern-cpp-adoption-audit.md) 的审计结论与验收清单实施（Agent Teams，两阶段 T0~T13 + U1~U5）。逐项 before/after、证据与遗留见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md)，基线数字与两份逐位 oracle 见 [docs/spec/modern-cpp-adoption-baseline.md](docs/spec/modern-cpp-adoption-baseline.md)。
+
+### 核心改动
+
+- **IM-1（收益最大）**：`renderPreview` 的保留阶段改为 `shared_ptr<const ImageBuffer>`，新增私有 `WorkBufferPool` 做两块可写缓冲轮转，恒等 stage 直接别名共享；`renderInternalLinear` 改为借用语义。每帧少 3 次整幅 F32 memcpy（1920 宽约 88 MB/帧）。
+- **IM-2**：`ImageBuffer` 新增 `asFloatSpan()/asMutableFloatSpan()`（非 F32 返回空 span，不新增异常路径）；`HdrMerge` 热循环去逐像素访问器，并修正 `lround` 采样窗口越界「越界返回 0 但仍计入样本数」的逐位陷阱。
+- **IM-3**：`parallelFor` 改头文件模板，`n<=grain` 与池内嵌套走内联快路径；`Pool`/`ForState` 主体与 751965d 的 UAF 修复零改动。
+- **IM-4 / IM-5**：`Json::Value` 改 `std::variant`（96 → 40 B）+ `from_chars`；Json/ProfileIO/CatalogDatabase 只读字符串参数 `string_view` 化（`std::less<>` 透明比较）。浮点序列化格式刻意保持不变，oracle 因此逐字节不变。
+- **IM-6**：`Mask` 改判别式联合 `std::variant`（352 → 248 B）；UI→worker 队列全部改 `shared_ptr<const Adjustments>`（`AdjustmentsPtr`），`DevelopPanel` 57 处 emit 与 `ExportItem` 同步改共享只读快照。
+- **IM-7**：`ColorManager` 的 7 个 lcms 裸句柄改 `unique_ptr` + 自定义 deleter，`display_/srgb_` 别名改为所有权派生，构造中途失败自动回收。
+- **IM-8**：默认 OFF 逐位一致；`SIMD=ON` 的 5 行 `pl.*` 差异定位为既有 P2-2 AVX2 高斯模糊的 FMA 重结合（非本轮回归）。据此删除手工 SSE2 stage A/C 批次 287 行（逐位安全、无可测量收益）；`LRC_ENABLE_SIMD` 仍默认 OFF。
+- **IM-9**：`noexcept` 8 → 146、`[[nodiscard]]` 0 → 75；取 `std::mutex` 的访问器刻意不标 noexcept（lock 允许抛，误标会 terminate）。
+- **IM-10 / IM-11**：`FolderMonitor` 改 `std::jthread` + `stop_token`；`MathUtils` 纯函数 constexpr/noexcept 化（数学实现逐字符未改）。
+- 顺带删除陈旧 `src/engine/Pipeline.cpp.orig`（2784 行旧副本，全仓无引用）。
+
+### 验证
+
+- headless `build_headless/tests/lrc_tests.exe`：**510 用例 / 979,162 断言全绿**（改造前基线 482 / 878,877）；`[pipeline]` 65 / 2,675、`[incremental]` 8 / 375,061 的用例与断言计数与改造前完全一致。
+- 新增两份逐位 oracle（`docs/spec/modern-cpp-bitexact-harness.cpp` 27 项、`docs/spec/modern-cpp-mask-bitexact-harness.cpp` 34 项）：改造前后**逐字节相同**。
+- `build_gui` clean 359 步 0 error；`lrc_qt_tests` 16 个测试类 0 failed。
+- `TestPerfAnchors` 同机交替 A/B：B-2 1920 refine min **93.40 → 77.25 ms**（另一窗口 102.64 → 69.02 ms）；B-1 / D-1 无可测量回退，D-2 峰值工作集 688 MB 不变。
+- 发布载荷冒烟：从 `build_gui/install_stage/SilverHalide.exe` 启动窗口完整渲染、正常退出；安装包为 `dist/Silver Halide Setup 1.0.0.exe`（980.8 MiB，Inno Setup，2026-10-20 重编）。
+
+### 构建设施坑位（必读）
+
+本机 Ninja + 中文版 MSVC 的 `/showIncludes` 前缀被 CMake 错误转码，`CMakeFiles/rules.ninja` 里的 `msvc_deps_prefix` 变成双重 mojibake → 所有 `.obj` 记录 `#deps 0`，**改头文件不触发重编**（曾导致 `Json.h` 布局变更后 `TestJson` SIGSEGV）。修复脚本与「每次 configure 后必须重跑」的约束见 [docs/DEVELOPMENT_EXPERIENCE.md](docs/DEVELOPMENT_EXPERIENCE.md) §10。
+
+### 遗留
+
+- panel → MainWindow 的最后一次 `Adjustments` 拷贝仍在（MainWindow 需保留可编辑副本；彻底消除需改 COW `shared_ptr`，约 100 个变更点）。
+- AI Prompt 点击不回流是变体化前的既有行为，本轮未顺手修（避免改变可观察行为）。
+- `LRC_ENABLE_SIMD=ON` 仍非逐位一致（既有 P2-2 取舍）；默认 OFF 逐位一致。
+
 ## 蒙版显示修复：AI 真实权重、几何引导填充、颜色范围默认叠加（2026-10-01 ~ 10-02，工作区未提交）
 
 ### 1. AI 蒙版叠加是假的：整幅恒定 50%

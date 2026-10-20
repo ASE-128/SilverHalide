@@ -22,6 +22,10 @@
 
 Q_DECLARE_METATYPE(lrc::ImageBufferPtr)
 Q_DECLARE_METATYPE(lrc::Adjustments)
+// IM-6: the UI publishes an immutable adjustment-stack snapshot and hands it to
+// the preview/export worker through queued invocations, so no Adjustments copy
+// (mask / curve vectors) is needed per request.
+Q_DECLARE_METATYPE(lrc::AdjustmentsPtr)
 Q_DECLARE_METATYPE(lrc::ImportMode)
 // P3-1: linear-light RGB histogram bins cross the preview-worker queued
 // connection (worker thread -> UI thread).

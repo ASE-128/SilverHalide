@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <variant>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -17,11 +18,11 @@ TEST_CASE("Mask: linear gradient weight is 1 on the axis and 0 past the edges",
     const int w = 101, h = 101;
     Mask m;
     m.type = MaskType::LinearGradient;
-    m.linear.startX = 0.0f;
-    m.linear.startY = 0.0f;
-    m.linear.endX = 1.0f;
-    m.linear.endY = 0.0f;
-    m.linear.feather = 0.0f;
+    m.linear().startX = 0.0f;
+    m.linear().startY = 0.0f;
+    m.linear().endX = 1.0f;
+    m.linear().endY = 0.0f;
+    m.linear().feather = 0.0f;
 
     // Anywhere along the axis between the edges is fully masked (the strip is
     // infinite in the perpendicular direction).
@@ -42,11 +43,11 @@ TEST_CASE("Mask: radial gradient weight is 1 at center and 0 at the corner",
     const int w = 101, h = 101;
     Mask m;
     m.type = MaskType::RadialGradient;
-    m.radial.centerX = 0.5f;
-    m.radial.centerY = 0.5f;
-    m.radial.radiusX = 0.5f;
-    m.radial.radiusY = 0.5f;
-    m.radial.feather = 0.0f;
+    m.radial().centerX = 0.5f;
+    m.radial().centerY = 0.5f;
+    m.radial().radiusX = 0.5f;
+    m.radial().radiusY = 0.5f;
+    m.radial().feather = 0.0f;
 
     REQUIRE(Pipeline::maskWeight(m, w, h, 0.5f, 0.5f) == Approx(1.0f).margin(0.01f));
     // Corner is at normalized distance sqrt(2) > 1 from the center.
@@ -61,7 +62,7 @@ TEST_CASE("Mask: brush weight is 1 at the dab center and 0 far away",
     const int w = 101, h = 101;
     Mask m;
     m.type = MaskType::Brush;
-    m.brush.push_back(BrushDab{0.5f, 0.5f, 0.2f, 0.0f});
+    m.brush().push_back(BrushDab{0.5f, 0.5f, 0.2f, 0.0f});
     REQUIRE(Pipeline::maskWeight(m, w, h, 0.5f, 0.5f) == Approx(1.0f).margin(0.01f));
     REQUIRE(Pipeline::maskWeight(m, w, h, 0.0f, 0.0f) < 0.01f);
 }
@@ -73,11 +74,11 @@ TEST_CASE("Mask: local exposure lifts the fully-masked image by 4x",
     Adjustments a;
     Mask m;
     m.type = MaskType::LinearGradient;
-    m.linear.startX = 0.0f;
-    m.linear.startY = 0.0f;
-    m.linear.endX = 1.0f;
-    m.linear.endY = 0.0f;
-    m.linear.feather = 0.0f;
+    m.linear().startX = 0.0f;
+    m.linear().startY = 0.0f;
+    m.linear().endX = 1.0f;
+    m.linear().endY = 0.0f;
+    m.linear().feather = 0.0f;
     m.exposure = 2.0; // +2 stops = 4x
     a.masks.push_back(m);
 
@@ -92,11 +93,11 @@ TEST_CASE("Mask: radial local exposure only affects the ellipse", "[mask]") {
     Adjustments a;
     Mask m;
     m.type = MaskType::RadialGradient;
-    m.radial.centerX = 0.5f;
-    m.radial.centerY = 0.5f;
-    m.radial.radiusX = 0.25f;
-    m.radial.radiusY = 0.25f;
-    m.radial.feather = 0.0f;
+    m.radial().centerX = 0.5f;
+    m.radial().centerY = 0.5f;
+    m.radial().radiusX = 0.25f;
+    m.radial().radiusY = 0.25f;
+    m.radial().feather = 0.0f;
     m.exposure = 2.0;
     a.masks.push_back(m);
 
@@ -113,11 +114,11 @@ TEST_CASE("Mask: opacity scales the effect", "[mask]") {
     Adjustments a;
     Mask m;
     m.type = MaskType::LinearGradient;
-    m.linear.startX = 0.0f;
-    m.linear.startY = 0.0f;
-    m.linear.endX = 1.0f;
-    m.linear.endY = 0.0f;
-    m.linear.feather = 0.0f;
+    m.linear().startX = 0.0f;
+    m.linear().startY = 0.0f;
+    m.linear().endX = 1.0f;
+    m.linear().endY = 0.0f;
+    m.linear().feather = 0.0f;
     m.exposure = 2.0;
     m.opacity = 0.5; // half effect: 0.2 -> 0.2 + 0.5*(0.8-0.2) = 0.5
     a.masks.push_back(m);
@@ -133,8 +134,8 @@ TEST_CASE("Mask: masks with no effect are ignored", "[mask]") {
     Adjustments a;
     Mask m;
     m.type = MaskType::LinearGradient;
-    m.linear.startX = 0.0f;
-    m.linear.endX = 1.0f;
+    m.linear().startX = 0.0f;
+    m.linear().endX = 1.0f;
     // All adjustment fields zero -> nothing applied.
     a.masks.push_back(m);
     Pipeline::applySpatialAdjustments(a, px.data(), w, h);
@@ -206,12 +207,12 @@ TEST_CASE("Masks and color targets round-trip through ProfileIO JSON",
     Adjustments a;
     Mask m;
     m.type = MaskType::RadialGradient;
-    m.radial.centerX = 0.6f;
-    m.radial.centerY = 0.4f;
-    m.radial.radiusX = 0.3f;
-    m.radial.radiusY = 0.2f;
-    m.radial.feather = 0.7f;
-    m.radial.invert = true;
+    m.radial().centerX = 0.6f;
+    m.radial().centerY = 0.4f;
+    m.radial().radiusX = 0.3f;
+    m.radial().radiusY = 0.2f;
+    m.radial().feather = 0.7f;
+    m.radial().invert = true;
     m.opacity = 0.8;
     m.exposure = 1.2;
     m.clarity = 35.0;
@@ -220,8 +221,8 @@ TEST_CASE("Masks and color targets round-trip through ProfileIO JSON",
 
     Mask brush;
     brush.type = MaskType::Brush;
-    brush.brush.push_back(BrushDab{0.5f, 0.5f, 0.15f, 0.6f});
-    brush.brush.push_back(BrushDab{0.7f, 0.5f, 0.2f, 0.8f});
+    brush.brush().push_back(BrushDab{0.5f, 0.5f, 0.15f, 0.6f});
+    brush.brush().push_back(BrushDab{0.7f, 0.5f, 0.2f, 0.8f});
     brush.opacity = 0.9;
     brush.highlights = -40.0;
     a.masks.push_back(brush);
@@ -252,13 +253,13 @@ TEST_CASE("AiMask: full parameter round-trip through ProfileIO JSON",
     Adjustments a;
     Mask m;
     m.type = MaskType::AiMask;
-    m.ai.target = AiMaskTarget::Sky;
-    m.ai.threshold = 0.7f;
-    m.ai.feather = 0.2f;
-    m.ai.invert = true;
-    m.ai.modelInputSize = 640;
-    m.ai.cachedWeightVersion = 3;
-    m.ai.modelIdOverride = "builtin://sky-override";
+    m.ai().target = AiMaskTarget::Sky;
+    m.ai().threshold = 0.7f;
+    m.ai().feather = 0.2f;
+    m.ai().invert = true;
+    m.ai().modelInputSize = 640;
+    m.ai().cachedWeightVersion = 3;
+    m.ai().modelIdOverride = "builtin://sky-override";
     m.opacity = 0.85;
     m.exposure = 0.4;
     a.masks.push_back(m);
@@ -266,11 +267,11 @@ TEST_CASE("AiMask: full parameter round-trip through ProfileIO JSON",
     // An unrelated mask alongside must be left untouched by the aiMasks pass.
     Mask grad;
     grad.type = MaskType::LinearGradient;
-    grad.linear.startX = 0.1f;
-    grad.linear.startY = 0.2f;
-    grad.linear.endX = 0.9f;
-    grad.linear.endY = 0.8f;
-    grad.linear.feather = 0.3f;
+    grad.linear().startX = 0.1f;
+    grad.linear().startY = 0.2f;
+    grad.linear().endX = 0.9f;
+    grad.linear().endY = 0.8f;
+    grad.linear().feather = 0.3f;
     a.masks.push_back(grad);
 
     const auto json = ProfileIO::toJson(a);
@@ -280,8 +281,8 @@ TEST_CASE("AiMask: full parameter round-trip through ProfileIO JSON",
 
     // Explicitly confirm the persisted type is still AiMask (not downgraded).
     REQUIRE(b.masks[0].type == MaskType::AiMask);
-    REQUIRE(b.masks[0].ai.target == AiMaskTarget::Sky);
-    REQUIRE(b.masks[0].ai.modelIdOverride == "builtin://sky-override");
+    REQUIRE(b.masks[0].ai().target == AiMaskTarget::Sky);
+    REQUIRE(b.masks[0].ai().modelIdOverride == "builtin://sky-override");
     REQUIRE(b.masks[1].type == MaskType::LinearGradient);
 }
 
@@ -355,14 +356,14 @@ TEST_CASE("ColorRange: local exposure lifts only the matched colour",
     Adjustments a;
     Mask m;
     m.type = MaskType::ColorRange;
-    m.color.hasReference = true;
-    m.color.refR = 0.9f;
-    m.color.refG = 0.1f;
-    m.color.refB = 0.1f;
-    m.color.hueTolerance = 40.0;
-    m.color.satTolerance = 0.5;
-    m.color.lumaTolerance = 0.5;
-    m.color.softness = 0.5;
+    m.color().hasReference = true;
+    m.color().refR = 0.9f;
+    m.color().refG = 0.1f;
+    m.color().refB = 0.1f;
+    m.color().hueTolerance = 40.0;
+    m.color().satTolerance = 0.5;
+    m.color().lumaTolerance = 0.5;
+    m.color().softness = 0.5;
     m.exposure = 1.0;  // +1 stop.
     a.masks.push_back(m);
 
@@ -380,14 +381,14 @@ TEST_CASE("ColorRange: full-field ProfileIO JSON round-trip",
     Adjustments a;
     Mask m;
     m.type = MaskType::ColorRange;
-    m.color.hasReference = true;
-    m.color.refR = 0.87f;
-    m.color.refG = 0.33f;
-    m.color.refB = 0.12f;
-    m.color.hueTolerance = 65.0;
-    m.color.satTolerance = 0.3;
-    m.color.lumaTolerance = 0.7;
-    m.color.softness = 0.4;
+    m.color().hasReference = true;
+    m.color().refR = 0.87f;
+    m.color().refG = 0.33f;
+    m.color().refB = 0.12f;
+    m.color().hueTolerance = 65.0;
+    m.color().satTolerance = 0.3;
+    m.color().lumaTolerance = 0.7;
+    m.color().softness = 0.4;
     m.opacity = 0.9;
     m.exposure = 1.3;
     m.contrast = 15.0;
@@ -425,18 +426,152 @@ TEST_CASE("ColorRange: geometryHash covers the reference but not exposure",
           "[mask][colorrange][hash]") {
     Mask a;
     a.type = MaskType::ColorRange;
-    a.color.hasReference = true;
-    a.color.refR = 0.9f;
-    a.color.refG = 0.1f;
-    a.color.refB = 0.1f;
+    a.color().hasReference = true;
+    a.color().refR = 0.9f;
+    a.color().refG = 0.1f;
+    a.color().refB = 0.1f;
 
     // 参考色属于几何 (it shapes the weight field).
     Mask b = a;
-    b.color.refG = 0.3f;
+    b.color().refG = 0.3f;
     REQUIRE(a.geometryHash() != b.geometryHash());
 
     // 局部调整值不属于几何 (exposure excluded), 与其它蒙版类型一致.
     b = a;
     b.exposure = 1.5;
     REQUIRE(a.geometryHash() == b.geometryHash());
+}
+
+// --- std::variant geometry (IM-6) ------------------------------------------
+
+TEST_CASE("Mask: only one geometry is resident and the accessors are total",
+          "[mask][variant]") {
+    // The pre-variant Mask kept all five geometries resident: a probe compiled
+    // against the old header with this toolchain (MSVC 19.44, /O2) reported
+    // sizeof(Mask) == 352. The discriminated union keeps the largest
+    // alternative plus the tag. Record-only bound: the exact value depends on
+    // the toolchain; the point is that it dropped substantially.
+    CHECK(sizeof(Mask) < 300);
+
+    Mask m;  // type None, shape seeded with an (unused) linear geometry
+    CHECK(m.type == MaskType::None);
+
+    // Reads never throw and never mutate: a non-resident alternative reads as
+    // its default-constructed value, exactly like the old unused member did.
+    const Mask& cm = m;
+    CHECK(cm.radial().centerX == Approx(0.5f));
+    CHECK(cm.brush().empty());
+    CHECK_FALSE(cm.color().hasReference);
+    CHECK(cm.ai().target == AiMaskTarget::Subject);
+    CHECK(cm.linear().endX == Approx(1.0f));  // the seeded alternative
+    CHECK_FALSE(m.shapeMatchesType());        // None vs the seeded linear one
+
+    // setType() re-seats the resident alternative and the accessor reads back.
+    m.setType(MaskType::RadialGradient);
+    CHECK(m.shapeMatchesType());
+    m.radial().centerX = 0.25f;
+    CHECK(m.radial().centerX == Approx(0.25f));
+    CHECK(cm.brush().empty());  // dropped alternatives stay at their defaults
+
+    m.setType(MaskType::Brush);
+    CHECK(m.shapeMatchesType());
+    m.brush().push_back(BrushDab{0.5f, 0.5f, 0.2f, 0.6f});
+    CHECK(m.brush().size() == 1);
+
+    m.setType(MaskType::AiMask);
+    m.ai().target = AiMaskTarget::Sky;
+    CHECK(m.ai().target == AiMaskTarget::Sky);
+    CHECK(m.shapeMatchesType());
+
+    m.setType(MaskType::None);
+    CHECK(std::holds_alternative<std::monostate>(m.shape));
+    CHECK(m.shapeMatchesType());
+}
+
+TEST_CASE("Mask: setType and direct geometry writes produce the same mask",
+          "[mask][variant][hash]") {
+    // Two idioms that must be equivalent: assigning the type first (the
+    // existing UI/test pattern) and letting the accessor materialise the
+    // alternative, versus setType().
+    Mask a;
+    a.type = MaskType::LinearGradient;
+    a.linear().startX = 0.25f;
+    a.linear().endX = 0.75f;
+
+    Mask b;
+    b.setType(MaskType::LinearGradient);
+    b.linear().startX = 0.25f;
+    b.linear().endX = 0.75f;
+
+    CHECK(a == b);
+    CHECK(a.hash() == b.hash());
+    CHECK(a.geometryHash() == b.geometryHash());
+
+    // A type-only mask hashes like the same geometry written explicitly.
+    Mask c;
+    c.type = MaskType::RadialGradient;
+    Mask d;
+    d.setType(MaskType::RadialGradient);
+    (void)d.radial();  // already resident: no-op
+    CHECK(c.geometryHash() == d.geometryHash());
+    CHECK(c.hash() == d.hash());
+
+    // A geometry dropped by re-seating no longer participates in the hash; the
+    // mask hashes as the new type with the dropped alternative at its defaults
+    // (exactly what the old unused member held).
+    Mask f;
+    f.type = MaskType::ColorRange;
+    f.color().hasReference = true;
+    Mask g;
+    g.setType(MaskType::LinearGradient);
+    g.linear().startX = 0.9f;  // written, then dropped by the conversion below
+    g.setType(MaskType::ColorRange);
+    g.color().hasReference = true;
+    CHECK(g.hash() == f.hash());
+    CHECK(g.geometryHash() == f.geometryHash());
+}
+
+TEST_CASE("Mask: a type-only mask renders as its default geometry",
+          "[mask][variant][raster]") {
+    // A radial mask whose alternative was never materialised must render
+    // exactly like one explicitly reset to the default geometry.
+    Mask lazy;
+    lazy.type = MaskType::RadialGradient;
+    Mask explicitDefaults;
+    explicitDefaults.setType(MaskType::RadialGradient);
+    explicitDefaults.radial() = RadialGradientMask{};
+    for (float ny : {0.0f, 0.35f, 0.7f, 1.0f}) {
+        for (float nx : {0.0f, 0.35f, 0.7f, 1.0f}) {
+            CHECK(Pipeline::maskWeight(lazy, 64, 48, nx, ny) ==
+                  Pipeline::maskWeight(explicitDefaults, 64, 48, nx, ny));
+        }
+    }
+}
+
+TEST_CASE("Mask: copyGeometryFrom copies geometry but not local adjustments",
+          "[mask][variant]") {
+    Mask src;
+    src.type = MaskType::Brush;
+    src.brush().push_back(BrushDab{0.3f, 0.4f, 0.2f, 0.5f});
+    src.invert = true;
+
+    Mask dst;
+    dst.type = MaskType::LinearGradient;
+    dst.linear().startX = 0.1f;
+    dst.opacity = 0.5;
+    dst.exposure = 1.5;
+    dst.useColorRange = true;
+    dst.colorRefR = 0.2f;
+
+    dst.copyGeometryFrom(src);
+    CHECK(dst.type == MaskType::Brush);
+    CHECK(dst.shapeMatchesType());
+    CHECK(dst.invert);
+    REQUIRE(dst.brush().size() == 1);
+    CHECK(dst.brush()[0].x == Approx(0.3f));
+    // Everything outside the geometry is left alone.
+    CHECK(dst.opacity == Approx(0.5));
+    CHECK(dst.exposure == Approx(1.5));
+    CHECK(dst.useColorRange);
+    CHECK(dst.colorRefR == Approx(0.2f));
 }

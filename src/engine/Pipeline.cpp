@@ -806,13 +806,17 @@ inline float grainValueNoise(float x, float y, float cellSize) {
 std::vector<float> rasterizeMaskField(const Mask& m, int w, int h) {
     std::vector<float> field(static_cast<size_t>(w) * h, 0.0f);
     if (m.type == MaskType::Brush) {
-        if (m.brush.empty()) {
+        // The accessor is std::get_if-based and never throws: a non-resident
+        // brush geometry reads as the immutable empty default, which is exactly
+        // what the pre-variant default member held.
+        const std::vector<BrushDab>& dabs = m.brush();
+        if (dabs.empty()) {
             if (m.invert)
                 std::fill(field.begin(), field.end(), 1.0f);
             return field;
         }
         const float minDim = static_cast<float>(std::min(w, h));
-        for (const BrushDab& dab : m.brush) {
+        for (const BrushDab& dab : dabs) {
             // Soft-edge formula duplicated from Pipeline::maskWeight's Brush
             // branch (must stay bit-identical).
             const float rx = std::max(
@@ -1061,270 +1065,67 @@ std::vector<float> computeSubMaskField(const Mask& m, const float* base, int w,
 // corresponding section of the original single-loop applyAdjustments, so
 // chaining A->B->C->D reproduces the old output exactly.
 
-// --- Optional SIMD batches (LRC_ENABLE_SIMD) ----------------------------------
+// Stage A and Stage C keep only their scalar per-pixel loops. With
+// LRC_ENABLE_SIMD=ON the compiler's /arch:AVX2 auto-vectorisation covers them
+// (measured bit-identical to the scalar path), and the hand-written SSE2 batch
+// variants that used to live here were removed after measurement showed them to
+// be bit-identical with no measurable speed-up over the auto-vectorised loops.
+// Stage D's HSL/split-tone/point-colour work and the smoothstep-based per-pixel
+// tails were never vectorised by hand and are unchanged.
+
+
+// --- Per-stage work predicates ----------------------------------------------
 //
-// The pure-linear stages of Stage A / Stage C are processed in 8-pixel batches
-// (24 contiguous floats) with SSE2 intrinsics; the smoothstep-based stages stay
-// on the original scalar code per pixel. Unaligned loads/stores mean no special
-// alignment is required, and each parallelFor chunk is handled independently
-// (8-pixel batches inside the chunk + a scalar tail for the remainder), so the
-// SIMD selection never changes the chunking or the scalar output. With the macro
-// undefined this file compiles to the untouched scalar path (bit-identical).
+// A stage whose parameters are the identity does not change a single pixel, so
+// the incremental render can retain the *same* immutable snapshot for that
+// stage instead of materializing a copy. Each predicate is the single source of
+// truth shared by the stage body (early return) and renderPreview; keeping them
+// in one place means the "does it write?" answer can never drift from what the
+// stage actually does.
 
-#ifdef LRC_ENABLE_SIMD
-
-// Per-pixel remainder of Stage A after the vectorised head: highlights, shadows
-// and whites/blacks (all smoothstep-weighted). Operates in place on r/g/b.
-inline void stageA_pixelTail(float& r, float& g, float& b,
-                             float highlightsGain, float shadowsGain,
-                             float kHighlightsThresh, float kShadowsThresh,
-                             bool useWB, float wGain, float bGain,
-                             float kMid) {
-    {
-        const float hw = smoothstep01(
-            (r - kHighlightsThresh) / (1.0f - kHighlightsThresh));
-        const float hw_g = smoothstep01(
-            (g - kHighlightsThresh) / (1.0f - kHighlightsThresh));
-        const float hw_b = smoothstep01(
-            (b - kHighlightsThresh) / (1.0f - kHighlightsThresh));
-        r *= 1.0f + (highlightsGain - 1.0f) * hw;
-        g *= 1.0f + (highlightsGain - 1.0f) * hw_g;
-        b *= 1.0f + (highlightsGain - 1.0f) * hw_b;
-    }
-    {
-        const float sw = smoothstep01((kShadowsThresh - r) / kShadowsThresh);
-        const float sw_g =
-            smoothstep01((kShadowsThresh - g) / kShadowsThresh);
-        const float sw_b =
-            smoothstep01((kShadowsThresh - b) / kShadowsThresh);
-        r *= 1.0f + (shadowsGain - 1.0f) * sw;
-        g *= 1.0f + (shadowsGain - 1.0f) * sw_g;
-        b *= 1.0f + (shadowsGain - 1.0f) * sw_b;
-    }
-    if (useWB) {
-        const float ww = smoothstep01((r - kMid) / (1.0f - kMid));
-        const float ww_g = smoothstep01((g - kMid) / (1.0f - kMid));
-        const float ww_b = smoothstep01((b - kMid) / (1.0f - kMid));
-        r += (r - kMid) * wGain * ww;
-        g += (g - kMid) * wGain * ww_g;
-        b += (b - kMid) * wGain * ww_b;
-        const float bw = smoothstep01((kMid - r) / kMid);
-        const float bw_g = smoothstep01((kMid - g) / kMid);
-        const float bw_b = smoothstep01((kMid - b) / kMid);
-        r -= (kMid - r) * bGain * bw;
-        g -= (kMid - g) * bGain * bw_g;
-        b -= (kMid - b) * bGain * bw_b;
-    }
+// True when stage A (exposure/contrast/highlights/shadows/whites/blacks) has
+// anything to apply.
+inline bool stageANeedsWork(const Adjustments& a) {
+    return !(a.exposure == 0.0 && a.contrast == 0.0 && a.highlights == 0.0 &&
+             a.shadows == 0.0 && a.whites == 0.0 && a.blacks == 0.0);
 }
 
-// Stage A head in 8-pixel SIMD batches: exposure (v *= exposure) and contrast
-// (v = kMid + (v - kMid) * cscale, clamp v >= 0). Both use the exact scalar op
-// order, so the vector result is bit-identical; the smoothstep stages are then
-// applied per pixel with stageA_pixelTail. Pixels that do not fill a full batch
-// fall through to the untouched scalar body.
-void applyStageABasicSIMD(float* p, size_t iBegin, size_t iEnd,
-                          float exposure, float cscale, float kMid,
-                          float highlightsGain, float shadowsGain,
-                          float kHighlightsThresh, float kShadowsThresh,
-                          bool useWB, float wGain, float bGain) {
-    const __m128 expv = _mm_set1_ps(exposure);
-    const __m128 kMidv = _mm_set1_ps(kMid);
-    const __m128 cscalev = _mm_set1_ps(cscale);
-    const __m128 zero = _mm_setzero_ps();
-
-    size_t i = iBegin;
-    const size_t iEndBatch = iBegin + ((iEnd - iBegin) / 8) * 8;
-    for (; i < iEndBatch; i += 8) {
-        // 8 pixels = 24 contiguous floats = 6 SSE lanes (unaligned).
-        __m128 c0 = _mm_loadu_ps(p + i * 3 + 0);
-        __m128 c1 = _mm_loadu_ps(p + i * 3 + 4);
-        __m128 c2 = _mm_loadu_ps(p + i * 3 + 8);
-        __m128 c3 = _mm_loadu_ps(p + i * 3 + 12);
-        __m128 c4 = _mm_loadu_ps(p + i * 3 + 16);
-        __m128 c5 = _mm_loadu_ps(p + i * 3 + 20);
-
-        // Exposure.
-        c0 = _mm_mul_ps(c0, expv);
-        c1 = _mm_mul_ps(c1, expv);
-        c2 = _mm_mul_ps(c2, expv);
-        c3 = _mm_mul_ps(c3, expv);
-        c4 = _mm_mul_ps(c4, expv);
-        c5 = _mm_mul_ps(c5, expv);
-
-        // Contrast + clamp: max(kMid + (v - kMid) * cscale, 0). Same op order
-        // as the scalar body (sub, mul, add) so the arithmetic is bit-exact.
-        c0 = _mm_max_ps(
-            _mm_add_ps(_mm_mul_ps(_mm_sub_ps(c0, kMidv), cscalev), kMidv),
-            zero);
-        c1 = _mm_max_ps(
-            _mm_add_ps(_mm_mul_ps(_mm_sub_ps(c1, kMidv), cscalev), kMidv),
-            zero);
-        c2 = _mm_max_ps(
-            _mm_add_ps(_mm_mul_ps(_mm_sub_ps(c2, kMidv), cscalev), kMidv),
-            zero);
-        c3 = _mm_max_ps(
-            _mm_add_ps(_mm_mul_ps(_mm_sub_ps(c3, kMidv), cscalev), kMidv),
-            zero);
-        c4 = _mm_max_ps(
-            _mm_add_ps(_mm_mul_ps(_mm_sub_ps(c4, kMidv), cscalev), kMidv),
-            zero);
-        c5 = _mm_max_ps(
-            _mm_add_ps(_mm_mul_ps(_mm_sub_ps(c5, kMidv), cscalev), kMidv),
-            zero);
-
-        _mm_storeu_ps(p + i * 3 + 0, c0);
-        _mm_storeu_ps(p + i * 3 + 4, c1);
-        _mm_storeu_ps(p + i * 3 + 8, c2);
-        _mm_storeu_ps(p + i * 3 + 12, c3);
-        _mm_storeu_ps(p + i * 3 + 16, c4);
-        _mm_storeu_ps(p + i * 3 + 20, c5);
-
-        // Smoothstep stages, scalar, per pixel (reads the vectorised head).
-        for (size_t j = i; j < i + 8; ++j) {
-            float r = p[j * 3 + 0];
-            float g = p[j * 3 + 1];
-            float b = p[j * 3 + 2];
-            stageA_pixelTail(r, g, b, highlightsGain, shadowsGain,
-                             kHighlightsThresh, kShadowsThresh, useWB, wGain,
-                             bGain, kMid);
-            p[j * 3 + 0] = r;
-            p[j * 3 + 1] = g;
-            p[j * 3 + 2] = b;
-        }
-    }
-    // Scalar tail: pixels that did not fit a full 8-pixel batch use the exact
-    // original scalar body (exposure -> contrast -> clamp -> smoothstep stages).
-    for (; i < iEnd; ++i) {
-        float r = p[i * 3 + 0];
-        float g = p[i * 3 + 1];
-        float b = p[i * 3 + 2];
-
-        r *= exposure;
-        g *= exposure;
-        b *= exposure;
-
-        r = kMid + (r - kMid) * cscale;
-        g = kMid + (g - kMid) * cscale;
-        b = kMid + (b - kMid) * cscale;
-        if (r < 0.0f) r = 0.0f;
-        if (g < 0.0f) g = 0.0f;
-        if (b < 0.0f) b = 0.0f;
-
-        stageA_pixelTail(r, g, b, highlightsGain, shadowsGain,
-                         kHighlightsThresh, kShadowsThresh, useWB, wGain,
-                         bGain, kMid);
-
-        p[i * 3 + 0] = r;
-        p[i * 3 + 1] = g;
-        p[i * 3 + 2] = b;
-    }
+// True when stage B (parametric tone curve) has anything to apply.
+inline bool stageBNeedsWork(const Adjustments& a) {
+    return a.curve.size() >= 2;
 }
 
-// Per-pixel remainder of Stage C after the vectorised WB head: dehaze and
-// vibrance (kept scalar: vibrance needs per-pixel rgbToHSL, dehaze is a tiny
-// affine branch). Operates in place on r/g/b.
-inline void stageC_pixelTail(float& r, float& g, float& b,
-                             float dhBoost, float kHazeFloor,
-                             bool doDehaze, float vib) {
-    if (doDehaze) {
-        const float floor = kHazeFloor * (1.0f - dhBoost);
-        r = floor + (r - floor) * dhBoost;
-        g = floor + (g - floor) * dhBoost;
-        b = floor + (b - floor) * dhBoost;
-        r = std::max(r, 0.0f);
-        g = std::max(g, 0.0f);
-        b = std::max(b, 0.0f);
-    }
-    if (vib != 0.0f) {
-        float hue, csat, luma;
-        rgbToHSL(r, g, b, hue, csat, luma);
-        float d = std::abs(hue - 42.0f);
-        if (d > 180.0f) d = 360.0f - d;
-        const float skinWeight = 1.0f - smoothstep01(d / 45.0f);
-        const float boost =
-            1.0f + vib * (1.0f - 0.75f * skinWeight) * (1.0f - csat);
-        const float scale = csat > 1e-6f ? boost : 1.0f;
-        r = luma + (r - luma) * scale;
-        g = luma + (g - luma) * scale;
-        b = luma + (b - luma) * scale;
-    }
+// True when stage C (white balance/dehaze/vibrance) has anything to apply.
+inline bool stageCNeedsWork(const Adjustments& a) {
+    return !(a.temperature == 0.0 && a.tint == 0.0 && a.dehaze == 0.0 &&
+             a.vibrance == 0.0);
 }
 
-// Stage C head in 8-pixel SIMD batches: the white-balance multiply
-// (r *= rTemp, g *= gTint, b *= bTemp) with per-channel constants laid out in
-// the RGB-interleaved buffer. Dehaze and vibrance stay scalar per pixel.
-void applyStageCBasicSIMD(float* p, size_t iBegin, size_t iEnd,
-                          float rTemp, float gTint, float bTemp,
-                          float dhBoost, float kHazeFloor,
-                          bool doDehaze, float vib) {
-    // 8 pixels = 24 floats; the (r,g,b) scaling pattern repeats every 3 lanes.
-    const __m128 w0 = _mm_set_ps(rTemp, bTemp, gTint, rTemp); // floats 0-3
-    const __m128 w1 = _mm_set_ps(gTint, rTemp, bTemp, gTint); // floats 4-7
-    const __m128 w2 = _mm_set_ps(bTemp, gTint, rTemp, bTemp); // floats 8-11
-    const __m128 w3 = w0;                                    // floats 12-15
-    const __m128 w4 = w1;                                    // floats 16-19
-    const __m128 w5 = w2;                                    // floats 20-23
+// Stage D always writes: besides the HSL/split-tone/point-colour work it
+// performs the pipeline's single clamp into [0,1], so it can never be skipped.
+inline bool stageDNeedsWork(const Adjustments&) { return true; }
 
-    size_t i = iBegin;
-    const size_t iEndBatch = iBegin + ((iEnd - iBegin) / 8) * 8;
-    for (; i < iEndBatch; i += 8) {
-        __m128 c0 = _mm_loadu_ps(p + i * 3 + 0);
-        __m128 c1 = _mm_loadu_ps(p + i * 3 + 4);
-        __m128 c2 = _mm_loadu_ps(p + i * 3 + 8);
-        __m128 c3 = _mm_loadu_ps(p + i * 3 + 12);
-        __m128 c4 = _mm_loadu_ps(p + i * 3 + 16);
-        __m128 c5 = _mm_loadu_ps(p + i * 3 + 20);
-
-        c0 = _mm_mul_ps(c0, w0);
-        c1 = _mm_mul_ps(c1, w1);
-        c2 = _mm_mul_ps(c2, w2);
-        c3 = _mm_mul_ps(c3, w3);
-        c4 = _mm_mul_ps(c4, w4);
-        c5 = _mm_mul_ps(c5, w5);
-
-        _mm_storeu_ps(p + i * 3 + 0, c0);
-        _mm_storeu_ps(p + i * 3 + 4, c1);
-        _mm_storeu_ps(p + i * 3 + 8, c2);
-        _mm_storeu_ps(p + i * 3 + 12, c3);
-        _mm_storeu_ps(p + i * 3 + 16, c4);
-        _mm_storeu_ps(p + i * 3 + 20, c5);
-
-        for (size_t j = i; j < i + 8; ++j) {
-            float r = p[j * 3 + 0];
-            float g = p[j * 3 + 1];
-            float b = p[j * 3 + 2];
-            stageC_pixelTail(r, g, b, dhBoost, kHazeFloor, doDehaze, vib);
-            p[j * 3 + 0] = r;
-            p[j * 3 + 1] = g;
-            p[j * 3 + 2] = b;
-        }
-    }
-    // Scalar tail: pixels that did not fit a full 8-pixel batch use the exact
-    // original scalar body (WB -> dehaze -> vibrance).
-    for (; i < iEnd; ++i) {
-        float r = p[i * 3 + 0];
-        float g = p[i * 3 + 1];
-        float b = p[i * 3 + 2];
-
-        r *= rTemp;
-        b *= bTemp;
-        g *= gTint;
-
-        stageC_pixelTail(r, g, b, dhBoost, kHazeFloor, doDehaze, vib);
-
-        p[i * 3 + 0] = r;
-        p[i * 3 + 1] = g;
-        p[i * 3 + 2] = b;
+// Whether stage `stage` (0..3, A..D) writes at least one pixel for `a`.
+inline bool stageNeedsWork(int stage, const Adjustments& a) {
+    switch (stage) {
+        case 0: return stageANeedsWork(a);
+        case 1: return stageBNeedsWork(a);
+        case 2: return stageCNeedsWork(a);
+        default: return stageDNeedsWork(a);
     }
 }
-
-#endif // LRC_ENABLE_SIMD
 
 // Stage A: exposure -> contrast -> highlights -> shadows -> whites/blacks.
-void applyStageA(const Adjustments& a, float* p, size_t pixelCount) {
-    if (a.exposure == 0.0 && a.contrast == 0.0 && a.highlights == 0.0 &&
-        a.shadows == 0.0 && a.whites == 0.0 && a.blacks == 0.0)
-        return;
+//
+// Reads src and writes dst; src == dst is allowed and reproduces the historical
+// in-place arithmetic bit for bit (the operation order per pixel is unchanged).
+// Returns false when the stage is the identity (all six tonal parameters are
+// neutral), in which case dst is left untouched so the caller can reuse the
+// input snapshot instead of materializing a copy.
+bool applyStageA(const Adjustments& a, const float* src, float* dst,
+                 size_t pixelCount) {
+    if (!stageANeedsWork(a))
+        return false;
     const float exposure = static_cast<float>(std::pow(2.0, a.exposure));
     const float cscale = 1.0f + static_cast<float>(a.contrast) / 100.0f * 0.7f;
     constexpr float kMid = 0.18f;
@@ -1338,23 +1139,13 @@ void applyStageA(const Adjustments& a, float* p, size_t pixelCount) {
     const float wGain = static_cast<float>(a.whites) / 100.0f * 0.9f;
     const float bGain = static_cast<float>(a.blacks) / 100.0f * 0.9f;
 
-#ifdef LRC_ENABLE_SIMD
-    lrc::parallel::parallelFor(
-        pixelCount, lrc::parallel::defaultGrain(pixelCount),
-        [&](size_t iBegin, size_t iEnd) {
-            applyStageABasicSIMD(p, iBegin, iEnd, exposure, cscale, kMid,
-                                 highlightsGain, shadowsGain,
-                                 kHighlightsThresh, kShadowsThresh,
-                                 useWB, wGain, bGain);
-        });
-#else
     lrc::parallel::parallelFor(
         pixelCount, lrc::parallel::defaultGrain(pixelCount),
         [&](size_t iBegin, size_t iEnd) {
     for (size_t i = iBegin; i < iEnd; ++i) {
-        float r = p[i * 3 + 0];
-        float g = p[i * 3 + 1];
-        float b = p[i * 3 + 2];
+        float r = src[i * 3 + 0];
+        float g = src[i * 3 + 1];
+        float b = src[i * 3 + 2];
 
         // 1. Exposure (linear gain).
         r *= exposure;
@@ -1409,35 +1200,43 @@ void applyStageA(const Adjustments& a, float* p, size_t pixelCount) {
             b -= (kMid - b) * bGain * bw_b;
         }
 
-        p[i * 3 + 0] = r;
-        p[i * 3 + 1] = g;
-        p[i * 3 + 2] = b;
+        dst[i * 3 + 0] = r;
+        dst[i * 3 + 1] = g;
+        dst[i * 3 + 2] = b;
     }
     });
-#endif
+    return true;
 }
 
 // Stage B: parametric tone curve (per-channel, linear space).
-void applyStageB(const Adjustments& a, float* p, size_t pixelCount) {
-    if (a.curve.size() < 2)
-        return;
+//
+// Reads src and writes dst (src == dst allowed). Returns false when the curve is
+// the identity, leaving dst untouched.
+bool applyStageB(const Adjustments& a, const float* src, float* dst,
+                 size_t pixelCount) {
+    if (!stageBNeedsWork(a))
+        return false;
     const std::array<float, 4096> lut = buildCurveLut(a.curve);
     lrc::parallel::parallelFor(
         pixelCount, lrc::parallel::defaultGrain(pixelCount),
         [&](size_t iBegin, size_t iEnd) {
     for (size_t i = iBegin; i < iEnd; ++i) {
-        p[i * 3 + 0] = curveLookup(lut, p[i * 3 + 0]);
-        p[i * 3 + 1] = curveLookup(lut, p[i * 3 + 1]);
-        p[i * 3 + 2] = curveLookup(lut, p[i * 3 + 2]);
+        dst[i * 3 + 0] = curveLookup(lut, src[i * 3 + 0]);
+        dst[i * 3 + 1] = curveLookup(lut, src[i * 3 + 1]);
+        dst[i * 3 + 2] = curveLookup(lut, src[i * 3 + 2]);
     }
     });
+    return true;
 }
 
 // Stage C: white balance -> dehaze -> vibrance.
-void applyStageC(const Adjustments& a, float* p, size_t pixelCount) {
-    if (a.temperature == 0.0 && a.tint == 0.0 && a.dehaze == 0.0 &&
-        a.vibrance == 0.0)
-        return;
+//
+// Reads src and writes dst (src == dst allowed). Returns false when all four
+// parameters are neutral, leaving dst untouched.
+bool applyStageC(const Adjustments& a, const float* src, float* dst,
+                 size_t pixelCount) {
+    if (!stageCNeedsWork(a))
+        return false;
     const float rTemp =
         static_cast<float>(std::pow(2.0, a.temperature * 0.006));
     const float bTemp =
@@ -1447,21 +1246,13 @@ void applyStageC(const Adjustments& a, float* p, size_t pixelCount) {
     constexpr float kHazeFloor = 0.12f;
     const float vib = static_cast<float>(a.vibrance) / 100.0f;
 
-#ifdef LRC_ENABLE_SIMD
-    lrc::parallel::parallelFor(
-        pixelCount, lrc::parallel::defaultGrain(pixelCount),
-        [&](size_t iBegin, size_t iEnd) {
-            applyStageCBasicSIMD(p, iBegin, iEnd, rTemp, gTint, bTemp,
-                                 dhBoost, kHazeFloor, a.dehaze != 0.0, vib);
-        });
-#else
     lrc::parallel::parallelFor(
         pixelCount, lrc::parallel::defaultGrain(pixelCount),
         [&](size_t iBegin, size_t iEnd) {
     for (size_t i = iBegin; i < iEnd; ++i) {
-        float r = p[i * 3 + 0];
-        float g = p[i * 3 + 1];
-        float b = p[i * 3 + 2];
+        float r = src[i * 3 + 0];
+        float g = src[i * 3 + 1];
+        float b = src[i * 3 + 2];
 
         // 5. White balance (temperature / tint around the as-shot WB).
         r *= rTemp;
@@ -1495,19 +1286,22 @@ void applyStageC(const Adjustments& a, float* p, size_t pixelCount) {
             b = luma + (b - luma) * scale;
         }
 
-        p[i * 3 + 0] = r;
-        p[i * 3 + 1] = g;
-        p[i * 3 + 2] = b;
+        dst[i * 3 + 0] = r;
+        dst[i * 3 + 1] = g;
+        dst[i * 3 + 2] = b;
     }
     });
-#endif
+    return true;
 }
 
 // Stage D: HSL per-channel -> global saturation -> split toning -> point colour.
 // This is the final per-pixel stage, so it also clamps the result into [0,1]
 // (the original applyAdjustments clamps once at the end of its single loop).
-void applyStageD(const Adjustments& a, float* p, size_t pixelCount,
-                 uint8_t activeMask) {
+//
+// Reads src and writes dst (src == dst allowed). Stage D always writes, so it
+// has no "identity" return value.
+void applyStageD(const Adjustments& a, const float* src, float* dst,
+                 size_t pixelCount, uint8_t activeMask) {
     // Any bit set means at least one HSL channel is active. activeMask is
     // threaded into applyHSLPerChannel so all-zero channels are skipped inside
     // the per-pixel loop.
@@ -1525,9 +1319,9 @@ void applyStageD(const Adjustments& a, float* p, size_t pixelCount,
         pixelCount, lrc::parallel::defaultGrain(pixelCount),
         [&](size_t iBegin, size_t iEnd) {
     for (size_t i = iBegin; i < iEnd; ++i) {
-        float r = p[i * 3 + 0];
-        float g = p[i * 3 + 1];
-        float b = p[i * 3 + 2];
+        float r = src[i * 3 + 0];
+        float g = src[i * 3 + 1];
+        float b = src[i * 3 + 2];
         if (anyWork) {
             // 6. HSL: per-channel adjustments (hue, saturation, luminance).
             if (useHsl)
@@ -1550,11 +1344,59 @@ void applyStageD(const Adjustments& a, float* p, size_t pixelCount,
             for (const ColorTargetPrecomputed& ct : ctData)
                 applyColorTarget(r, g, b, ct);
         }
-        p[i * 3 + 0] = std::max(0.0f, std::min(r, 1.0f));
-        p[i * 3 + 1] = std::max(0.0f, std::min(g, 1.0f));
-        p[i * 3 + 2] = std::max(0.0f, std::min(b, 1.0f));
+        dst[i * 3 + 0] = std::max(0.0f, std::min(r, 1.0f));
+        dst[i * 3 + 1] = std::max(0.0f, std::min(g, 1.0f));
+        dst[i * 3 + 2] = std::max(0.0f, std::min(b, 1.0f));
     }
     });
+}
+
+// Applies the per-pixel stack (stages A..D) from `src` to `dst`; src == dst is
+// the historical in-place contract. Returns false when the whole stack is the
+// identity, in which case dst was not touched (mirrors applyAdjustments'
+// neutral fast path). When only stage A is the identity its output is a copy of
+// the input, so `dst` is filled from `src` before the later in-place stages run.
+bool applyAdjustmentsTo(const Adjustments& a, const float* src, float* dst,
+                        size_t pixelCount) {
+    uint8_t activeMask = 0u;
+    for (int i = 0; i < 8; ++i) {
+        const HSLChannel& ch = a.hsl[i];
+        if (ch.hue != 0.0 || ch.saturation != 0.0 || ch.luminance != 0.0)
+            activeMask |= static_cast<uint8_t>(1u << i);
+    }
+    // Fast path: every per-pixel parameter is neutral, so the stack is the
+    // identity. The input is already normalized to [0,1]; returning without
+    // touching dst is exact (the per-pixel loop would only multiply by 1.0, add
+    // 0.0 and clamp in-range values).
+    if (!stageANeedsWork(a) && !stageBNeedsWork(a) && !stageCNeedsWork(a) &&
+        a.saturation == 0.0 && !activeMask && a.colorTargets.empty() &&
+        a.splitTone.highlightSaturation < 0.5 &&
+        a.splitTone.shadowSaturation < 0.5)
+        return false;
+
+    if (!applyStageA(a, src, dst, pixelCount) && src != dst) {
+        // Stage A is the identity but the buffer is separate: materialize its
+        // output so the in-place stages below have a defined destination.
+        std::memcpy(dst, src, pixelCount * 3 * sizeof(float));
+    }
+    applyStageB(a, dst, dst, pixelCount);
+    applyStageC(a, dst, dst, pixelCount);
+    applyStageD(a, dst, dst, pixelCount, activeMask);
+    return true;
+}
+
+// Runs stage `stage` (0..3, A..D) from `src` to `dst`; src == dst reproduces the
+// historical in-place pass. Callers must have checked stageNeedsWork() first:
+// the identity stages return without writing, which would leave a separate dst
+// undefined.
+inline void applyStageX(int stage, const Adjustments& a, const float* src,
+                        float* dst, size_t pixelCount, uint8_t activeMask) {
+    switch (stage) {
+        case 0: applyStageA(a, src, dst, pixelCount); break;
+        case 1: applyStageB(a, src, dst, pixelCount); break;
+        case 2: applyStageC(a, src, dst, pixelCount); break;
+        default: applyStageD(a, src, dst, pixelCount, activeMask); break;
+    }
 }
 
 // Applies the spatial stages (texture, clarity, sharpening, lens distortion,
@@ -2121,20 +1963,27 @@ HistogramBins Pipeline::computeHistogramFromLinear(
     return bins;
 }
 
-float Pipeline::maskWeight(const Mask& m, int w, int h, float nx, float ny) {
+float Pipeline::maskWeight(const Mask& m, int w, int h, float nx,
+                            float ny) noexcept {
+    // Geometry is read through the Mask accessors: they are std::get_if-based
+    // and never throw, so a type/alternative mismatch falls back to that
+    // alternative's default-constructed values. That is bit-identical to the
+    // pre-variant behaviour, where the unused geometry members already held
+    // their defaults.
     switch (m.type) {
         case MaskType::LinearGradient: {
-            const float dx = m.linear.endX - m.linear.startX;
-            const float dy = m.linear.endY - m.linear.startY;
+            const LinearGradientMask& lg = m.linear();
+            const float dx = lg.endX - lg.startX;
+            const float dy = lg.endY - lg.startY;
             const float len2 = dx * dx + dy * dy;
             if (len2 < 1e-6f)
                 return m.invert ? 1.0f : 0.0f;
             // s is the projection of the pixel onto the gradient axis, 0 at the
             // start line and 1 at the end line. The mask covers the strip s in
             // [0,1] and fades out within `feather` on both sides.
-            const float s = ((nx - m.linear.startX) * dx +
-                             (ny - m.linear.startY) * dy) / len2;
-            const float soft = m.linear.feather * 0.35f;
+            const float s = ((nx - lg.startX) * dx +
+                             (ny - lg.startY) * dy) / len2;
+            const float soft = lg.feather * 0.35f;
             float wgt = 1.0f;
             if (s < soft)
                 wgt = std::min(wgt, smoothstep01(
@@ -2147,28 +1996,30 @@ float Pipeline::maskWeight(const Mask& m, int w, int h, float nx, float ny) {
             return std::clamp(wgt, 0.0f, 1.0f);
         }
         case MaskType::RadialGradient: {
-            const float rx = std::max(m.radial.radiusX, 1e-4f);
-            const float ry = std::max(m.radial.radiusY, 1e-4f);
-            const float dx = (nx - m.radial.centerX) / rx;
-            const float dy = (ny - m.radial.centerY) / ry;
+            const RadialGradientMask& rg = m.radial();
+            const float rx = std::max(rg.radiusX, 1e-4f);
+            const float ry = std::max(rg.radiusY, 1e-4f);
+            const float dx = (nx - rg.centerX) / rx;
+            const float dy = (ny - rg.centerY) / ry;
             const float d = std::sqrt(dx * dx + dy * dy);
             // Falloff begins at radius fraction (1 - feather); feather 0 is a
             // hard ellipse, feather 1 fades across the whole radius.
-            const float inner = 1.0f - m.radial.feather;
-            const float t = (d - inner) / std::max(m.radial.feather, 1e-4f);
+            const float inner = 1.0f - rg.feather;
+            const float t = (d - inner) / std::max(rg.feather, 1e-4f);
             float falloff = 1.0f - smoothstep01(std::clamp(t, 0.0f, 1.0f));
-            if (m.radial.invert)
+            if (rg.invert)
                 falloff = 1.0f - falloff;
             if (m.invert)
                 falloff = 1.0f - falloff;
             return std::clamp(falloff, 0.0f, 1.0f);
         }
         case MaskType::Brush: {
-            if (m.brush.empty())
+            const std::vector<BrushDab>& dabs = m.brush();
+            if (dabs.empty())
                 return m.invert ? 1.0f : 0.0f;
             const float minDim = static_cast<float>(std::min(w, h));
             float wgt = 0.0f;
-            for (const BrushDab& dab : m.brush) {
+            for (const BrushDab& dab : dabs) {
                 const float rx = std::max(
                     dab.radius * minDim / std::max(w, 1), 1e-4f);
                 const float ry = std::max(
@@ -2247,7 +2098,7 @@ Pipeline::aiMaskWeightField(const Mask& mask, const ImageBuffer& src) {
     // headless tests; AiMaskGenerator then resolves to its heuristic fallback
     // instead of failing, which is what its header contract promises.
     AiMaskGenerator generator(globalAiEngine());
-    auto maskBuf = generator.generate(src, mask.ai);
+    auto maskBuf = generator.generate(src, mask.ai());
     if (!maskBuf || maskBuf->width() != src.width() ||
         maskBuf->height() != src.height())
         return {};
@@ -2312,7 +2163,7 @@ Pipeline::postCropVignetteWeightField(const Adjustments& a, int w, int h) {
 // Per-pixel weight [0,1] for a colour-range mask, compared in HSL space. r/g/b
 // are linear RGB [0,1]. A mask without a sampled reference is inert (0).
 float Pipeline::colorRangeWeight(const ColorRangeMask& m, float r, float g,
-                                 float b) {
+                                 float b) noexcept {
     if (!m.hasReference) return 0.0f;
     float ph, ps, pl, rh, rs, rl;
     rgbToHSL(r, g, b, ph, ps, pl);
@@ -2333,7 +2184,8 @@ float Pipeline::colorRangeWeight(const ColorRangeMask& m, float r, float g,
 
 // --- Sub-mask weight helpers ------------------------------------------------
 
-float Pipeline::colorSubMaskWeight(const Mask& m, float r, float g, float b) {
+float Pipeline::colorSubMaskWeight(const Mask& m, float r, float g,
+                                    float b) noexcept {
     if (!m.useColorRange)
         return 1.0f;  // identity element of the product (intersection).
     float ph, ps, pl, rh, rs, rl;
@@ -2356,7 +2208,7 @@ float Pipeline::colorSubMaskWeight(const Mask& m, float r, float g, float b) {
 }
 
 float Pipeline::luminanceSubMaskWeight(const Mask& m, float r, float g,
-                                       float b) {
+                                       float b) noexcept {
     if (!m.useLuminance)
         return 1.0f;  // identity element of the product (intersection).
     const float L = 0.2126f * r + 0.7152f * g + 0.0722f * b;  // [0,1]
@@ -2367,7 +2219,8 @@ float Pipeline::luminanceSubMaskWeight(const Mask& m, float r, float g,
 }
 
 float Pipeline::combinedMaskWeight(const Mask& m, int w, int h, float nx,
-                                   float ny, float r, float g, float b) {
+                                   float ny, float r, float g,
+                                   float b) noexcept {
     const float geo = Pipeline::maskWeight(m, w, h, nx, ny);  // invert folded.
     if (!m.useColorRange && !m.useLuminance)
         return std::clamp(geo, 0.0f, 1.0f);  // no sub-mask: geometry weight only.
@@ -2398,7 +2251,7 @@ void Pipeline::applyLocalAdjustments(const Adjustments& a, float* p, int w,
         // A colour-range mask without a sampled reference is inert (weight 0
         // everywhere), so it does not count as an active mask.
         if (m.type != MaskType::None && m.opacity > 0.0 && m.hasEffect() &&
-            !(m.type == MaskType::ColorRange && !m.color.hasReference)) {
+            !(m.type == MaskType::ColorRange && !m.color().hasReference)) {
             anyMask = true;
             break;
         }
@@ -2435,7 +2288,7 @@ void Pipeline::applyLocalAdjustments(const Adjustments& a, float* p, int w,
         if (m.opacity <= 0.0 || !m.hasEffect())
             continue;
         if (m.type == MaskType::ColorRange) {
-            if (m.color.hasReference) {
+            if (m.color().hasReference) {
                 needBaseSnapshot = true;
                 break;
             }
@@ -2453,7 +2306,7 @@ void Pipeline::applyLocalAdjustments(const Adjustments& a, float* p, int w,
 
     for (const Mask& m : a.masks) {
         if (m.type == MaskType::None || m.opacity <= 0.0 ||
-            (m.type == MaskType::ColorRange && !m.color.hasReference) ||
+            (m.type == MaskType::ColorRange && !m.color().hasReference) ||
             !m.hasEffect())
             continue;
         const float opacity = static_cast<float>(std::clamp(m.opacity, 0.0, 1.0));
@@ -2534,7 +2387,7 @@ void Pipeline::applyLocalAdjustments(const Adjustments& a, float* p, int w,
                         wgt *= opacity;
                     } else {
                         wgt = Pipeline::colorRangeWeight(
-                                  m.color, base[i * 3], base[i * 3 + 1],
+                                  m.color(), base[i * 3], base[i * 3 + 1],
                                   base[i * 3 + 2]) * opacity;
                     }
                     if (wgt <= 1e-4f)
@@ -2629,41 +2482,11 @@ Pipeline::Pipeline(std::shared_ptr<const ColorManager> colorManager)
 
 void Pipeline::applyAdjustments(const Adjustments& a, float* p,
                                 size_t pixelCount) {
-    // HSL per-channel processing is active when any channel has a non-zero
-    // adjustment. Hoisted out of the per-pixel loop so the check runs once
-    // instead of once per pixel. activeMask is the bitset of such channels;
-    // applyHSLPerChannel uses it to skip all-zero channels entirely.
-    uint8_t activeMask = 0u;
-    for (int i = 0; i < 8; ++i) {
-        const HSLChannel& ch = a.hsl[i];
-        if (ch.hue != 0.0 || ch.saturation != 0.0 || ch.luminance != 0.0)
-            activeMask |= static_cast<uint8_t>(1u << i);
-    }
-    const bool useHsl = (activeMask != 0u);
-    const bool useCurve = (a.curve.size() >= 2);
-
-    // Fast path: every per-pixel parameter is neutral, so the stack is the
-    // identity. The input is already normalized to [0,1]; returning without
-    // touching it is exact (the per-pixel loop would only multiply by 1.0,
-    // add 0.0 and clamp in-range values).
-    if (a.exposure == 0.0 && a.contrast == 0.0 && a.highlights == 0.0 &&
-        a.shadows == 0.0 && a.whites == 0.0 && a.blacks == 0.0 &&
-        a.temperature == 0.0 && a.tint == 0.0 && a.dehaze == 0.0 &&
-        a.vibrance == 0.0 && a.saturation == 0.0 && !useHsl && !useCurve &&
-        a.colorTargets.empty() &&
-        a.splitTone.highlightSaturation < 0.5 &&
-        a.splitTone.shadowSaturation < 0.5)
-        return;
-
-    // The per-pixel stack (stages A-D). Splitting the original single
-    // loop into per-stage passes keeps the incremental render path bit-identical
-    // to the original output: each pass reproduces exactly the arithmetic of the
-    // corresponding section, and stage D clamps once at the end as the original
-    // loop did.
-    applyStageA(a, p, pixelCount);
-    applyStageB(a, p, pixelCount);
-    applyStageC(a, p, pixelCount);
-    applyStageD(a, p, pixelCount, activeMask);
+    // In-place contract preserved: the stages read and write the same buffer,
+    // which is bit-identical to the original single-loop arithmetic (stage D
+    // still clamps once at the end). See applyAdjustmentsTo for the neutral fast
+    // path and the per-stage split rationale.
+    applyAdjustmentsTo(a, p, p, pixelCount);
 }
 
 void Pipeline::applySpatialAdjustments(const Adjustments& a, float* p,
@@ -2873,7 +2696,8 @@ void Pipeline::applySpotRemoval(const Adjustments& a, float* p, int w, int h) {
 }
 
 Pipeline::SpatialKernels Pipeline::spatialKernels(const Adjustments& a, int w,
-                                                  int h, float sigmaScale) {
+                                                  int h,
+                                                  float sigmaScale) noexcept {
     SpatialKernels k;
     // Absolute-pixel kernels are scaled by the preview/full-resolution
     // factor so a preview keeps the same *image-space* radius as the export.
@@ -2907,7 +2731,8 @@ Pipeline::SpatialKernels Pipeline::spatialKernels(const Adjustments& a, int w,
     return k;
 }
 
-float Pipeline::previewSigmaScale(int workingLongEdge, int fullLongEdge) {
+float Pipeline::previewSigmaScale(int workingLongEdge,
+                                    int fullLongEdge) noexcept {
     if (workingLongEdge <= 0 || fullLongEdge <= 0)
         return 1.0f;
     if (workingLongEdge >= fullLongEdge)
@@ -2925,7 +2750,11 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
         return {};
     std::lock_guard<std::mutex> lock(renderStateMutex_);
 
-    // --- 1. Downscale (contain-fit, never upscale) into an F32 working copy.
+    // --- 1. Working resolution (contain-fit, never upscale). Only the
+    // geometry is computed here: the downscaled F32 copy is materialized in
+    // step 6 and only when the render actually restarts from stage A. That
+    // keeps incremental renders (start > 0) and full cache hits from paying a
+    // full downsample that nobody reads.
     const double scale = std::min(
         1.0,
         std::min(static_cast<double>(targetSize.width) / source.width(),
@@ -2934,18 +2763,6 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
         std::max(1, static_cast<int>(std::lround(source.width() * scale)));
     const int nh =
         std::max(1, static_cast<int>(std::lround(source.height() * scale)));
-    ImageBufferPtr working;
-    if (nw == source.width() && nh == source.height()) {
-        working = (source.format() == PixelFormat::F32)
-                      ? std::make_shared<ImageBuffer>(source)
-                      : source.toF32();
-    } else {
-        working = (source.format() == PixelFormat::F32)
-                      ? source.resize(nw, nh)
-                      : source.resizeToF32(nw, nh);
-    }
-    if (!working || working->empty())
-        return {};
     const int refLong = (fullLongEdge > 0)
                             ? fullLongEdge
                             : std::max(source.width(), source.height());
@@ -2980,8 +2797,8 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
             // Nothing changed: serve the cached final frame directly.
             lastRecomputeStage_ = -1;
             lastReuseStartStage_ = -1;
-            if (renderState_.stages[5])
-                return renderState_.stages[5];
+            if (renderState_.finalFrame)
+                return renderState_.finalFrame;
             firstChanged = 0;
         }
     }
@@ -3001,12 +2818,52 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
     for (int i = 0; i < start; ++i)
         touchStageLocked(i);
 
-    // --- 6. Prepare the writable input for the restart stage.
-    ImageBufferPtr input;
+    // --- 6. Seed the immutable stage chain.
+    //
+    // The chain is walked with immutable snapshots plus pooled writable
+    // destinations: a stage never clones its input, it writes its output into a
+    // buffer acquired from the pool and then retains that buffer as the next
+    // read-only link. Stage F's hash is a constant, so a valid state can never
+    // report stage 5 as the first change; the clamp below is defensive only.
+    if (start > 4)
+        start = 0;
+    std::shared_ptr<const ImageBuffer> chain;
+    // Only a from-source render materializes the downscaled working copy; it is
+    // declared here because stage A mutates it in place below.
+    ImageBufferPtr working;
+
+    // Downscale into an F32 working copy; `source` is never written. Returns
+    // false (empty working buffer) when the copy could not be produced.
+    const auto materializeWorking = [&]() -> bool {
+        if (nw == source.width() && nh == source.height()) {
+            working = (source.format() == PixelFormat::F32)
+                          ? std::make_shared<ImageBuffer>(source)
+                          : source.toF32();
+        } else {
+            working = (source.format() == PixelFormat::F32)
+                          ? source.resize(nw, nh)
+                          : source.resizeToF32(nw, nh);
+        }
+        return working && !working->empty();
+    };
+
+    if (start > 0) {
+        // Reuse the nearest retained ancestor read-only: no defensive clone.
+        chain = renderState_.retained[start - 1];
+        if (!chain)
+            start = 0;  // defensive: a missing snapshot restarts from the source
+    }
     if (start == 0) {
-        input = working;  // the resized source copy; `source` is untouched.
-    } else {
-        input = std::make_shared<ImageBuffer>(*renderState_.stages[start - 1]);
+        // A from-source render recomputes every stage, so the previous
+        // snapshots are dead weight: release them into the work pool *before*
+        // the downscaled copy is allocated. The chain then reuses those
+        // buffers, which keeps peak working-set size flat and makes the
+        // steady-state full recompute allocation-free.
+        for (int i = 0; i < 4; ++i)
+            dropRetainedStageLocked(i, true);
+        if (!materializeWorking())
+            return {};
+        chain = working;
     }
 
     // --- 7. Run stages start..5, retaining A-D + F (E is never retained).
@@ -3021,58 +2878,89 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
             activeMask |= static_cast<uint8_t>(1u << i);
     }
 
+    // Stage E's writable output. Not retained, so it is either handed to the
+    // caller (linearDisplayOut) or recycled into the work pool.
+    ImageBufferPtr stageEOut;
     for (int i = start; i <= 5; ++i) {
         if (i == 5) {
-            // Stage F: sRGB output. input holds the stage-E output (a writable
-            // copy that stage E consumed); toDisplaySRGB only reads it.
-            // Hand the adjusted linear F32 display buffer (the stage-F input)
-            // to the caller before the sRGB conversion so a linear-light
-            // histogram can be derived without a second render pass.
-            if (linearDisplayOut)
-                *linearDisplayOut = input;
-            ImageBufferPtr u8 = cm_->toDisplaySRGB(*input);
-            if (renderState_.present[5])
-                renderState_.bytes -= renderState_.stages[5]->sizeBytes();
-            renderState_.stages[5] = u8;
-            renderState_.present[5] = true;
+            // Stage F: sRGB output. `chain` holds the stage-E output and
+            // toDisplaySRGB only reads it. Hand the adjusted linear F32 display
+            // buffer (the stage-F input) to the caller before the conversion so
+            // a linear-light histogram can be derived without a second pass.
+            if (linearDisplayOut && stageEOut)
+                *linearDisplayOut = stageEOut;  // ownership leaves the pool
+            ImageBufferPtr u8 = cm_->toDisplaySRGB(*chain);
+            renderState_.finalFrame = u8;
             renderState_.stageHashes[5] = stageHashes[5];
-            renderState_.bytes += u8->sizeBytes();
-            touchStageLocked(5);
+            chain.reset();
+            if (stageEOut && !linearDisplayOut) {
+                // Recycled only when it was not handed out: a caller holding
+                // the linear buffer must never see it rewritten by a later
+                // render.
+                renderState_.work.release(std::move(stageEOut));
+            }
             break;
         }
-        float* px = reinterpret_cast<float*>(input->data().data());
-        switch (i) {
-            case 0: applyStageA(adjustments, px, pixelCount); break;
-            case 1: applyStageB(adjustments, px, pixelCount); break;
-            case 2: applyStageC(adjustments, px, pixelCount); break;
-            case 3: applyStageD(adjustments, px, pixelCount, activeMask); break;
-            case 4:
-                applySpatialAdjustmentsScaled(adjustments, px, nw, nh,
-                                              sigmaScale);
-                break;
-            default: break;
+
+        if (i == 4) {
+            // Stage E (spatial) is never retained and its kernels are
+            // in-place, so it needs its own writable copy of stage D's output;
+            // D stays cached read-only. This is the single copy the refactored
+            // chain still pays, and it is what keeps the incremental
+            // "stage-E only" restart possible.
+            stageEOut = renderState_.work.acquire(nw, nh);
+            const std::span<const float> inFloats = chain->asFloatSpan();
+            const std::span<float> outFloats = stageEOut->asMutableFloatSpan();
+            if (!inFloats.empty() && !outFloats.empty())
+                std::memcpy(outFloats.data(), inFloats.data(),
+                            inFloats.size() * sizeof(float));
+            applySpatialAdjustmentsScaled(adjustments, outFloats.data(), nw, nh,
+                                          sigmaScale);
+            chain = stageEOut;
+            // Keep the hash so the "nothing changed" fast path still detects an
+            // E-parameter change.
+            renderState_.stageHashes[4] = stageHashes[4];
+            continue;
         }
-        if (i < 4) {
-            // Retain this stage output (F32) for future incremental reuse.
-            if (renderState_.present[i])
-                renderState_.bytes -= renderState_.stages[i]->sizeBytes();
-            renderState_.stages[i] = input;
+
+        // Stages A..D. Release the previous snapshot for this slot first so its
+        // buffer can be recycled as this stage's destination (a steady-state
+        // render then allocates nothing).
+        dropRetainedStageLocked(i, true);
+
+        if (!stageNeedsWork(i, adjustments)) {
+            // Identity stage: its output IS its input, so retain the same
+            // immutable snapshot instead of copying. Both slots are const, so
+            // the alias can never be written through.
+            renderState_.retained[i] = chain;
             renderState_.present[i] = true;
             renderState_.stageHashes[i] = stageHashes[i];
-            renderState_.bytes += input->sizeBytes();
             touchStageLocked(i);
-            // The retained node is immutable once cached; the next stage needs
-            // its own writable copy.
-            input = std::make_shared<ImageBuffer>(*renderState_.stages[i]);
-        } else {
-            // Stage E output is deliberately NOT retained: nothing downstream
-            // reads it (F always recomputes after E), so caching it would only
-            // consume the memory budget. Keep the hash so the "nothing changed"
-            // fast path still detects an E-parameter change.
-            renderState_.stageHashes[4] = stageHashes[4];
-            renderState_.present[4] = false;
-            renderState_.stages[4].reset();
+            continue;
         }
+
+        ImageBufferPtr dst;
+        if (i == 0 && start == 0) {
+            // First stage of a from-source render can run in place: `working`
+            // is exclusively ours and an active stage overwrites every pixel.
+            const std::span<float> floats = working->asMutableFloatSpan();
+            applyStageX(i, adjustments, floats.data(), floats.data(), pixelCount,
+                        activeMask);
+            dst = std::move(working);
+        } else {
+            dst = renderState_.work.acquire(nw, nh);
+            const std::span<const float> inFloats = chain->asFloatSpan();
+            const std::span<float> outFloats = dst->asMutableFloatSpan();
+            applyStageX(i, adjustments, inFloats.data(), outFloats.data(),
+                        pixelCount, activeMask);
+        }
+        // Retain this stage output (F32) for future incremental reuse. The
+        // const snapshot is the ownership guarantee: no later writer exists.
+        renderState_.retained[i] = dst;
+        renderState_.present[i] = true;
+        renderState_.stageHashes[i] = stageHashes[i];
+        touchStageLocked(i);
+        chain = dst;
     }
 
     renderState_.sourceKey = sourceKey;
@@ -3081,7 +2969,7 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
 
     lastRecomputeStage_ = start;
     lastReuseStartStage_ = (start > 0) ? start - 1 : -1;
-    return renderState_.stages[5];
+    return renderState_.finalFrame;
 }
 
 void Pipeline::clearIncrementalCache() {
@@ -3104,7 +2992,51 @@ size_t Pipeline::incrementalCacheCapacity() const {
 
 size_t Pipeline::incrementalCacheBytes() const {
     std::lock_guard<std::mutex> lock(renderStateMutex_);
-    return renderState_.bytes;
+    return retainedBytesLocked();
+}
+
+size_t Pipeline::retainedBytesLocked() const {
+    // Consecutive identity stages (e.g. an empty tone curve) share one immutable
+    // snapshot, so count every distinct allocation once: the incremental budget
+    // must reflect real memory, not the number of retained stage slots.
+    const ImageBuffer* seen[4] = {};
+    size_t distinct = 0;
+    size_t total = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (!renderState_.present[i])
+            continue;
+        const ImageBuffer* buffer = renderState_.retained[i].get();
+        bool duplicate = false;
+        for (size_t k = 0; k < distinct; ++k) {
+            if (seen[k] == buffer) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+        seen[distinct++] = buffer;
+        total += buffer->sizeBytes();
+    }
+    if (renderState_.finalFrame)
+        total += renderState_.finalFrame->sizeBytes();
+    return total;
+}
+
+void Pipeline::dropRetainedStageLocked(int stage, bool poolBuffer) {
+    if (stage < 0 || stage > 3)
+        return;
+    if (!renderState_.present[stage])
+        return;
+    renderState_.present[stage] = false;
+    // The snapshot is const-typed by design; undoing the read-only view here is
+    // safe because the pointee was allocated as ImageBuffer by the work pool, so
+    // it is not a const object -- the const type only expressed "no writer".
+    std::shared_ptr<const ImageBuffer> old = std::move(renderState_.retained[stage]);
+    renderState_.retained[stage].reset();
+    if (!poolBuffer || !old)
+        return;  // eviction releases the memory instead of recycling it
+    renderState_.work.release(std::const_pointer_cast<ImageBuffer>(std::move(old)));
 }
 
 int Pipeline::lastRecomputeStage() const {
@@ -3127,8 +3059,8 @@ void Pipeline::dropIncrementalStageForTest(int stage) {
         return;
     if (!renderState_.present[stage])
         return;
-    renderState_.bytes -= renderState_.stages[stage]->sizeBytes();
-    renderState_.stages[stage].reset();
+    // Not pooled: this simulates real eviction, which gives the memory back.
+    renderState_.retained[stage].reset();
     renderState_.present[stage] = false;
     // Invalidate the hash so a subsequent render that would otherwise think
     // it's still valid will correctly fall back to rebuilding.
@@ -3140,13 +3072,15 @@ void Pipeline::touchStageLocked(int stage) {
 }
 
 void Pipeline::evictIncrementalLocked() {
-    while (renderState_.bytes > incrementalBudgetBytes_) {
+    while (retainedBytesLocked() > incrementalBudgetBytes_) {
         // Evict the least-recently-touched retained stage, never stage F (the
         // final output, kept for the "nothing changed" fast path and the UI's
-        // last-render read).
+        // last-render read). An aliased snapshot may not shrink the total on
+        // the first pass; the loop then evicts its other slot, so it always
+        // terminates (each step clears one present flag).
         int victim = -1;
         uint32_t minTick = 0xFFFFFFFFu;
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 4; ++i) {
             if (renderState_.present[i] && renderState_.accessTick[i] < minTick) {
                 minTick = renderState_.accessTick[i];
                 victim = i;
@@ -3154,10 +3088,65 @@ void Pipeline::evictIncrementalLocked() {
         }
         if (victim < 0)
             break;
-        renderState_.bytes -= renderState_.stages[victim]->sizeBytes();
-        renderState_.stages[victim].reset();
+        // Not pooled: eviction runs because the budget is exceeded, so the
+        // point is to give the memory back.
+        renderState_.retained[victim].reset();
         renderState_.present[victim] = false;
     }
+}
+
+// --- WorkBufferPool ---------------------------------------------------------
+// One place owns the "which buffer is writable" decision, so the render loop
+// cannot accidentally write into a retained snapshot.
+
+ImageBufferPtr Pipeline::WorkBufferPool::acquire(int w, int h) {
+    if (width != w || height != h) {
+        // Working-size change (preview size changed): stale idle buffers can
+        // never be reused, so release them.
+        idle.clear();
+        width = w;
+        height = h;
+    }
+    for (size_t i = 0; i < idle.size(); ++i) {
+        if (idle[i] && idle[i]->width() == w && idle[i]->height() == h) {
+            ImageBufferPtr buffer = std::move(idle[i]);
+            idle.erase(idle.begin() + static_cast<std::ptrdiff_t>(i));
+            return buffer;
+        }
+    }
+    return ImageBuffer::create(w, h, PixelFormat::F32);
+}
+
+void Pipeline::WorkBufferPool::release(ImageBufferPtr buffer) {
+    if (!buffer)
+        return;
+    // Another owner (a retained snapshot, the caller's linear display buffer,
+    // a local alias) still references it: pooling it here would later hand a
+    // writable buffer to a stage while that owner can still read it. Drop our
+    // reference instead; the buffer is freed with its last owner.
+    if (buffer.use_count() != 1)
+        return;
+    if (width > 0 && (buffer->width() != width || buffer->height() != height))
+        return;  // different working size: not reusable, let it go
+    // The cap only has to cover the snapshots released at the top of a
+    // from-source render (four stage slots, fewer distinct buffers when
+    // identity stages aliased them). A render drains the pool back into the
+    // retained stages and returns exactly one idle buffer, so this bound never
+    // grows the footprint beyond the historical working set.
+    constexpr size_t kMaxIdle = 4;
+    if (idle.size() >= kMaxIdle)
+        return;
+    if (idle.empty()) {
+        width = buffer->width();
+        height = buffer->height();
+    }
+    idle.push_back(std::move(buffer));
+}
+
+void Pipeline::WorkBufferPool::clear() {
+    idle.clear();
+    width = 0;
+    height = 0;
 }
 
 uint64_t Pipeline::computeSourceKey(const ImageBuffer& source, int workingW,
@@ -3462,8 +3451,8 @@ Pipeline::AutoDevelopSuggestion Pipeline::autoDevelop(const ImageBuffer& linear)
     return out;
 }
 
-Pipeline::WhiteBalanceEstimate Pipeline::estimateWhiteBalance(float lr, float lg,
-                                                              float lb) {
+Pipeline::WhiteBalanceEstimate Pipeline::estimateWhiteBalance(
+    float lr, float lg, float lb) noexcept {
     WhiteBalanceEstimate e;
     // Grey-world guard: a null or near-black channel carries no reliable colour
     // ratio, so report "no adjustment" instead of dividing by ~0.
@@ -3617,6 +3606,16 @@ ImageBufferPtr Pipeline::visualizeOverlay(const ImageBuffer& linear,
 ImageBufferPtr Pipeline::renderInternalLinear(const ImageBuffer& linear,
                                               const Adjustments& adjustments,
                                               int maxDim) const {
+    // Two ways to obtain the mutable F32 working buffer:
+    //  * owned    - resize()/toF32() already produced a private F32 buffer, so
+    //               the whole stack runs in place on it (unchanged behaviour).
+    //  * borrowed - the caller's buffer is already F32 at the requested size.
+    //               The public contract says it must stay untouched, so render
+    //               out-of-place into one private buffer: stage A doubles as
+    //               the copy the old code performed, then B..E run in place.
+    // This is a const, lock-free member: the borrowed path only allocates a
+    // local buffer, so concurrent calls from several threads stay safe.
+    bool owned = false;
     ImageBufferPtr f32;
     if (maxDim > 0) {
         const int longest = std::max(linear.width(), linear.height());
@@ -3631,27 +3630,51 @@ ImageBufferPtr Pipeline::renderInternalLinear(const ImageBuffer& linear,
             f32 = (linear.format() == PixelFormat::F32)
                       ? linear.resize(nw, nh)
                       : linear.resizeToF32(nw, nh);
-        } else if (linear.format() == PixelFormat::F32) {
-            // Same size, already float: must copy -- applyAdjustments edits in
-            // place and the caller's buffer must stay untouched.
-            f32 = std::make_shared<ImageBuffer>(linear);
-        } else {
+            owned = true;
+        } else if (linear.format() != PixelFormat::F32) {
             // Same size, integer source: convert straight to F32 and skip the
             // throwaway U16/U8 intermediate copy.
             f32 = linear.toF32();
+            owned = true;
         }
-    } else if (linear.format() == PixelFormat::F32) {
-        // Full resolution, already float: copy (in-place edit below).
-        f32 = std::make_shared<ImageBuffer>(linear);
-    } else {
+    } else if (linear.format() != PixelFormat::F32) {
         // Full resolution, integer source: direct F32 conversion.
         f32 = linear.toF32();
+        owned = true;
     }
 
+    if (!owned) {
+        // Borrowed F32 source: allocate the destination and never write through
+        // the caller's pointer.
+        const int w = linear.width();
+        const int h = linear.height();
+        const size_t pixelCount = static_cast<size_t>(w) * h;
+        f32 = ImageBuffer::create(w, h, PixelFormat::F32);
+        if (pixelCount == 0)
+            return f32;
+        const std::span<const float> srcFloats = linear.asFloatSpan();
+        const std::span<float> dstFloats = f32->asMutableFloatSpan();
+        if (srcFloats.size() < pixelCount * 3 ||
+            dstFloats.size() < pixelCount * 3)
+            return f32;  // defensive: only F32 sources take this path
+        if (!applyAdjustmentsTo(adjustments, srcFloats.data(), dstFloats.data(),
+                                pixelCount)) {
+            // Identity stack: the output is exactly the input.
+            std::memcpy(dstFloats.data(), srcFloats.data(),
+                        pixelCount * 3 * sizeof(float));
+        }
+        // Spatial stages need the neighbourhood, so they run after the per-pixel
+        // stack (and stay in linear light).
+        applySpatialAdjustments(adjustments, dstFloats.data(), w, h);
+        return f32;
+    }
+
+    if (!f32 || f32->empty())
+        return f32;  // matches the previous behaviour for empty/0x0 sources
     const int w = f32->width();
     const int h = f32->height();
     const size_t pixelCount = static_cast<size_t>(w) * h;
-    float* data = reinterpret_cast<float*>(f32->data().data());
+    float* data = f32->asMutableFloatSpan().data();
     applyAdjustments(adjustments, data, pixelCount);
     // Spatial stages need the neighbourhood, so they run after the per-pixel
     // stack (and stay in linear light).
@@ -3781,11 +3804,11 @@ ImageBufferPtr Pipeline::renderFullDisplay(uint64_t imageId,
 // have been loaded. See Pipeline.h for the threading / lifetime contract.
 std::atomic<AiInferenceEngine*> Pipeline::aiEngine_ = nullptr;
 
-AiInferenceEngine* Pipeline::globalAiEngine() {
+AiInferenceEngine* Pipeline::globalAiEngine() noexcept {
     return aiEngine_.load(std::memory_order_acquire);
 }
 
-void Pipeline::setGlobalAiEngine(AiInferenceEngine* engine) {
+void Pipeline::setGlobalAiEngine(AiInferenceEngine* engine) noexcept {
     // See Pipeline.h @warning: intended to be called once from the main thread
     // before any render thread starts; must not be replaced at runtime.
     aiEngine_.store(engine, std::memory_order_release);

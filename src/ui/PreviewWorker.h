@@ -27,9 +27,10 @@
 #include "engine/ImageBuffer.h"
 #include "engine/Pipeline.h"  // lrc::HistogramBins for the histogramReady signal.
 #include "engine/SoftProofing.h"  // lrc::SoftProofParams for requestProof.
-// The signals/slots below carry engine types (Adjustments, ImageBufferPtr,
-// HistogramBins, SoftProofParams): their metatypes must be declared before moc
-// uses them, and they cross thread boundaries as queued connections.
+// The signals/slots below carry engine types (AdjustmentsPtr, Adjustments,
+// ImageBufferPtr, HistogramBins, SoftProofParams): their metatypes must be
+// declared before moc uses them (ui/MetaTypes.h is the single declaration
+// point), and they cross thread boundaries as queued connections.
 #include "ui/MetaTypes.h"
 
 /**
@@ -69,11 +70,17 @@ Q_DECLARE_METATYPE(ExportWatermark)
  * formats). `icc` is an ExportEngine::ExportSpec::IccChoice value;
  * `watermark` is optional. Crosses the queued connection from MainWindow to
  * PreviewWorker::batchExport; registered in main().
+ *
+ * `adjustments` is an immutable snapshot frozen when the item is built: the
+ * producer copies the stack into a shared_ptr before the queued call, so the
+ * QList<ExportItem> copy into the event carries only pointers and a later UI
+ * edit cannot change what an in-flight batch exports. Null is rejected as a
+ * per-item failure.
  */
 struct ExportItem {
     qint64 imageId = 0;
     QString filePath;
-    lrc::Adjustments adjustments;
+    lrc::AdjustmentsPtr adjustments;
     QString outPath;
     ExportFormat format = ExportFormat::Jpeg;
     int quality = 92;
@@ -112,6 +119,12 @@ public:
     void requestAbort() { abort_.store(true); }
 
 public slots:
+    // Adjustment-stack arguments below are lrc::AdjustmentsPtr (a shared_ptr to
+    // a const Adjustments) instead of Adjustments by value: the UI publishes one
+    // immutable snapshot per edit and every queued request derived from that
+    // edit shares it, so the mask / curve / spot vectors are never deep-copied
+    // into the event queue. Slots only read the pointee and never retain the
+    // pointer past the call.
     /**
      * @brief Sets the viewport's logical render size for Fit/<=1:1 views.
      *
@@ -137,18 +150,19 @@ public slots:
      * @param imageId    Catalog id of the photo to load.
      * @param filePath   Path of the raw file to decode.
      * @param generation Generation token; stale requests are dropped.
-     * @param adjustments Adjustment stack to render.
+     * @param adjustments Shared immutable adjustment snapshot to render;
+     *                    ignored (slot returns) when null.
      *
      * @note Keeps the decoded linear image as the working image for subsequent
      *       adjustPreview calls.
      */
-    void loadImage(qint64 imageId, const QString& filePath,
-                   qint64 generation, const lrc::Adjustments& adjustments);
+    void loadImage(qint64 imageId, const QString& filePath, qint64 generation,
+                   lrc::AdjustmentsPtr adjustments);
     /**
      * @brief Re-renders the working image with new adjustments (no raw decode).
      */
     void adjustPreview(qint64 imageId, qint64 generation,
-                       const lrc::Adjustments& adjustments);
+                       lrc::AdjustmentsPtr adjustments);
     /**
      * @brief Coarse (low-res) preview re-render.
      *
@@ -158,7 +172,7 @@ public slots:
      * dropped together.
      */
     void adjustPreviewCoarse(qint64 imageId, qint64 generation,
-                             const lrc::Adjustments& adjustments);
+                             lrc::AdjustmentsPtr adjustments);
     /**
      * @brief Renders the current preview through the soft-proofing transform.
      *
@@ -175,7 +189,7 @@ public slots:
      * (a different image id is ignored like adjustPreview).
      */
     void requestProof(qint64 imageId, qint64 generation,
-                      const lrc::Adjustments& adjustments,
+                      lrc::AdjustmentsPtr adjustments,
                       const lrc::SoftProofParams& params, bool enabled);
     /**
      * @brief Renders the out-of-gamut mask of the current preview.
@@ -185,7 +199,7 @@ public slots:
      * gamutReportReady; MainWindow writes it to the PNG the user picked.
      */
     void requestGamutReport(qint64 imageId,
-                            const lrc::Adjustments& adjustments,
+                            lrc::AdjustmentsPtr adjustments,
                             const lrc::SoftProofParams& params);
     /**
      * @brief Arms soft proofing for the view's own render paths.
@@ -222,7 +236,7 @@ public slots:
      * @return Emits exportFinished on completion.
      */
     void exportImage(qint64 imageId, const QString& filePath,
-                     const lrc::Adjustments& adjustments,
+                     lrc::AdjustmentsPtr adjustments,
                      const QString& outPath, int format, int quality,
                      int maxDim = 0, int icc = 0,
                      const ExportWatermark& watermark = ExportWatermark{});
@@ -248,7 +262,7 @@ public slots:
      * @param mode Pipeline::VisualizeMode as an int.
      */
     void renderVisualization(qint64 imageId, qint64 generation, int mode,
-                             const lrc::Adjustments& adjustments);
+                             lrc::AdjustmentsPtr adjustments);
     /**
      * @brief Decodes a bracketed sequence, merges to a linear HDR buffer and
      *        writes a linear DNG.
@@ -274,13 +288,13 @@ public slots:
      * fullResReady when this generation is still current.
      */
     void loadFullRes(qint64 imageId, const QString& filePath,
-                     qint64 generation, const lrc::Adjustments& adjustments);
+                     qint64 generation, lrc::AdjustmentsPtr adjustments);
     /**
      * @brief Re-renders the retained full-res linear buffer with new adjustments
      *        (no decode). No-op unless a full-res image is loaded.
      */
     void adjustFullRes(qint64 imageId, qint64 generation,
-                       const lrc::Adjustments& adjustments);
+                       lrc::AdjustmentsPtr adjustments);
     /**
      * @brief Coarse 1:1 intermediate re-render, bounded to kCoarseMaxDim.
      *
@@ -291,7 +305,7 @@ public slots:
      * coarse-then-refine on the refine path.
      */
     void adjustFullResCoarse(qint64 imageId, qint64 generation,
-                             const lrc::Adjustments& adjustments);
+                             lrc::AdjustmentsPtr adjustments);
     /**
      * @brief Releases the retained full-res buffer(s). Called on exit 1:1 /
      *        image switch.
@@ -309,8 +323,8 @@ public slots:
      * the same adjustment stack, the single render is reused for both.
      */
     void requestBeforeAfter(qint64 imageId, qint64 generation,
-                            const lrc::Adjustments& afterAdj,
-                            const lrc::Adjustments& beforeAdj,
+                            lrc::AdjustmentsPtr afterAdj,
+                            lrc::AdjustmentsPtr beforeAdj,
                             int maxDim = lrc::app::kPreviewMaxDim,
                             bool halfSize = true);
     /**
@@ -323,7 +337,7 @@ public slots:
      * collide with the main preview path.
      */
     void requestReference(qint64 refImageId, qint64 generation,
-                          const lrc::Adjustments& refAdj,
+                          lrc::AdjustmentsPtr refAdj,
                           int maxDim = lrc::app::kPreviewMaxDim);
 
 signals:

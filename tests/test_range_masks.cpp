@@ -125,11 +125,11 @@ namespace {
 Mask makeRadialMask() {
     Mask m;
     m.type = MaskType::RadialGradient;
-    m.radial.centerX = 0.5f;
-    m.radial.centerY = 0.5f;
-    m.radial.radiusX = 0.3f;
-    m.radial.radiusY = 0.3f;
-    m.radial.feather = 0.0f;
+    m.radial().centerX = 0.5f;
+    m.radial().centerY = 0.5f;
+    m.radial().radiusX = 0.3f;
+    m.radial().radiusY = 0.3f;
+    m.radial().feather = 0.0f;
     return m;
 }
 
@@ -229,11 +229,11 @@ TEST_CASE("RangeMasks: local adjustments apply through the colour sub-mask",
     Adjustments a;
     Mask m;
     m.type = MaskType::LinearGradient;  // full-field geometry.
-    m.linear.startX = 0.0f;
-    m.linear.startY = 0.0f;
-    m.linear.endX = 1.0f;
-    m.linear.endY = 0.0f;
-    m.linear.feather = 0.0f;
+    m.linear().startX = 0.0f;
+    m.linear().startY = 0.0f;
+    m.linear().endX = 1.0f;
+    m.linear().endY = 0.0f;
+    m.linear().feather = 0.0f;
     m.useColorRange = true;
     m.colorRefR = 1.0f;
     m.colorRefG = 0.0f;
@@ -257,11 +257,11 @@ TEST_CASE("RangeMasks: Mask JSON round-trip is lossless with every sub-mask "
     Adjustments a;
     Mask m;
     m.type = MaskType::RadialGradient;
-    m.radial.centerX = 0.6f;
-    m.radial.centerY = 0.4f;
-    m.radial.radiusX = 0.3f;
-    m.radial.radiusY = 0.2f;
-    m.radial.feather = 0.7f;
+    m.radial().centerX = 0.6f;
+    m.radial().centerY = 0.4f;
+    m.radial().radiusX = 0.3f;
+    m.radial().radiusY = 0.2f;
+    m.radial().feather = 0.7f;
     m.useColorRange = true;
     m.colorRefR = 0.9f;
     m.colorRefG = 0.1f;
@@ -287,7 +287,7 @@ TEST_CASE("RangeMasks: sub-mask fields drive the mask hash and stage-E hash",
           "[mask][rangemask][hash]") {
     Mask a;
     a.type = MaskType::Brush;
-    a.brush.push_back(BrushDab{0.5f, 0.5f, 0.2f, 0.6f});
+    a.brush().push_back(BrushDab{0.5f, 0.5f, 0.2f, 0.6f});
     Mask b = a;
 
     REQUIRE(a.hash() == b.hash());

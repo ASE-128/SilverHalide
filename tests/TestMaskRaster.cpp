@@ -151,7 +151,7 @@ TEST_CASE("MaskRaster: brushWeightField matches maskWeight at sample points",
             dab.y = u01(rng);
             dab.radius = 0.02f + 0.35f * u01(rng);
             dab.softness = u01(rng);
-            m.brush.push_back(dab);
+            m.brush().push_back(dab);
         }
         m.invert = (rng() & 1) != 0;
 
@@ -181,11 +181,11 @@ TEST_CASE("MaskRaster: brushWeightField also rasterizes non-brush types",
     // Linear gradient: spot-check the field against maskWeight.
     Mask lin;
     lin.type = MaskType::LinearGradient;
-    lin.linear.startX = 0.1f;
-    lin.linear.startY = 0.0f;
-    lin.linear.endX = 0.9f;
-    lin.linear.endY = 1.0f;
-    lin.linear.feather = 0.3f;
+    lin.linear().startX = 0.1f;
+    lin.linear().startY = 0.0f;
+    lin.linear().endX = 0.9f;
+    lin.linear().endY = 1.0f;
+    lin.linear().feather = 0.3f;
     const int w = 41, h = 37;
     auto linField = Pipeline::brushWeightField(lin, w, h);
     REQUIRE(linField != nullptr);
@@ -202,12 +202,12 @@ TEST_CASE("MaskRaster: brushWeightField also rasterizes non-brush types",
     // Radial gradient (with the radial invert flag folded in).
     Mask rad;
     rad.type = MaskType::RadialGradient;
-    rad.radial.centerX = 0.5f;
-    rad.radial.centerY = 0.5f;
-    rad.radial.radiusX = 0.4f;
-    rad.radial.radiusY = 0.3f;
-    rad.radial.feather = 0.6f;
-    rad.radial.invert = true;
+    rad.radial().centerX = 0.5f;
+    rad.radial().centerY = 0.5f;
+    rad.radial().radiusX = 0.4f;
+    rad.radial().radiusY = 0.3f;
+    rad.radial().feather = 0.6f;
+    rad.radial().invert = true;
     auto radField = Pipeline::brushWeightField(rad, w, h);
     REQUIRE(radField != nullptr);
     for (int y = 0; y < h; y += 2)
@@ -236,7 +236,7 @@ TEST_CASE("MaskRaster: weight-field cache hits on same geometry, misses on chang
           "[mask][raster][cache]") {
     Mask m;
     m.type = MaskType::Brush;
-    m.brush.push_back(BrushDab{0.4f, 0.4f, 0.2f, 0.6f});
+    m.brush().push_back(BrushDab{0.4f, 0.4f, 0.2f, 0.6f});
     const int w = 64, h = 64;
 
     // Same (geometry, w, h) returns the same cached shared_ptr.
@@ -251,7 +251,7 @@ TEST_CASE("MaskRaster: weight-field cache hits on same geometry, misses on chang
     REQUIRE(a.get() == c.get());
 
     // changing the dab geometry -> miss.
-    m.brush[0].x = 0.6f;
+    m.brush()[0].x = 0.6f;
     auto d = Pipeline::brushWeightField(m, w, h);
     REQUIRE(a.get() != d.get());
 
@@ -262,8 +262,8 @@ TEST_CASE("MaskRaster: weight-field cache hits on same geometry, misses on chang
 
     // adding a dab -> miss.
     m.invert = false;
-    m.brush[0].x = 0.4f;
-    m.brush.push_back(BrushDab{0.8f, 0.8f, 0.1f, 0.9f});
+    m.brush()[0].x = 0.4f;
+    m.brush().push_back(BrushDab{0.8f, 0.8f, 0.1f, 0.9f});
     auto f = Pipeline::brushWeightField(m, w, h);
     REQUIRE(d.get() != f.get());
 
@@ -283,7 +283,7 @@ TEST_CASE("MaskRaster: geometryHash covers only geometry + invert",
     // Equal masks hash equally.
     Mask a;
     a.type = MaskType::Brush;
-    a.brush.push_back(BrushDab{0.5f, 0.5f, 0.2f, 0.6f});
+    a.brush().push_back(BrushDab{0.5f, 0.5f, 0.2f, 0.6f});
     Mask b = a;
     REQUIRE(a.geometryHash() == b.geometryHash());
 
@@ -296,20 +296,20 @@ TEST_CASE("MaskRaster: geometryHash covers only geometry + invert",
     REQUIRE(a.geometryHash() == b.geometryHash());
 
     // dab x / radius / softness each change the hash.
-    b.brush[0].x = 0.7f;
+    b.brush()[0].x = 0.7f;
     REQUIRE(a.geometryHash() != b.geometryHash());
-    b.brush[0].x = 0.5f;
-    b.brush[0].radius = 0.4f;
+    b.brush()[0].x = 0.5f;
+    b.brush()[0].radius = 0.4f;
     REQUIRE(a.geometryHash() != b.geometryHash());
-    b.brush[0].radius = 0.2f;
-    b.brush[0].softness = 0.9f;
+    b.brush()[0].radius = 0.2f;
+    b.brush()[0].softness = 0.9f;
     REQUIRE(a.geometryHash() != b.geometryHash());
 
     // adding / removing a dab changes the hash (dab sequence is geometry).
-    b.brush[0].softness = 0.6f;
-    b.brush.push_back(BrushDab{0.8f, 0.8f, 0.1f, 0.5f});
+    b.brush()[0].softness = 0.6f;
+    b.brush().push_back(BrushDab{0.8f, 0.8f, 0.1f, 0.5f});
     REQUIRE(a.geometryHash() != b.geometryHash());
-    b.brush.pop_back();
+    b.brush().pop_back();
     REQUIRE(a.geometryHash() == b.geometryHash());
 
     // invert changes the hash.
@@ -320,9 +320,9 @@ TEST_CASE("MaskRaster: geometryHash covers only geometry + invert",
     Mask lin;
     lin.type = MaskType::LinearGradient;
     const size_t lin0 = lin.geometryHash();
-    lin.linear.endY = 0.6f;
+    lin.linear().endY = 0.6f;
     REQUIRE(lin.geometryHash() != lin0);
-    lin.linear.feather = 0.2f;
+    lin.linear().feather = 0.2f;
     REQUIRE(lin.geometryHash() != lin0);
     const size_t lin1 = lin.geometryHash();
     lin.opacity = 0.5;  // still not geometry
@@ -332,9 +332,9 @@ TEST_CASE("MaskRaster: geometryHash covers only geometry + invert",
     Mask rad;
     rad.type = MaskType::RadialGradient;
     const size_t rad0 = rad.geometryHash();
-    rad.radial.radiusX = 0.6f;
+    rad.radial().radiusX = 0.6f;
     REQUIRE(rad.geometryHash() != rad0);
-    rad.radial.invert = true;
+    rad.radial().invert = true;
     REQUIRE(rad.geometryHash() != rad0);
     const size_t rad1 = rad.geometryHash();
     rad.opacity = 0.9;  // still not geometry
@@ -345,7 +345,7 @@ TEST_CASE("MaskRaster: 500-dab brush rasterizes quickly (no O(P*D) regression)",
           "[mask][raster][smoke]") {
     Mask m;
     m.type = MaskType::Brush;
-    m.brush.reserve(500);
+    m.brush().reserve(500);
     std::mt19937 rng(9876);
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
     for (int i = 0; i < 500; ++i) {
@@ -354,7 +354,7 @@ TEST_CASE("MaskRaster: 500-dab brush rasterizes quickly (no O(P*D) regression)",
         dab.y = u01(rng);
         dab.radius = 0.01f + 0.06f * u01(rng);
         dab.softness = u01(rng);
-        m.brush.push_back(dab);
+        m.brush().push_back(dab);
     }
     const int w = 1920, h = 1080;
 
@@ -389,8 +389,8 @@ TEST_CASE("MaskRaster: applyLocalAdjustments matches a maskWeight reference",
     Adjustments a;
     Mask m1;
     m1.type = MaskType::Brush;
-    m1.brush.push_back(BrushDab{0.3f, 0.3f, 0.25f, 0.7f});
-    m1.brush.push_back(BrushDab{0.7f, 0.6f, 0.3f, 0.4f});
+    m1.brush().push_back(BrushDab{0.3f, 0.3f, 0.25f, 0.7f});
+    m1.brush().push_back(BrushDab{0.7f, 0.6f, 0.3f, 0.4f});
     m1.opacity = 0.8;
     m1.exposure = 1.2;
     m1.contrast = 25.0;
@@ -406,7 +406,7 @@ TEST_CASE("MaskRaster: applyLocalAdjustments matches a maskWeight reference",
 
     Mask m2;
     m2.type = MaskType::Brush;
-    m2.brush.push_back(BrushDab{0.5f, 0.5f, 0.4f, 0.5f});
+    m2.brush().push_back(BrushDab{0.5f, 0.5f, 0.4f, 0.5f});
     m2.invert = true;
     m2.opacity = 0.5;
     m2.exposure = -0.8;

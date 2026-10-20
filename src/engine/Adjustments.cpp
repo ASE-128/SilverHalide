@@ -73,15 +73,82 @@ inline void mixFloat(size_t& h, float v) {
 
 } // namespace
 
+void Mask::setType(MaskType t) {
+    type = t;
+    switch (t) {
+        case MaskType::LinearGradient:
+            if (!std::holds_alternative<LinearGradientMask>(shape))
+                shape.emplace<LinearGradientMask>();
+            break;
+        case MaskType::RadialGradient:
+            if (!std::holds_alternative<RadialGradientMask>(shape))
+                shape.emplace<RadialGradientMask>();
+            break;
+        case MaskType::Brush:
+            if (!std::holds_alternative<BrushGeometry>(shape))
+                shape.emplace<BrushGeometry>();
+            break;
+        case MaskType::ColorRange:
+            if (!std::holds_alternative<ColorRangeMask>(shape))
+                shape.emplace<ColorRangeMask>();
+            break;
+        case MaskType::AiMask:
+            if (!std::holds_alternative<AiMaskParams>(shape))
+                shape.emplace<AiMaskParams>();
+            break;
+        case MaskType::None:
+            if (!std::holds_alternative<std::monostate>(shape))
+                shape.emplace<std::monostate>();
+            break;
+    }
+}
+
+bool Mask::shapeMatchesType() const noexcept {
+    switch (type) {
+        case MaskType::LinearGradient:
+            return std::holds_alternative<LinearGradientMask>(shape);
+        case MaskType::RadialGradient:
+            return std::holds_alternative<RadialGradientMask>(shape);
+        case MaskType::Brush:
+            return std::holds_alternative<BrushGeometry>(shape);
+        case MaskType::ColorRange:
+            return std::holds_alternative<ColorRangeMask>(shape);
+        case MaskType::AiMask:
+            return std::holds_alternative<AiMaskParams>(shape);
+        case MaskType::None:
+            return std::holds_alternative<std::monostate>(shape);
+    }
+    return false;
+}
+
+void Mask::copyGeometryFrom(const Mask& other) {
+    type = other.type;
+    invert = other.invert;
+    // Mirrors the pre-variant field-by-field geometry sync: only the geometry
+    // alternatives are copied. Colour-range / AI parameters are edited through
+    // their own paths and are deliberately left alone.
+    if (const auto* lin = std::get_if<LinearGradientMask>(&other.shape))
+        shape = *lin;
+    else if (const auto* rad = std::get_if<RadialGradientMask>(&other.shape))
+        shape = *rad;
+    else if (const auto* geo = std::get_if<BrushGeometry>(&other.shape))
+        shape = *geo;
+}
+
 bool Mask::operator==(const Mask& other) const {
-    return type == other.type && linear == other.linear && radial == other.radial &&
-           brush == other.brush && invert == other.invert && opacity == other.opacity &&
+    // Field set and order are unchanged from the pre-variant implementation.
+    // An unused geometry compares as its default-constructed value, which is
+    // exactly what the old unused member held, so equality is preserved for
+    // every state the pipeline can produce.
+    return type == other.type && linear() == other.linear() &&
+           radial() == other.radial() && brush() == other.brush() &&
+           invert == other.invert && opacity == other.opacity &&
            exposure == other.exposure && contrast == other.contrast &&
            highlights == other.highlights && shadows == other.shadows &&
            whites == other.whites && blacks == other.blacks &&
            clarity == other.clarity && dehaze == other.dehaze &&
            saturation == other.saturation && temperature == other.temperature &&
-           tint == other.tint && color == other.color &&
+           tint == other.tint && color() == other.color() &&
            useColorRange == other.useColorRange &&
            colorRefR == other.colorRefR && colorRefG == other.colorRefG &&
            colorRefB == other.colorRefB && colorRange == other.colorRange &&
@@ -91,35 +158,44 @@ bool Mask::operator==(const Mask& other) const {
            luminanceRange == other.luminanceRange &&
            luminanceSmoothness == other.luminanceSmoothness &&
            maskUnion == other.maskUnion &&
-           ai == other.ai;
+           ai() == other.ai();
 }
 
-size_t Mask::hash() const {
+size_t Mask::hash() const noexcept {
     size_t h = 1469598103934665603ull;
     h = hashCombine(h, static_cast<size_t>(type));
-    h = hashCombine(h, static_cast<size_t>(color.hasReference));
-    mixFloat(h, color.refR);
-    mixFloat(h, color.refG);
-    mixFloat(h, color.refB);
-    mixDouble(h, color.hueTolerance);
-    mixDouble(h, color.satTolerance);
-    mixDouble(h, color.lumaTolerance);
-    mixDouble(h, color.softness);
-    mixFloat(h, linear.startX);
-    mixFloat(h, linear.startY);
-    mixFloat(h, linear.endX);
-    mixFloat(h, linear.endY);
-    mixFloat(h, linear.feather);
-    mixFloat(h, radial.centerX);
-    mixFloat(h, radial.centerY);
-    mixFloat(h, radial.radiusX);
-    mixFloat(h, radial.radiusY);
-    mixFloat(h, radial.feather);
-    h = hashCombine(h, static_cast<size_t>(radial.invert));
+    // Every geometry participates -- resident or not -- in exactly the order of
+    // the pre-variant implementation. A non-resident geometry contributes the
+    // default-constructed value of its alternative, which is bit-identical to
+    // the default member the old struct always carried, so the cache key (and
+    // the mask oracle's mask.hash.* rows) stay stable.
+    const ColorRangeMask& cr = color();
+    h = hashCombine(h, static_cast<size_t>(cr.hasReference));
+    mixFloat(h, cr.refR);
+    mixFloat(h, cr.refG);
+    mixFloat(h, cr.refB);
+    mixDouble(h, cr.hueTolerance);
+    mixDouble(h, cr.satTolerance);
+    mixDouble(h, cr.lumaTolerance);
+    mixDouble(h, cr.softness);
+    const LinearGradientMask& lg = linear();
+    mixFloat(h, lg.startX);
+    mixFloat(h, lg.startY);
+    mixFloat(h, lg.endX);
+    mixFloat(h, lg.endY);
+    mixFloat(h, lg.feather);
+    const RadialGradientMask& rg = radial();
+    mixFloat(h, rg.centerX);
+    mixFloat(h, rg.centerY);
+    mixFloat(h, rg.radiusX);
+    mixFloat(h, rg.radiusY);
+    mixFloat(h, rg.feather);
+    h = hashCombine(h, static_cast<size_t>(rg.invert));
     h = hashCombine(h, static_cast<size_t>(invert));
     mixDouble(h, opacity);
-    h = hashCombine(h, brush.size());
-    for (const BrushDab& d : brush) {
+    const std::vector<BrushDab>& dabs = brush();
+    h = hashCombine(h, dabs.size());
+    for (const BrushDab& d : dabs) {
         mixFloat(h, d.x);
         mixFloat(h, d.y);
         mixFloat(h, d.radius);
@@ -151,17 +227,18 @@ size_t Mask::hash() const {
     // AI mask target / threshold / feather / invert / model selection
     // all shape the weight raster (and thus the final image value via the
     // local-adjustment blend — include them in the full Mask::hash).
-    h = hashCombine(h, static_cast<size_t>(ai.target));
-    mixFloat(h, ai.threshold);
-    mixFloat(h, ai.feather);
-    h = hashCombine(h, static_cast<size_t>(ai.invert));
-    h = hashCombine(h, static_cast<size_t>(ai.modelInputSize));
-    h = hashCombine(h, static_cast<size_t>(ai.cachedWeightVersion));
-    h = hashCombine(h, ai.modelIdOverride.size());
-    for (char c : ai.modelIdOverride) h = hashCombine(h, static_cast<size_t>(c));
+    const AiMaskParams& aip = ai();
+    h = hashCombine(h, static_cast<size_t>(aip.target));
+    mixFloat(h, aip.threshold);
+    mixFloat(h, aip.feather);
+    h = hashCombine(h, static_cast<size_t>(aip.invert));
+    h = hashCombine(h, static_cast<size_t>(aip.modelInputSize));
+    h = hashCombine(h, static_cast<size_t>(aip.cachedWeightVersion));
+    h = hashCombine(h, aip.modelIdOverride.size());
+    for (char c : aip.modelIdOverride) h = hashCombine(h, static_cast<size_t>(c));
     // Click-prompt points shape the Prompt mask raster.
-    h = hashCombine(h, ai.points.size());
-    for (const SamPoint& pt : ai.points) {
+    h = hashCombine(h, aip.points.size());
+    for (const SamPoint& pt : aip.points) {
         mixFloat(h, pt.nx);
         mixFloat(h, pt.ny);
         h = hashCombine(h, static_cast<size_t>(pt.label));
@@ -169,36 +246,42 @@ size_t Mask::hash() const {
     return h;
 }
 
-size_t Mask::geometryHash() const {
+size_t Mask::geometryHash() const noexcept {
     // Geometry-only hash: type, linear/radial/brush shape, and both invert
     // flags. Intentionally omits opacity and the local-adjustment values so a
     // slider drag (which changes only those fields) keeps the cached weight
     // field valid. Brush dabs are hashed in order because the max-composition
     // is order-independent in value but the sequence is part of the geometry.
+    // Field set and mixing order are unchanged from the pre-variant version;
+    // a non-resident alternative contributes its default-constructed value.
     size_t h = 1469598103934665603ull;
     h = hashCombine(h, static_cast<size_t>(type));
-    h = hashCombine(h, static_cast<size_t>(color.hasReference));
-    mixFloat(h, color.refR);
-    mixFloat(h, color.refG);
-    mixFloat(h, color.refB);
-    mixDouble(h, color.hueTolerance);
-    mixDouble(h, color.satTolerance);
-    mixDouble(h, color.lumaTolerance);
-    mixDouble(h, color.softness);
-    mixFloat(h, linear.startX);
-    mixFloat(h, linear.startY);
-    mixFloat(h, linear.endX);
-    mixFloat(h, linear.endY);
-    mixFloat(h, linear.feather);
-    mixFloat(h, radial.centerX);
-    mixFloat(h, radial.centerY);
-    mixFloat(h, radial.radiusX);
-    mixFloat(h, radial.radiusY);
-    mixFloat(h, radial.feather);
-    h = hashCombine(h, static_cast<size_t>(radial.invert));
+    const ColorRangeMask& cr = color();
+    h = hashCombine(h, static_cast<size_t>(cr.hasReference));
+    mixFloat(h, cr.refR);
+    mixFloat(h, cr.refG);
+    mixFloat(h, cr.refB);
+    mixDouble(h, cr.hueTolerance);
+    mixDouble(h, cr.satTolerance);
+    mixDouble(h, cr.lumaTolerance);
+    mixDouble(h, cr.softness);
+    const LinearGradientMask& lg = linear();
+    mixFloat(h, lg.startX);
+    mixFloat(h, lg.startY);
+    mixFloat(h, lg.endX);
+    mixFloat(h, lg.endY);
+    mixFloat(h, lg.feather);
+    const RadialGradientMask& rg = radial();
+    mixFloat(h, rg.centerX);
+    mixFloat(h, rg.centerY);
+    mixFloat(h, rg.radiusX);
+    mixFloat(h, rg.radiusY);
+    mixFloat(h, rg.feather);
+    h = hashCombine(h, static_cast<size_t>(rg.invert));
     h = hashCombine(h, static_cast<size_t>(invert));
-    h = hashCombine(h, brush.size());
-    for (const BrushDab& d : brush) {
+    const std::vector<BrushDab>& dabs = brush();
+    h = hashCombine(h, dabs.size());
+    for (const BrushDab& d : dabs) {
         mixFloat(h, d.x);
         mixFloat(h, d.y);
         mixFloat(h, d.radius);
@@ -223,18 +306,19 @@ size_t Mask::geometryHash() const {
     // they belong to the key even though AI weights are produced by
     // Pipeline::aiMaskWeightField rather than brushWeightField. The viewport
     // overlay memoises on geometryHash() for the same reason.
-    h = hashCombine(h, static_cast<size_t>(ai.target));
-    mixFloat(h, ai.threshold);
-    mixFloat(h, ai.feather);
-    h = hashCombine(h, static_cast<size_t>(ai.invert));
-    h = hashCombine(h, static_cast<size_t>(ai.modelInputSize));
-    h = hashCombine(h, static_cast<size_t>(ai.cachedWeightVersion));
-    h = hashCombine(h, ai.modelIdOverride.size());
-    for (char c : ai.modelIdOverride) h = hashCombine(h, static_cast<size_t>(c));
+    const AiMaskParams& aip = ai();
+    h = hashCombine(h, static_cast<size_t>(aip.target));
+    mixFloat(h, aip.threshold);
+    mixFloat(h, aip.feather);
+    h = hashCombine(h, static_cast<size_t>(aip.invert));
+    h = hashCombine(h, static_cast<size_t>(aip.modelInputSize));
+    h = hashCombine(h, static_cast<size_t>(aip.cachedWeightVersion));
+    h = hashCombine(h, aip.modelIdOverride.size());
+    for (char c : aip.modelIdOverride) h = hashCombine(h, static_cast<size_t>(c));
     // Prompt points are geometry: adding/removing/re-labelling one invalidates
     // the Prompt mask raster and the viewport overlay.
-    h = hashCombine(h, ai.points.size());
-    for (const SamPoint& pt : ai.points) {
+    h = hashCombine(h, aip.points.size());
+    for (const SamPoint& pt : aip.points) {
         mixFloat(h, pt.nx);
         mixFloat(h, pt.ny);
         h = hashCombine(h, static_cast<size_t>(pt.label));
@@ -242,7 +326,7 @@ size_t Mask::geometryHash() const {
     return h;
 }
 
-size_t ColorTarget::hash() const {
+size_t ColorTarget::hash() const noexcept {
     size_t h = 1469598103934665603ull;
     h = hashCombine(h, static_cast<size_t>(enabled));
     mixFloat(h, refR);
@@ -257,7 +341,7 @@ size_t ColorTarget::hash() const {
     return h;
 }
 
-size_t Adjustments::hash() const {
+size_t Adjustments::hash() const noexcept {
     size_t h = 1469598103934665603ull;
     mixDouble(h, exposure);
     mixDouble(h, contrast);
@@ -345,7 +429,7 @@ size_t Adjustments::hash() const {
     return h;
 }
 
-size_t Adjustments::hashStageA() const {
+size_t Adjustments::hashStageA() const noexcept {
     size_t h = 1469598103934665603ull;
     mixDouble(h, exposure);
     mixDouble(h, contrast);
@@ -356,7 +440,7 @@ size_t Adjustments::hashStageA() const {
     return h;
 }
 
-size_t Adjustments::hashStageB() const {
+size_t Adjustments::hashStageB() const noexcept {
     size_t h = 1469598103934665603ull;
     h = hashCombine(h, curve.size());
     for (const ToneCurvePoint& p : curve) {
@@ -366,7 +450,7 @@ size_t Adjustments::hashStageB() const {
     return h;
 }
 
-size_t Adjustments::hashStageC() const {
+size_t Adjustments::hashStageC() const noexcept {
     size_t h = 1469598103934665603ull;
     mixDouble(h, temperature);
     mixDouble(h, tint);
@@ -375,7 +459,7 @@ size_t Adjustments::hashStageC() const {
     return h;
 }
 
-size_t Adjustments::hashStageD() const {
+size_t Adjustments::hashStageD() const noexcept {
     size_t h = 1469598103934665603ull;
     mixDouble(h, saturation);
     for (const auto& ch : hsl) {
@@ -394,7 +478,7 @@ size_t Adjustments::hashStageD() const {
     return h;
 }
 
-size_t Adjustments::hashStageE() const {
+size_t Adjustments::hashStageE() const noexcept {
     size_t h = 1469598103934665603ull;
     mixDouble(h, texture);
     mixDouble(h, clarity);
@@ -443,7 +527,7 @@ size_t Adjustments::hashStageE() const {
     return h;
 }
 
-size_t Adjustments::hashStageF() {
+size_t Adjustments::hashStageF() noexcept {
     // Stage F (sRGB output) carries no adjustment parameters; a fixed constant
     // lets the incremental render treat it as an always-unchanged stage.
     return 0x5F5F5F5Fu;

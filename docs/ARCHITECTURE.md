@@ -71,6 +71,11 @@ ARW ──RawDecoder──▶ 线性 ProPhoto RGB (U16, 相机矩阵手动应用
   渲染只在导出 / 1:1 放大时执行。
 - **缓存**：`PipelineCacheKey = hash(imageId, adjustments.hash(), maxDim)`，
   256MB LRU（maxDim 参与键，粗/精/全尺寸三档天然分离）。滑块拖动命中缓存则零重算。
+- **逐级增量渲染**：`renderPreview` 额外维护 A~D + F 的逐级缓存（`RenderState`，默认 150 MB）：
+  从第一个变化 stage 重算，保留阶段以 `shared_ptr<const ImageBuffer>` 只读共享（const 即不可写保证），
+  写路径用私有 `WorkBufferPool` 在两块可写 F32 缓冲间轮转、池化缓冲靠 `use_count()==1` 拒绝别名；
+  恒等 stage 直接共享上游快照，因此不再出现「每推进一级就整幅深拷贝」。仅 D→E 仍保留 1 次整幅拷贝
+  （空间核是原地实现且 D 必须留给增量复用）。
 - **1:1 全尺寸**：`PreviewWorker::loadFullRes/adjustFullRes` 走
   `halfSize=false, maxDim=0` 解码，`renderLinearFull` + `toDisplaySRGB` 渲染（**不塞
   LRU**），同一时刻至多 1 份全尺寸缓冲，退出 1:1 / 换图即释放；默认调整下优先从目录
@@ -132,20 +137,26 @@ ARW ──RawDecoder──▶ 线性 ProPhoto RGB (U16, 相机矩阵手动应用
 | `ImportWorker` (QThread) | 事务批导入（含 Stage1 模板重命名）+ 缩略图/1:1 预生成 + 后台解码回填 | `thumbReadyImage`/`progress`/`finishedImport` 队列信号 |
 
 UI 通过 `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` 下发请求，跨线程
-自定义类型（`ImageBufferPtr`、`Adjustments`）已在 `main()` 中注册元类型；两 worker
-均带 `std::atomic` abort 标志，退出时先 requestAbort 再 quit + wait，杜绝 use-after-free。
+自定义类型（`ImageBufferPtr`、`AdjustmentsPtr = std::shared_ptr<const Adjustments>`）已在 `main()` 中注册元类型；
+**队列里的调整栈是共享只读快照**（UI 侧持有可编辑副本，发布后不再修改 pointee），所以一次编辑派生的
+多个请求（coarse/refine/1:1）不再各拷一份 `std::vector<Mask>`。两 worker 均带 `std::atomic` abort 标志，
+退出时先 requestAbort 再 quit + wait，杜绝 use-after-free。
 
 ## 5. 已知取舍
 
 - 调整顺序固定（曝光→对比度→高光→阴影→白/黑→曲线→白平衡→去朦胧→鲜艳度→HSL→色调分离→点颜色→空间阶段），
   参数堆叠是单层 JSON，无图层/快照；编辑历史为每次提交的线性快照，无分支/时间线。
 - 1:1 为真全尺寸：`PreviewWorker` 后台全尺寸解码，同一时刻 1 份缓冲、不塞 LRU。
+- 逐级增量渲染仍保留 1 次整幅拷贝（stage D→E，空间核为原地实现）；稳态额外持有 1 块空闲 F32 工作缓冲
+  （1920×1280 ≈ 29.5 MB），`clearIncrementalCache()` 会释放，峰值缓冲数与改造前相同。
 - 非 RAW 导入（JPEG/PNG/TIFF）经 sRGB → 线性 ProPhoto 转换；16 位 TIFF 导入时量化为 8 位；
   TIFF 读取器仅支持未压缩 RGB（应用自身导出格式及常见工具产物）；写出时 rows-per-strip 自适应
   `max(64, ceil(h/64))` 以降低大图单 strip 内存峰值，读取器支持多 strip 布局。
-- `gaussianBlur`（sigma≤4 精确可分离路径）在 `LRC_ENABLE_SIMD=ON` 时走 8-lane AVX2 快速路径
-  （`blurExactPassAVX2`）；默认关闭时与标量路径逐位一致，开启时为容差一致（Δ<0.008）。
-- 文件夹监视用 2s 轮询（`std::filesystem`），非 OS 事件驱动。
+- `gaussianBlur`（sigma≤4 精确可分离路径）是当前唯一的 SIMD 像素路径：`LRC_ENABLE_SIMD=ON` 时走
+  8-lane AVX2（`blurExactPassAVX2`，FMA 重结合，容差一致 Δ<0.008）；默认关闭时与标量路径逐位一致。
+  历史上手工 SSE2 的 stage A/C 批次已在 2026-10 删除（实测逐位安全但无可测量收益，287 行）。
+- 文件夹监视默认事件驱动（`ReadDirectoryChangesW`，工作线程为 `std::jthread` + `stop_token`），
+  事件通道不可用时回退 2s 轮询。
 - 直方图直接统计预览 8bit，每 4M 像素抽样一次。
 - 蒙版局部调整的画笔权重场（`Pipeline::brushWeightField`）以 COW `shared_ptr` 缓存，键 =
   `geometryHash + w + h`，拖动局部调整滑块不重建权重场。
@@ -168,10 +179,10 @@ UI 通过 `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` 下发请求，
 │   │                       # + 5 对话框 + ImportWorker/PreviewWorker + MetaTypes
 │   └── utils/              # ProfileIO PresetLibrary Json MathUtils Parallel
 │                           # UndoStack(头文件) ViewportMath(头文件)
-├── tests/                  # Catch2 单测（无 Qt，25 个 Test*.cpp）
+├── tests/                  # Catch2 单测（无 Qt，47 个 Test*/test_*.cpp）
 ├── resources/styles/       # 暗色主题 QSS（dark.qss）
 ├── resources/icons/        # 应用/ exe 图标（make_icons.py 生成）
-├── packaging/              # NSIS 安装脚本 installer.nsi + welcome.bmp/make_bmp.py
+├── packaging/              # Inno Setup installer.iss（主）+ NSIS installer.nsi（历史参考）
 ├── docs/                   # 架构、当前任务规格；历史归档在 archive/
 └── third_party/            # vendored 依赖（libraw/lcms2/sqlite3/Catch2/stb）
 ```

@@ -128,7 +128,10 @@ void PreviewWorker::setDcpProfile(const QString& path) {
 
 void PreviewWorker::loadImage(qint64 imageId, const QString& filePath,
                               qint64 generation,
-                              const lrc::Adjustments& adjustments) {
+                              lrc::AdjustmentsPtr adjustmentsPtr) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     if (abort_.load())
         return;  // abort requested.
     latestGeneration_ = generation;
@@ -250,7 +253,10 @@ void PreviewWorker::setPreviewTargetSize(const QSize& size) {
 }
 
 void PreviewWorker::adjustPreview(qint64 imageId, qint64 generation,
-                                  const lrc::Adjustments& adjustments) {
+                                  lrc::AdjustmentsPtr adjustmentsPtr) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     if (abort_.load())
         return;  // abort requested; skip stale queued re-renders.
     if (imageId != loadedImageId_ || !linear_)
@@ -278,7 +284,10 @@ void PreviewWorker::adjustPreview(qint64 imageId, qint64 generation,
 }
 
 void PreviewWorker::adjustPreviewCoarse(qint64 imageId, qint64 generation,
-                                        const lrc::Adjustments& adjustments) {
+                                        lrc::AdjustmentsPtr adjustmentsPtr) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     if (abort_.load())
         return;  // abort requested; skip stale queued re-renders.
     if (imageId != loadedImageId_ || !linear_)
@@ -393,9 +402,12 @@ void PreviewWorker::setProofState(const lrc::SoftProofParams& params,
 }
 
 void PreviewWorker::requestProof(qint64 imageId, qint64 generation,
-                                 const lrc::Adjustments& adjustments,
+                                 lrc::AdjustmentsPtr adjustmentsPtr,
                                  const lrc::SoftProofParams& params,
                                  bool enabled) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     if (abort_.load())
         return;  // abort requested.
     if (imageId != loadedImageId_ || !linear_)
@@ -405,7 +417,7 @@ void PreviewWorker::requestProof(qint64 imageId, qint64 generation,
         // Lossless off-switch: re-emit the normal preview (and its histogram)
         // through the regular path so the unproofed frame comes back exactly.
         applyProofState(params, false);
-        adjustPreview(imageId, generation, adjustments);
+        adjustPreview(imageId, generation, adjustmentsPtr);
         return;
     }
     if (params.destinationProfilePath.empty() ||
@@ -437,8 +449,11 @@ void PreviewWorker::requestProof(qint64 imageId, qint64 generation,
 }
 
 void PreviewWorker::requestGamutReport(qint64 imageId,
-                                       const lrc::Adjustments& adjustments,
+                                       lrc::AdjustmentsPtr adjustmentsPtr,
                                        const lrc::SoftProofParams& params) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     if (abort_.load())
         return;
     if (imageId != loadedImageId_ || !linear_)
@@ -492,7 +507,10 @@ void PreviewWorker::requestGamutReport(qint64 imageId,
 
 void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
                                 qint64 generation,
-                                const lrc::Adjustments& adjustments) {
+                                lrc::AdjustmentsPtr adjustmentsPtr) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     if (abort_.load())
         return;  // abort requested.
     fullResLatest_ = generation;
@@ -643,7 +661,10 @@ void PreviewWorker::loadFullRes(qint64 imageId, const QString& filePath,
 }
 
 void PreviewWorker::adjustFullRes(qint64 imageId, qint64 generation,
-                                  const lrc::Adjustments& adjustments) {
+                                  lrc::AdjustmentsPtr adjustmentsPtr) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     if (abort_.load())
         return;  // abort requested; skip stale queued full-res re-renders.
     fullResLatest_ = generation;
@@ -700,7 +721,10 @@ void PreviewWorker::adjustFullRes(qint64 imageId, qint64 generation,
 }
 
 void PreviewWorker::adjustFullResCoarse(qint64 imageId, qint64 generation,
-                                        const lrc::Adjustments& adjustments) {
+                                        lrc::AdjustmentsPtr adjustmentsPtr) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     if (abort_.load())
         return;  // abort requested.
     fullResLatest_ = generation;
@@ -808,9 +832,13 @@ QString PreviewWorker::pathForImage(qint64 imageId) const {
 }
 
 void PreviewWorker::requestBeforeAfter(qint64 imageId, qint64 generation,
-                                       const lrc::Adjustments& afterAdj,
-                                       const lrc::Adjustments& beforeAdj,
+                                       lrc::AdjustmentsPtr afterAdjPtr,
+                                       lrc::AdjustmentsPtr beforeAdjPtr,
                                        int maxDim, bool halfSize) {
+    if (!afterAdjPtr || !beforeAdjPtr)
+        return;  // defensive: the UI always publishes both stacks.
+    const lrc::Adjustments& afterAdj = *afterAdjPtr;
+    const lrc::Adjustments& beforeAdj = *beforeAdjPtr;
     if (abort_.load())
         return;  // abort requested.
     // Joins the main generation guard; a newer request supersedes this one.
@@ -856,8 +884,11 @@ void PreviewWorker::requestBeforeAfter(qint64 imageId, qint64 generation,
 }
 
 void PreviewWorker::requestReference(qint64 refImageId, qint64 generation,
-                                     const lrc::Adjustments& refAdj,
+                                     lrc::AdjustmentsPtr refAdjPtr,
                                      int maxDim) {
+    if (!refAdjPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& refAdj = *refAdjPtr;
     if (abort_.load())
         return;  // abort requested.
     // The reference render uses its own generation guard and never touches the
@@ -998,10 +1029,13 @@ bool PreviewWorker::decodeFullRes(qint64 imageId, const QString& filePath) {
 }
 
 void PreviewWorker::exportImage(qint64 imageId, const QString& filePath,
-                                const lrc::Adjustments& adjustments,
+                                lrc::AdjustmentsPtr adjustmentsPtr,
                                 const QString& outPath, int format,
                                 int quality, int maxDim, int icc,
                                 const ExportWatermark& watermark) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     // Route the single-shot export through the unified ExportEngine::encodeAndWrite
     // entry point so the size preset (maxDim) from ExportDialog is applied in
     // linear F32 space before the format-specific encode. The dispatch is the
@@ -1060,6 +1094,16 @@ void PreviewWorker::batchExport(const QList<ExportItem>& items) {
 
         const ExportItem& item = items[i];
 
+        // A null snapshot means the producer failed to freeze the stack. Fail
+        // this item instead of rendering with defaults (which would silently
+        // export the wrong pixels); the remaining items still run.
+        if (!item.adjustments) {
+            lastError = "missing adjustments: " + item.filePath.toStdString();
+            ++fail;
+            emit batchExportProgress(i + 1, total);
+            continue;
+        }
+
         // Map the UI-side ExportFormat onto ExportEngine's ExportSpec. Same
         // ordering as exportImage's switch, but routed through encodeAndWrite
         // so maxDim (if set) is applied uniformly before the format dispatch.
@@ -1092,7 +1136,7 @@ void PreviewWorker::batchExport(const QList<ExportItem>& items) {
             ok = exportEngine_->encodeAndWrite(
                 toStdPath(item.outPath),
                 static_cast<uint64_t>(item.imageId),
-                *decoded->linear, item.adjustments, spec);
+                *decoded->linear, *item.adjustments, spec);
             if (!ok)
                 lastError = exportEngine_->lastError();
         } else {
@@ -1141,7 +1185,10 @@ void PreviewWorker::computeAutoAdjust(qint64 imageId,
 
 void PreviewWorker::renderVisualization(qint64 imageId, qint64 generation,
                                         int mode,
-                                        const lrc::Adjustments& adjustments) {
+                                        lrc::AdjustmentsPtr adjustmentsPtr) {
+    if (!adjustmentsPtr)
+        return;  // defensive: the UI always publishes a stack.
+    const lrc::Adjustments& adjustments = *adjustmentsPtr;
     if (abort_.load())
         return;  // abort requested.
     if (imageId != loadedImageId_ || !linear_)

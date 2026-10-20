@@ -6,6 +6,7 @@
 #include <fstream>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include <sqlite3.h>
@@ -276,6 +277,43 @@ TEST_CASE("Catalog: settings round-trip", "[catalog]") {
     REQUIRE(db.setSetting("library_root", "C:/Library2"));
     REQUIRE(db.getSetting("library_root").value_or("") == "C:/Library2");
     REQUIRE_FALSE(db.getSetting("missing").has_value());
+}
+
+TEST_CASE("Catalog: string_view keys accept literals, temporaries and empty "
+          "views",
+          "[catalog]") {
+    const auto path = makeTempDb();
+    CatalogDatabase db(path);
+    REQUIRE(db.open());
+
+    // Literal keys (const char[N]) bind without constructing a std::string.
+    REQUIRE(db.setSetting("sv.literal", "v1"));
+    REQUIRE(db.getSetting("sv.literal").value_or("") == "v1");
+
+    // A string_view over a local std::string stays valid for the whole call.
+    const std::string key = "sv.local";
+    REQUIRE(db.setSetting(key, "v2"));
+    const std::string_view keyView(key);
+    REQUIRE(db.getSetting(keyView).value_or("") == "v2");
+
+    // A temporary std::string key is only read during the call.
+    REQUIRE(db.getSetting(std::string("sv.local")).value_or("") == "v2");
+
+    // Empty views must behave like empty strings (no match), not SQL NULL.
+    REQUIRE_FALSE(db.getSetting(std::string_view{}).has_value());
+
+    // findImageByPath: literal / temporary / empty view.
+    const int64_t id = db.addImage("/photos/string_view.arw", "");
+    REQUIRE(id > 0);
+    REQUIRE(db.findImageByPath("/photos/string_view.arw")->id == id);
+    REQUIRE(db.findImageByPath(std::string("/photos/string_view.arw"))->id == id);
+    REQUIRE_FALSE(db.findImageByPath(std::string_view{}).has_value());
+
+    // searchImages: literal / temporary / empty view.
+    REQUIRE(db.setPhotoMetadata(id, "Alps", "", "", "", ""));
+    REQUIRE(db.searchImages("Alps").size() == 1);
+    REQUIRE(db.searchImages(std::string("Alps")).size() == 1);
+    REQUIRE(db.searchImages(std::string_view{}).empty());
 }
 
 TEST_CASE("Catalog: collections are created and listed in order", "[catalog]") {

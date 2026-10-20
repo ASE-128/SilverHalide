@@ -197,3 +197,17 @@ Ninja 构建用 `-j4`。`-j8` 内存不足会批量失败（GUI 目标含 Qt 链
 4. 冒烟：`.\_run_smoke.ps1` → 启动、等窗口、WM_CLOSE、退出码 0。
 5. 打包冒烟（可选）：windeployqt + makensis → 安装包可生成。
 6. 核对 `CMAKE_CXX_FLAGS_RELEASE` 含 `/O2 /Ob2 /DNDEBUG`（§4.3）。
+
+## 10. Ninja + 中文版 MSVC：/showIncludes 前缀编码错误会让依赖跟踪失效（2026-10 实测）
+
+**现象**：改了被多个 TU 包含的头文件（如 `Json.h`）后，增量构建只重编直接包含它的测试 TU，其他消费者用陈旧 obj 继续链接，表现为随机段错误/行为错乱；`ninja -t deps <obj>` 显示 `#deps 0`，构建日志里能看到 cl 的 include 行没有被过滤掉。
+
+**根因**：cl.exe 把 `/showIncludes` 的本地化前缀（`注意: 包含文件:`）以 **UTF-8** 写出，而 CMake 用 GBK 系统代码页解码后再以 UTF-8 写进 `CMakeFiles/rules.ninja`，得到双重 mojibake；ninja 的 `deps = msvc` 解析器按字节比较前缀，永远匹配不上。
+
+**处置**：
+1. 重新 configure 后，把 `rules.ninja` 里 `msvc_deps_prefix` 一行重写为正确的 UTF-8 字节（可用 `build_headless/_fix_msvc_deps.ps1 -BuildDir <dir>`，该脚本属构建产物、未入库）。
+2. 验证：`ninja -C <dir> -t deps CMakeFiles/lrc_engine.dir/src/engine/Pipeline.cpp.obj` 应显示 `#deps > 0`（本机为 14）。
+3. 修好之前的陈旧 obj 必须 clean 重建一次（`cmake --build <dir> --target clean`）。
+4. CMake 升级或 MSVC 语言包变化后需复核；根治方向是让 cl 输出英文前缀（当前 `VSLANG=1033` 对其无效）或在 CMake 侧修正。
+
+**教训**：在本机，任何「改了头文件」的验证结论，只有在 clean 重建 + `#deps > 0` 自检之后才可信。

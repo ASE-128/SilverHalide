@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <span>
 
 #include "engine/ColorManager.h"
 #include "engine/ImageBuffer.h"
@@ -173,6 +174,69 @@ TEST_CASE("ImageBuffer: to8bitSRGB converts linear ProPhoto to display sRGB",
     REQUIRE(out->pixel(0, 0, 0) == Approx(117.0f / 255.0f).margin(0.02f));
     REQUIRE(std::abs(out->pixel(0, 0, 0) - out->pixel(0, 0, 1)) < 0.02f);
     REQUIRE(std::abs(out->pixel(0, 0, 1) - out->pixel(0, 0, 2)) < 0.02f);
+}
+
+// --- typed F32 views --------------------------------------------------------
+
+TEST_CASE("ImageBuffer: F32 span view mirrors the pixel() layout", "[image]") {
+    auto buf = ImageBuffer::create(5, 3, PixelFormat::F32);
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 5; ++x)
+            for (int c = 0; c < 3; ++c)
+                buf->setPixel(x, y, c,
+                              static_cast<float>(y * 15 + x * 3 + c) / 100.0f);
+
+    const std::span<const float> s = buf->asFloatSpan();
+    // Interleaved RGB, row-major: one float per channel of every pixel.
+    REQUIRE(s.size() == static_cast<size_t>(buf->width()) *
+                            static_cast<size_t>(buf->height()) *
+                            static_cast<size_t>(buf->channels()));
+    REQUIRE(s.size() == 5u * 3u * 3u);
+    // The first element is the red channel of pixel (0,0).
+    REQUIRE(s[0] == buf->pixel(0, 0, 0));
+    // Every index maps to exactly the value pixel() reports.
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 5; ++x)
+            for (int c = 0; c < 3; ++c)
+                REQUIRE(s[(static_cast<size_t>(y) * 5 + x) * 3 + c] ==
+                        buf->pixel(x, y, c));
+}
+
+TEST_CASE("ImageBuffer: mutable F32 span writes are visible through pixel()",
+          "[image]") {
+    auto buf = ImageBuffer::create(4, 2, PixelFormat::F32);
+    std::span<float> s = buf->asMutableFloatSpan();
+    REQUIRE(s.size() == 4u * 2u * 3u);
+    for (size_t i = 0; i < s.size(); ++i)
+        s[i] = static_cast<float>(i) / 31.0f;
+
+    REQUIRE(buf->pixel(0, 0, 0) == 0.0f);
+    REQUIRE(buf->pixel(1, 0, 2) == 5.0f / 31.0f);
+    REQUIRE(buf->pixel(3, 1, 2) == 23.0f / 31.0f);
+    // Writes through the view and reads through the view stay consistent.
+    s[(static_cast<size_t>(1) * 4 + 2) * 3 + 1] = 0.75f;
+    REQUIRE(buf->pixel(2, 1, 1) == 0.75f);
+}
+
+TEST_CASE("ImageBuffer: span views are empty for non-F32 and empty buffers",
+          "[image]") {
+    for (PixelFormat fmt : {PixelFormat::U16, PixelFormat::U8}) {
+        auto b = ImageBuffer::create(4, 4, fmt);
+        REQUIRE(b->asFloatSpan().empty());
+        REQUIRE(b->asFloatSpan().size() == 0u);
+        REQUIRE(b->asMutableFloatSpan().empty());
+    }
+
+    auto emptyF32 = ImageBuffer::create(0, 0, PixelFormat::F32);
+    REQUIRE(emptyF32->format() == PixelFormat::F32);
+    REQUIRE(emptyF32->asFloatSpan().empty());
+    REQUIRE(emptyF32->asMutableFloatSpan().empty());
+
+    // A default-constructed buffer is empty and F32 by default.
+    ImageBuffer def;
+    REQUIRE(def.format() == PixelFormat::F32);
+    REQUIRE(def.asFloatSpan().empty());
+    REQUIRE(def.asMutableFloatSpan().empty());
 }
 
 TEST_CASE("ImageBuffer: to8bitSRGB on an empty buffer is empty", "[image][m20]") {

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <span>
 #include <vector>
 
 namespace lrc {
@@ -47,7 +48,60 @@ std::vector<float> HdrMerge::lumaSmall(const ImageBuffer& buf, int maxDim,
     h = std::max(1, static_cast<int>(std::lround(srcH * s)));
     std::vector<float> out(static_cast<size_t>(w) * h, 0.0f);
 
+    // Resolving the format once here keeps the sampling loops free of the
+    // per-component bounds check and format switch that pixel() performs on
+    // every access. U16/U8 sources keep the normalized pixel() path at the end
+    // of this function -- that branch is taken once, never inside the loop.
+    const std::span<const float> fast = buf.asFloatSpan();
+    const size_t stride = static_cast<size_t>(buf.channels());
+
     // Area-average downscale of the luminance.
+    if (!fast.empty()) {
+        // --- typed F32 path ---
+        for (int y = 0; y < h; ++y) {
+            const int y0 = static_cast<int>(y / s);
+            const int y1 = std::max(y0, static_cast<int>((y + 1) / s) - 1);
+            // Rounding w/h can push the last target cell's sample window a
+            // little past the source edge. pixel() reported such coordinates
+            // as 0.0f while still counting them, so only the valid
+            // sub-rectangle is accumulated and the original sample count is
+            // kept below: the clipped samples contribute exactly +0.0, which
+            // is what the count-only arithmetic reproduces.
+            const int syHi = std::min(y1, srcH - 1);
+            for (int x = 0; x < w; ++x) {
+                const int x0 = static_cast<int>(x / s);
+                const int x1 = std::max(x0, static_cast<int>((x + 1) / s) - 1);
+                const int sxHi = std::min(x1, srcW - 1);
+                const long total = static_cast<long>(x1 - x0 + 1) *
+                                   static_cast<long>(y1 - y0 + 1);
+                double acc = 0.0;
+                for (int sy = y0; sy <= syHi; ++sy) {
+                    const float* row =
+                        fast.data() + static_cast<size_t>(sy) * srcW * stride;
+                    for (int sx = x0; sx <= sxHi; ++sx) {
+                        const float* p = row + static_cast<size_t>(sx) * stride;
+                        // Same expression shape and evaluation order as the
+                        // pixel() path: the literals are double, so the
+                        // accumulation stays in double -- 0.2126 first, then
+                        // + 0.7152, then + 0.0722. Do not reorder or narrow.
+                        acc += p[0] * 0.2126 + p[1] * 0.7152 + p[2] * 0.0722;
+                    }
+                }
+                if (total > static_cast<long>(sxHi - x0 + 1) *
+                                static_cast<long>(syHi - y0 + 1)) {
+                    // Every clipped sample used to add three +0.0 terms; a
+                    // single +0.0 addition reproduces the only observable
+                    // effect (a -0.0 sum becoming +0.0).
+                    acc += 0.0;
+                }
+                out[static_cast<size_t>(y) * w + x] =
+                    total > 0 ? static_cast<float>(acc / total) : 0.0f;
+            }
+        }
+        return out;
+    }
+
+    // --- normalized fallback for U16/U8 sources ---
     for (int y = 0; y < h; ++y) {
         const int y0 = static_cast<int>(y / s);
         const int y1 = std::max(y0, static_cast<int>((y + 1) / s) - 1);
@@ -138,22 +192,22 @@ HdrMerge::Result HdrMerge::merge(const std::vector<ImageBufferPtr>& frames,
     for (size_t i = 0; i < nf; ++i)
         gains[i] = static_cast<float>(std::pow(2.0, -result.evOffsets[i]));
 
-    const auto px = [&](const ImageBufferPtr& b, size_t i, int c) {
-        const auto* d = reinterpret_cast<const float*>(b->data().data());
-        return d[i * 3 + c];
-    };
-
     // Full-resolution F32 result, written row-band by row-band. Merging is
     // strictly per-pixel (no spatial dependency), so each band computes the
-    // exact same values as a single pass over the whole image.
+    // exact same values as a single pass over the whole image. The mutable
+    // typed view makes the F32 invariant explicit instead of carrying it in a
+    // raw reinterpret_cast.
     auto merged = ImageBuffer::create(w, h, PixelFormat::F32);
-    auto* out = reinterpret_cast<float*>(merged->data().data());
+    const std::span<float> out = merged->asMutableFloatSpan();
 
     // Row-band height. The default (128) bounds the memory of the per-frame
     // band buffers; a test can pass a larger value to merge in one band and
     // verify the banded result is bit-identical.
     std::vector<float> lumas(nf);
     std::vector<float> rch(nf), gch(nf), bch(nf); // normalized channel values
+    // Per-band read views, refilled for every band below. Declared here so the
+    // inner pixel loop never re-allocates or re-validates a buffer.
+    std::vector<std::span<const float>> bandSpans(nf);
     for (int y0 = 0; y0 < h; y0 += bandRows) {
         const int bandH = std::min(bandRows, h - y0);
 
@@ -166,6 +220,12 @@ HdrMerge::Result HdrMerge::merge(const std::vector<ImageBufferPtr>& frames,
             bandF32[f] = (band->format() == PixelFormat::F32) ? band
                                                               : band->toF32();
         }
+        // Typed read views. Every band buffer is F32 by construction (crop
+        // preserves the source format; anything else was converted by toF32
+        // above), so these views are non-empty and the per-pixel body needs no
+        // format or bounds branch.
+        for (size_t f = 0; f < nf; ++f)
+            bandSpans[f] = bandF32[f]->asFloatSpan();
 
         const size_t bandPix = static_cast<size_t>(w) * bandH;
         const size_t outBase = static_cast<size_t>(y0) * w;
@@ -175,9 +235,10 @@ HdrMerge::Result HdrMerge::merge(const std::vector<ImageBufferPtr>& frames,
             double rAcc = 0.0, gAcc = 0.0, bAcc = 0.0;
             for (size_t f = 0; f < nf; ++f) {
                 const float g = gains[f];
-                const float r = px(bandF32[f], i, 0) * g;
-                const float gg = px(bandF32[f], i, 1) * g;
-                const float b = px(bandF32[f], i, 2) * g;
+                const float* p = bandSpans[f].data() + i * 3;
+                const float r = p[0] * g;
+                const float gg = p[1] * g;
+                const float b = p[2] * g;
                 rch[f] = r;
                 gch[f] = gg;
                 bch[f] = b;

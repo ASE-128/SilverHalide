@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -95,6 +96,20 @@ struct Stmt {
         sqlite3_clear_bindings(s);
     }
 };
+
+// Binds a string_view as a TEXT parameter.
+//
+// SQLITE_TRANSIENT makes SQLite copy the bytes inside this bind call, so the
+// view only has to stay valid until bindText() returns; every caller passes its
+// own argument straight through. An empty view is bound as an empty string, not
+// NULL: std::string_view::data() may return nullptr when empty and SQLite would
+// turn that into SQL NULL, which changes lookup semantics.
+void bindText(sqlite3_stmt* stmt, int index, std::string_view value) {
+    static const char kEmpty[] = "";
+    const char* text = value.empty() ? kEmpty : value.data();
+    sqlite3_bind_text(stmt, index, text, static_cast<int>(value.size()),
+                      SQLITE_TRANSIENT);
+}
 
 // Maps the current row to an ImageRecord. Callers must project the columns in
 // this exact order: id, file_path, thumbnail_path, rating, label_color, flag,
@@ -1814,7 +1829,7 @@ std::vector<ImageRecord> CatalogDatabase::listImages(
 }
 
 std::optional<ImageRecord> CatalogDatabase::findImageByPath(
-    const std::string& filePath) const {
+    std::string_view filePath) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!db_)
         return std::nullopt;
@@ -1823,7 +1838,7 @@ std::optional<ImageRecord> CatalogDatabase::findImageByPath(
     Stmt s(db_, sql.c_str(), &stmtCache_);
     if (!s.ok())
         return std::nullopt;
-    sqlite3_bind_text(s.stmt, 1, filePath.c_str(), -1, SQLITE_TRANSIENT);
+    bindText(s.stmt, 1, filePath);
     if (s.step() != SQLITE_ROW)
         return std::nullopt;
     return readImageRecord(s.stmt);
@@ -2192,14 +2207,14 @@ bool CatalogDatabase::setSetting(const std::string& key,
 }
 
 std::optional<std::string> CatalogDatabase::getSetting(
-    const std::string& key) const {
+    std::string_view key) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!db_)
         return std::nullopt;
     Stmt s(db_, "SELECT value FROM settings WHERE key = ?1;", &stmtCache_);
     if (!s.ok())
         return std::nullopt;
-    sqlite3_bind_text(s.stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    bindText(s.stmt, 1, key);
     if (s.step() != SQLITE_ROW)
         return std::nullopt;
     const unsigned char* p = sqlite3_column_text(s.stmt, 0);
@@ -2893,13 +2908,16 @@ PhotoMetadata CatalogDatabase::getPhotoMetadata(int64_t imageId) const {
 }
 
 std::vector<ImageRecord> CatalogDatabase::searchImages(
-    const std::string& text) const {
+    std::string_view text) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<ImageRecord> out;
     if (!db_)
         return out;
     if (text.empty())
         return out;
+    // istringstream (FTS tokenizer) and the LIKE pattern builder both need an
+    // owning string; this is the single copy of the caller's search text.
+    const std::string textCopy(text);
 
     // Prefer the FTS5 index (image title/caption/file_name/keywords,
     // content-external mode) so keyword/file-name/title search is sub-linear.
@@ -2907,7 +2925,7 @@ std::vector<ImageRecord> CatalogDatabase::searchImages(
     // FTS5's default implicit-AND over the MATCH expression.
     if (hasModule(db_, "fts5")) {
         std::string q;
-        std::istringstream terms(text);
+        std::istringstream terms(textCopy);
         std::string tok;
         while (terms >> tok) {
             std::string esc;
@@ -2968,7 +2986,7 @@ std::vector<ImageRecord> CatalogDatabase::searchImages(
     Stmt s(db_, sql.c_str(), &stmtCache_);
     if (!s.ok())
         return out;
-    const std::string pattern = "%" + text + "%";
+    const std::string pattern = "%" + textCopy + "%";
     sqlite3_bind_text(s.stmt, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
     while (s.step() == SQLITE_ROW)
         out.push_back(readImageRecord(s.stmt));

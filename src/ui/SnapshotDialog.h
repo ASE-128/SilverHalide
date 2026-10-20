@@ -44,7 +44,9 @@ public slots:
 signals:
     // Emitted when the user clicks Apply for a snapshot. MainWindow applies the
     // returned stack (set to the develop pipeline + saved).
-    void applied(const lrc::Adjustments& adjustments);
+    // Carries an immutable snapshot because the catalog load only lives inside
+    // the click handler; the receiver shares ownership instead of copying again.
+    void applied(lrc::AdjustmentsPtr adjustments);
 
 private slots:
     void onCreateClicked();

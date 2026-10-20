@@ -34,7 +34,11 @@ public:
         ImageBufferPtr linear;            // merged linear ProPhoto F32 buffer
         std::vector<double> evOffsets;    // offsets used (stops, frame vs ref)
         std::string error;                // non-empty on failure
-        bool ok() const { return linear && !linear->empty(); }
+        /** @brief True when the merge produced a non-empty linear buffer.
+         *
+         * @note Never throws: it only inspects the two members above.
+         */
+        bool ok() const noexcept { return linear && !linear->empty(); }
     };
 
     /**
@@ -52,8 +56,13 @@ public:
      *        moving-subject shots.
      * @param bandRows Row-band height used for streaming the merge (memory
      *        bound). The result is bit-identical regardless of its value.
-     * @return The merged linear ProPhoto F32 buffer, or a Result whose `ok()`
-     *         is false (with `error` set) on invalid input.
+     * @return A Result whose `ok()` is false (with `error` set) on invalid
+     *         input, otherwise the merged linear ProPhoto F32 buffer.
+     *
+     * @note Not noexcept: the output buffers and the per-band scratch
+     *       allocate and may throw std::bad_alloc. No [[nodiscard]] is
+     *       attached because Result is a value type that some callers may
+     *       construct/discard in tests.
      */
     static Result merge(const std::vector<ImageBufferPtr>& frames,
                         const std::vector<double>& evOffsets, bool deghost,
@@ -68,8 +77,13 @@ public:
      * @param ref Reference frame.
      * @param other Frame whose offset is estimated.
      * @return Estimated exposure offset in stops; 0 when no usable pixels.
+     *
+     * @note Discarding the estimate is always a bug, so the return value is
+     *       [[nodiscard]]. Not noexcept: the downscaled luma scratch buffers
+     *       allocate and may throw std::bad_alloc.
      */
-    static double estimateEv(const ImageBuffer& ref, const ImageBuffer& other);
+    [[nodiscard]] static double estimateEv(const ImageBuffer& ref,
+                                           const ImageBuffer& other);
 
 private:
     // Downscales to a small grayscale luma image (maxDim longest side).

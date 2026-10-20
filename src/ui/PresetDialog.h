@@ -50,10 +50,13 @@ signals:
     /**
      * @brief Emitted when the user applies a listed preset.
      *
-     * MainWindow commits it through commitAdjustments (undoable) and closes
-     * the dialog.
+     * Carries an immutable snapshot of the loaded preset stack (the dialog
+     * already owns a copy, so one make_shared per apply is enough). MainWindow
+     * commits it through commitAdjustments (undoable) and closes the dialog.
+     *
+     * @param adjustments Non-null shared snapshot; the receiver only reads it.
      */
-    void applied(const lrc::Adjustments& adjustments);
+    void applied(lrc::AdjustmentsPtr adjustments);
 
 private slots:
     void onCreateClicked();

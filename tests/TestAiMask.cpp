@@ -200,8 +200,8 @@ TEST_CASE("Pipeline::aiMaskWeightField is content-driven, not a constant",
 
     Mask m;
     m.type = MaskType::AiMask;
-    m.ai.target = AiMaskTarget::Sky;
-    m.ai.cachedWeightVersion = 1;  // distinct from a default-constructed mask
+    m.ai().target = AiMaskTarget::Sky;
+    m.ai().cachedWeightVersion = 1;  // distinct from a default-constructed mask
 
     const auto field = Pipeline::aiMaskWeightField(m, scene);
     REQUIRE(field != nullptr);

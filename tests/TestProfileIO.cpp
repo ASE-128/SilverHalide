@@ -76,23 +76,23 @@ bool maskEq(const Mask& a, const Mask& b, double tol = 1e-6) {
         !nearEq(a.temperature, b.temperature, tol) ||
         !nearEq(a.tint, b.tint, tol))
         return false;
-    if (!nearEq(a.linear.startX, b.linear.startX, tol) ||
-        !nearEq(a.linear.startY, b.linear.startY, tol) ||
-        !nearEq(a.linear.endX, b.linear.endX, tol) ||
-        !nearEq(a.linear.endY, b.linear.endY, tol) ||
-        !nearEq(a.linear.feather, b.linear.feather, tol))
+    if (!nearEq(a.linear().startX, b.linear().startX, tol) ||
+        !nearEq(a.linear().startY, b.linear().startY, tol) ||
+        !nearEq(a.linear().endX, b.linear().endX, tol) ||
+        !nearEq(a.linear().endY, b.linear().endY, tol) ||
+        !nearEq(a.linear().feather, b.linear().feather, tol))
         return false;
-    if (!nearEq(a.radial.centerX, b.radial.centerX, tol) ||
-        !nearEq(a.radial.centerY, b.radial.centerY, tol) ||
-        !nearEq(a.radial.radiusX, b.radial.radiusX, tol) ||
-        !nearEq(a.radial.radiusY, b.radial.radiusY, tol) ||
-        !nearEq(a.radial.feather, b.radial.feather, tol) ||
-        a.radial.invert != b.radial.invert)
+    if (!nearEq(a.radial().centerX, b.radial().centerX, tol) ||
+        !nearEq(a.radial().centerY, b.radial().centerY, tol) ||
+        !nearEq(a.radial().radiusX, b.radial().radiusX, tol) ||
+        !nearEq(a.radial().radiusY, b.radial().radiusY, tol) ||
+        !nearEq(a.radial().feather, b.radial().feather, tol) ||
+        a.radial().invert != b.radial().invert)
         return false;
-    if (a.brush.size() != b.brush.size())
+    if (a.brush().size() != b.brush().size())
         return false;
-    for (size_t i = 0; i < a.brush.size(); ++i)
-        if (!brushDabEq(a.brush[i], b.brush[i], tol))
+    for (size_t i = 0; i < a.brush().size(); ++i)
+        if (!brushDabEq(a.brush()[i], b.brush()[i], tol))
             return false;
     return true;
 }
@@ -191,31 +191,31 @@ TEST_CASE("ProfileIO: full JSON round-trip covers every group", "[profileio]") {
     linear.saturation = 8.0;
     linear.temperature = 6.0;
     linear.tint = -3.0;
-    linear.linear.startX = 0.1f;
-    linear.linear.startY = 0.2f;
-    linear.linear.endX = 0.8f;
-    linear.linear.endY = 0.6f;
-    linear.linear.feather = 0.3f;
+    linear.linear().startX = 0.1f;
+    linear.linear().startY = 0.2f;
+    linear.linear().endX = 0.8f;
+    linear.linear().endY = 0.6f;
+    linear.linear().feather = 0.3f;
     a.masks.push_back(linear);
 
     Mask radial;
     radial.type = MaskType::RadialGradient;
     radial.opacity = 0.6;
     radial.exposure = -0.3;
-    radial.radial.centerX = 0.5f;
-    radial.radial.centerY = 0.4f;
-    radial.radial.radiusX = 0.3f;
-    radial.radial.radiusY = 0.2f;
-    radial.radial.feather = 0.6f;
-    radial.radial.invert = true;
+    radial.radial().centerX = 0.5f;
+    radial.radial().centerY = 0.4f;
+    radial.radial().radiusX = 0.3f;
+    radial.radial().radiusY = 0.2f;
+    radial.radial().feather = 0.6f;
+    radial.radial().invert = true;
     a.masks.push_back(radial);
 
     Mask brush;
     brush.type = MaskType::Brush;
     brush.opacity = 0.5;
     brush.saturation = 15.0;
-    brush.brush.push_back(BrushDab{0.2f, 0.3f, 0.1f, 0.5f});
-    brush.brush.push_back(BrushDab{0.7f, 0.8f, 0.15f, 0.4f});
+    brush.brush().push_back(BrushDab{0.2f, 0.3f, 0.1f, 0.5f});
+    brush.brush().push_back(BrushDab{0.7f, 0.8f, 0.15f, 0.4f});
     a.masks.push_back(brush);
 
     // Two point-colour targets.
@@ -476,11 +476,11 @@ TEST_CASE("ProfileIO: Mask hashing distinguishes geometry differences",
           "[profileio]") {
     Mask a;
     a.type = MaskType::LinearGradient;
-    a.linear.startX = 0.1f;
-    a.linear.startY = 0.2f;
-    a.linear.endX = 0.8f;
-    a.linear.endY = 0.6f;
-    a.linear.feather = 0.3f;
+    a.linear().startX = 0.1f;
+    a.linear().startY = 0.2f;
+    a.linear().endX = 0.8f;
+    a.linear().endY = 0.6f;
+    a.linear().feather = 0.3f;
     a.opacity = 0.8;
     a.exposure = 0.4;
     a.clarity = 12.0;
@@ -491,19 +491,19 @@ TEST_CASE("ProfileIO: Mask hashing distinguishes geometry differences",
 
     // Differing geometry (start point / feather) must change the hash.
     Mask diffStart = a;
-    diffStart.linear.startX = 0.5f;
+    diffStart.linear().startX = 0.5f;
     REQUIRE(a.hash() != diffStart.hash());
 
     Mask diffFeather = a;
-    diffFeather.linear.feather = 0.9f;
+    diffFeather.linear().feather = 0.9f;
     REQUIRE(a.hash() != diffFeather.hash());
 
     // A brush dab difference also changes the hash.
     Mask brushA;
     brushA.type = MaskType::Brush;
-    brushA.brush.push_back(BrushDab{0.2f, 0.3f, 0.1f, 0.5f});
+    brushA.brush().push_back(BrushDab{0.2f, 0.3f, 0.1f, 0.5f});
     Mask brushB = brushA;
-    brushB.brush[0].x = 0.9f;
+    brushB.brush()[0].x = 0.9f;
     REQUIRE(brushA.hash() != brushB.hash());
 }
 

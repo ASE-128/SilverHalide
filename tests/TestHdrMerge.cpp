@@ -1,4 +1,5 @@
 #include <cstring>
+#include <span>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -85,6 +86,69 @@ TEST_CASE("HdrMerge: rejects mismatched dimensions", "[hdr]") {
                                        flatGrey(32, 32, 0.2f)};
     const auto res = HdrMerge::merge(frames, {0.0, 1.0}, false);
     REQUIRE_FALSE(res.ok());
+}
+
+TEST_CASE("HdrMerge: F32 span path matches the U16 pixel() fallback exactly",
+          "[hdr][m5]") {
+    // The luminance downscale has two implementations: the typed F32 span path
+    // and the normalized pixel() fallback used for U16/U8 sources. 320x213 is
+    // deliberately awkward: the 64px downscale rounds the last target row's
+    // sample window past the bottom edge, so the two paths only agree if the
+    // clipped samples keep contributing exactly 0.0 while still being counted.
+    const int w = 320, h = 213;
+    const auto makeU16 = [&](float base, float span) {
+        auto buf = ImageBuffer::create(w, h, PixelFormat::U16);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const float v =
+                    base + span * static_cast<float>(x + y) /
+                               static_cast<float>(w + h);
+                buf->setPixel(x, y, 0, v);
+                buf->setPixel(x, y, 1, v * 0.8f);
+                buf->setPixel(x, y, 2, v * 1.1f);
+            }
+        return buf;
+    };
+    const auto u1 = makeU16(0.05f, 0.40f);
+    const auto u2 = makeU16(0.20f, 0.50f);
+    const auto f1 = u1->toF32(); // same floats the U16 pixel() path returns
+    const auto f2 = u2->toF32();
+    // Non-empty views prove the F32 side really goes through the typed span
+    // path rather than silently falling back to pixel().
+    REQUIRE(f1->asFloatSpan().size() ==
+            static_cast<size_t>(w) * static_cast<size_t>(h) * 3u);
+    REQUIRE(u1->asFloatSpan().empty());
+
+    // The two downscale implementations must agree bit-for-bit.
+    REQUIRE(HdrMerge::estimateEv(*u1, *u2) == HdrMerge::estimateEv(*f1, *f2));
+
+    const auto fromU16 = HdrMerge::merge({u1, u2}, {}, false, 64);
+    const auto fromF32 = HdrMerge::merge({f1, f2}, {}, false, 64);
+    REQUIRE(fromU16.ok());
+    REQUIRE(fromF32.ok());
+    REQUIRE(fromU16.evOffsets == fromF32.evOffsets);
+    REQUIRE(fromU16.linear->data() == fromF32.linear->data());
+}
+
+TEST_CASE("HdrMerge: F32 merge blends to the expected per-pixel value", "[hdr]") {
+    // Two identical neutral-grey frames at the same exposure: the weighted mean
+    // of two equal values is that value, so the merged pixels must be it.
+    const auto a = flatGrey(64, 64, 0.25f);
+    const auto b = flatGrey(64, 64, 0.25f);
+    const auto res = HdrMerge::merge({a, b}, {0.0, 0.0}, false);
+    REQUIRE(res.ok());
+    for (const int y : {0, 31, 63})
+        for (const int x : {0, 17, 63})
+            for (int c = 0; c < 3; ++c)
+                REQUIRE(res.linear->pixel(x, y, c) == Approx(0.25f).margin(1e-6f));
+
+    // The mutable typed view must expose the same interleaved bytes that the
+    // normalized accessor reads back.
+    const std::span<const float> v = res.linear->asFloatSpan();
+    REQUIRE(v.size() == 64u * 64u * 3u);
+    REQUIRE(v[0] == res.linear->pixel(0, 0, 0));
+    REQUIRE(v[(static_cast<size_t>(63) * 64 + 63) * 3 + 2] ==
+            res.linear->pixel(63, 63, 2));
 }
 
 TEST_CASE("HdrMerge: banded merge is bit-identical to whole-frame merge",

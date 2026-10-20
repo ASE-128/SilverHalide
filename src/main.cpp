@@ -14,6 +14,9 @@ int main(int argc, char** argv) {
         QLoggingCategory::setFilterRules(QStringLiteral("lrc.perf.info=false"));
     qRegisterMetaType<lrc::ImageBufferPtr>();
     qRegisterMetaType<lrc::Adjustments>();
+    // IM-6: queued preview/export requests carry a shared immutable adjustment
+    // snapshot (one per edit) instead of a deep copy of the stack.
+    qRegisterMetaType<lrc::AdjustmentsPtr>();
     // P1-4: watermark options cross the queued export connections.
     qRegisterMetaType<ExportWatermark>();
     // Scoped enum passed through importPaths' queued invocation.

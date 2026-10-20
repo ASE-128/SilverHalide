@@ -19,30 +19,76 @@ constexpr T clamp(T value, T lo, T hi) {
     return std::clamp(value, lo, hi);
 }
 
-/** @brief Linear interpolation between a and b for t in [0, 1]. */
-inline double lerp(double a, double b, double t) { return a + (b - a) * t; }
+/** @brief Linear interpolation between a and b for t in [0, 1].
+ *
+ * @param a Value at t = 0.
+ * @param b Value at t = 1.
+ * @param t Interpolation factor; values outside [0, 1] extrapolate.
+ * @return a + (b - a) * t, with the same operation order as before.
+ *
+ * @note constexpr and noexcept: pure scalar arithmetic with no allocation and
+ *       no shared state, so it is safe from any thread and usable in constant
+ *       expressions.
+ */
+constexpr double lerp(double a, double b, double t) noexcept {
+    return a + (b - a) * t;
+}
 
 /** @brief Hermite smoothstep over [edge0, edge1].
  *
  * Outputs 0 before edge0, 1 after edge1, and a smooth S-curve in between.
+ *
+ * @param edge0 Lower edge of the transition; must differ from edge1.
+ * @param edge1 Upper edge of the transition.
+ * @param x     Input value.
+ * @return 0 for x <= edge0, 1 for x >= edge1, otherwise t * t * (3 - 2t)
+ *         with t = clamp((x - edge0) / (edge1 - edge0), 0, 1).
+ *
+ * @note constexpr and noexcept: pure scalar arithmetic, thread-safe; the
+ *       expression order is unchanged from the runtime-only version.
  */
-inline double smoothstep(double edge0, double edge1, double x) {
+constexpr double smoothstep(double edge0, double edge1, double x) noexcept {
     const double t =
         clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
 }
 
-/** @brief FNV-1a style 64-bit hash mixing (a single step). */
-inline size_t hashCombine(size_t seed, size_t value) {
+/** @brief FNV-1a style 64-bit hash mixing (a single step).
+ *
+ * @param seed  Accumulated hash so far.
+ * @param value Value to mix into the hash.
+ * @return The mixed hash, using the exact same constants and shift sequence
+ *         as before so existing cache keys stay stable.
+ *
+ * @note constexpr and noexcept: unsigned integer arithmetic only, thread-safe.
+ */
+constexpr size_t hashCombine(size_t seed, size_t value) noexcept {
     seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
     return seed;
 }
 
-/** @brief Converts an exposure delta in stops to a linear multiplier. */
-inline double stopsToGain(double ev) { return std::pow(2.0, ev); }
+/** @brief Converts an exposure delta in stops to a linear multiplier.
+ *
+ * @param ev Exposure delta in stops; 0 maps to 1.0.
+ * @return 2^ev.
+ *
+ * @note noexcept only, not constexpr: std::pow() is not usable in constant
+ *       expressions under C++20 (it becomes constexpr in C++23). The
+ *       implementation deliberately stays std::pow so results remain
+ *       bit-identical to the previous version.
+ */
+inline double stopsToGain(double ev) noexcept { return std::pow(2.0, ev); }
 
-/** @brief Maps a -100..100 slider value into a multiplier around 1.0. */
-inline double sliderToScale(double value, double range) {
+/** @brief Maps a -100..100 slider value into a multiplier around 1.0.
+ *
+ * @param value Slider position in [-100, 100]; 0 maps to 1.0.
+ * @param range Exposure range in stops spanned by the full slider travel.
+ * @return 2^(value / 100 * range).
+ *
+ * @note noexcept only, not constexpr: std::pow() is not usable in constant
+ *       expressions under C++20. The expression order is unchanged.
+ */
+inline double sliderToScale(double value, double range) noexcept {
     return std::pow(2.0, value / 100.0 * range);
 }
 
@@ -56,8 +102,12 @@ constexpr float kColorRangeCenters[8] = {
     0.0f, 30.0f, 60.0f, 120.0f, 180.0f, 240.0f, 290.0f, 330.0f};
 
 /** @brief Index (0..7) of the colour range whose centre hue is nearest the
- *         given hue, wrapping around 360°. */
-inline int nearestColorRange(float hueDegrees) {
+ *         given hue, wrapping around 360°.
+ *
+ * @note noexcept: pure float arithmetic over a fixed lookup table, no
+ *       allocation and no shared state.
+ */
+inline int nearestColorRange(float hueDegrees) noexcept {
     int best = 0;
     float bestDist = 1e9f;
     for (int i = 0; i < 8; ++i) {
@@ -72,8 +122,11 @@ inline int nearestColorRange(float hueDegrees) {
     return best;
 }
 
-/** @brief True if the two doubles are bitwise-identical (used by cache keys). */
-inline bool bitEqual(double a, double b) {
+/** @brief True if the two doubles are bitwise-identical (used by cache keys).
+ *
+ * @note noexcept: std::bit_cast of two scalars, no allocation.
+ */
+inline bool bitEqual(double a, double b) noexcept {
     return std::bit_cast<uint64_t>(a) == std::bit_cast<uint64_t>(b);
 }
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -531,7 +532,9 @@ void ImageViewport::rebuildMaskOverlay() {
     // as the geometry.
     const bool hasSubMask =
         maskDraft_.useColorRange || maskDraft_.useLuminance;
-    lrc::ColorRangeMask colorRange = maskDraft_.color;
+    // Read through a const view so a non-resident alternative cannot re-seat
+    // the draft's geometry (the const accessor is total and side-effect free).
+    lrc::ColorRangeMask colorRange = std::as_const(maskDraft_).color();
     // A colour-range mask is inert until a reference colour has been sampled:
     // Pipeline::colorRangeWeight returns 0 without one. Forcing hasReference
     // with an unset reference (the previous behaviour) produced a meaningless
@@ -673,21 +676,21 @@ void ImageViewport::beginMaskGesture(const QPointF& widgetPos) {
     switch (maskTool_) {
         case lrc::MaskType::LinearGradient:
             maskDraft_.type = lrc::MaskType::LinearGradient;
-            maskDraft_.linear.startX = static_cast<float>(n.x());
-            maskDraft_.linear.startY = static_cast<float>(n.y());
-            maskDraft_.linear.endX = static_cast<float>(n.x());
-            maskDraft_.linear.endY = static_cast<float>(n.y());
+            maskDraft_.linear().startX = static_cast<float>(n.x());
+            maskDraft_.linear().startY = static_cast<float>(n.y());
+            maskDraft_.linear().endX = static_cast<float>(n.x());
+            maskDraft_.linear().endY = static_cast<float>(n.y());
             break;
         case lrc::MaskType::RadialGradient:
             maskDraft_.type = lrc::MaskType::RadialGradient;
-            maskDraft_.radial.centerX = static_cast<float>(n.x());
-            maskDraft_.radial.centerY = static_cast<float>(n.y());
-            maskDraft_.radial.radiusX = 0.0f;
-            maskDraft_.radial.radiusY = 0.0f;
+            maskDraft_.radial().centerX = static_cast<float>(n.x());
+            maskDraft_.radial().centerY = static_cast<float>(n.y());
+            maskDraft_.radial().radiusX = 0.0f;
+            maskDraft_.radial().radiusY = 0.0f;
             break;
         case lrc::MaskType::Brush:
             maskDraft_.type = lrc::MaskType::Brush;
-            maskDraft_.brush.push_back(lrc::BrushDab{
+            maskDraft_.brush().push_back(lrc::BrushDab{
                 static_cast<float>(n.x()), static_cast<float>(n.y()),
                 static_cast<float>(maskBrushRadius_),
                 static_cast<float>(maskBrushSoftness_)});
@@ -698,8 +701,9 @@ void ImageViewport::beginMaskGesture(const QPointF& widgetPos) {
             // click, labelled foreground/background by the armed prompt mode.
             if (maskTool_ == lrc::MaskType::AiMask &&
                 maskDraft_.type == lrc::MaskType::AiMask &&
-                maskDraft_.ai.target == lrc::AiMaskTarget::Prompt) {
-                maskDraft_.ai.points.push_back(lrc::SamPoint{
+                std::as_const(maskDraft_).ai().target ==
+                    lrc::AiMaskTarget::Prompt) {
+                maskDraft_.ai().points.push_back(lrc::SamPoint{
                     static_cast<float>(n.x()), static_cast<float>(n.y()),
                     maskPromptLabel_});
             }
@@ -718,14 +722,14 @@ void ImageViewport::moveMaskGesture(const QPointF& widgetPos) {
                     static_cast<float>(img.y()) / image_.height());
     switch (maskTool_) {
         case lrc::MaskType::LinearGradient:
-            maskDraft_.linear.endX = static_cast<float>(n.x());
-            maskDraft_.linear.endY = static_cast<float>(n.y());
+            maskDraft_.linear().endX = static_cast<float>(n.x());
+            maskDraft_.linear().endY = static_cast<float>(n.y());
             break;
         case lrc::MaskType::RadialGradient: {
-            maskDraft_.radial.radiusX =
-                std::fabs(static_cast<float>(n.x()) - maskDraft_.radial.centerX);
-            maskDraft_.radial.radiusY =
-                std::fabs(static_cast<float>(n.y()) - maskDraft_.radial.centerY);
+            maskDraft_.radial().radiusX =
+                std::fabs(static_cast<float>(n.x()) - maskDraft_.radial().centerX);
+            maskDraft_.radial().radiusY =
+                std::fabs(static_cast<float>(n.y()) - maskDraft_.radial().centerY);
             break;
         }
         case lrc::MaskType::Brush: {
@@ -746,7 +750,7 @@ void ImageViewport::moveMaskGesture(const QPointF& widgetPos) {
                 imageFar = spacing >= 0.6 * maskBrushRadius_;
             }
             if (widgetFar && imageFar) {
-                maskDraft_.brush.push_back(lrc::BrushDab{
+                maskDraft_.brush().push_back(lrc::BrushDab{
                     static_cast<float>(n.x()), static_cast<float>(n.y()),
                     static_cast<float>(maskBrushRadius_),
                     static_cast<float>(maskBrushSoftness_)});
@@ -987,22 +991,24 @@ void ImageViewport::paintEvent(QPaintEvent*) {
         // the red weight overlay; only the small handle dots stay filled.
         painter.setBrush(Qt::NoBrush);
         if (maskTool_ == lrc::MaskType::LinearGradient) {
-            const QPointF a = normToWidget(
-                QPointF(maskDraft_.linear.startX, maskDraft_.linear.startY));
-            const QPointF b = normToWidget(
-                QPointF(maskDraft_.linear.endX, maskDraft_.linear.endY));
+            const lrc::Mask& draft = std::as_const(maskDraft_);
+            const QPointF a =
+                normToWidget(QPointF(draft.linear().startX, draft.linear().startY));
+            const QPointF b =
+                normToWidget(QPointF(draft.linear().endX, draft.linear().endY));
             painter.drawLine(a, b);
             painter.setBrush(QColor(255, 255, 255, 210));
             painter.drawEllipse(a, 4, 4);
             painter.drawEllipse(b, 4, 4);
             painter.setBrush(Qt::NoBrush);
         } else if (maskTool_ == lrc::MaskType::RadialGradient) {
+            const lrc::Mask& draft = std::as_const(maskDraft_);
             const QPointF c = normToWidget(
-                QPointF(maskDraft_.radial.centerX, maskDraft_.radial.centerY));
+                QPointF(draft.radial().centerX, draft.radial().centerY));
             const double sx = dst.width() / image_.width();
             const double sy = dst.height() / image_.height();
-            const double rx = maskDraft_.radial.radiusX * image_.width() * sx;
-            const double ry = maskDraft_.radial.radiusY * image_.height() * sy;
+            const double rx = draft.radial().radiusX * image_.width() * sx;
+            const double ry = draft.radial().radiusY * image_.height() * sy;
             painter.drawEllipse(QRectF(c.x() - rx, c.y() - ry, rx * 2, ry * 2));
             painter.setBrush(QColor(255, 255, 255, 210));
             painter.drawEllipse(c, 4, 4);
@@ -1023,8 +1029,8 @@ void ImageViewport::paintEvent(QPaintEvent*) {
     // rasterize the semantic mask without the model — Pipeline does that).
     if (maskTool_ == lrc::MaskType::AiMask &&
         maskDraft_.type == lrc::MaskType::AiMask &&
-        maskDraft_.ai.target == lrc::AiMaskTarget::Prompt) {
-        for (const auto& pt : maskDraft_.ai.points) {
+        std::as_const(maskDraft_).ai().target == lrc::AiMaskTarget::Prompt) {
+        for (const auto& pt : std::as_const(maskDraft_).ai().points) {
             const QPointF p = normToWidget(QPointF(pt.nx, pt.ny));
             painter.setPen(QPen(pt.label ? QColor(0, 230, 118, 235)
                                          : QColor(255, 60, 60, 235), 2.0));

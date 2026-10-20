@@ -282,4 +282,22 @@ TEST_CASE("FolderMonitor event-driven: stop is idempotent and safe",
     mon.stopEventDriven();
 }
 
+TEST_CASE("FolderMonitor event-driven: destructor stops and joins the watcher",
+          "[catalog][p3-2][windows]") {
+    const auto dir = tempDir();
+    const auto began = std::chrono::steady_clock::now();
+    {
+        FolderMonitor mon(dir);
+        WakeGate gate;
+        mon.setWakeCallback([&] { gate.notify(); });
+        REQUIRE(mon.startEventDriven());
+        REQUIRE(mon.eventDrivenActive());
+        // Leaving this scope destroys the monitor while the watcher thread is
+        // still blocked in ReadDirectoryChangesW. The std::jthread destructor
+        // requests stop and joins, so this must return instead of hanging.
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - began;
+    REQUIRE(elapsed < std::chrono::seconds(5));
+}
+
 #endif  // _WIN32

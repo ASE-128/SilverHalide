@@ -10,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <unordered_map>
+#include <utility>
 
 #include <QAbstractButton>
 #include <QAbstractSlider>
@@ -1083,7 +1084,7 @@ void MainWindow::startWorkers() {
     connect(viewport_, &ImageViewport::viewportResolutionChanged, this,
             [this](const QSize&) {
                 if (currentImageId_ >= 0)
-                    requestAdjust(currentAdjustments_);
+                    requestAdjust(adjustmentsSnapshot());
             });
     connect(previewWorker_, &PreviewWorker::loadFailed, this,
             [this](const QString& path) {
@@ -1419,15 +1420,23 @@ void MainWindow::exportImage() {
         for (int i = 0; i < total; ++i) {
             const lrc::EditVariant& v = variants[i];
             // Resolve the variant's adjustment stack (current view is
-            // authoritative when it matches; otherwise load from the catalog).
-            lrc::Adjustments adj;
-            if (v.variantId == currentVariantId_)
-                adj = currentAdjustments_;
-            else
-                adj = catalog_
-                          ->loadAdjustments(currentImageId_,
-                                            static_cast<int>(v.variantId))
-                          .value_or(currentAdjustments_);
+            // authoritative when it matches; otherwise load from the catalog)
+            // and freeze it into a shared snapshot at enqueue time: the current
+            // view reuses its published snapshot, other variants are moved into a
+            // fresh one. The queued QList<ExportItem> copy then carries only
+            // pointers, and a later edit cannot change what this batch exports.
+            lrc::AdjustmentsPtr itemAdjustments;
+            if (v.variantId == currentVariantId_) {
+                itemAdjustments = adjustmentsSnapshot();
+            } else {
+                lrc::Adjustments loaded =
+                    catalog_
+                        ->loadAdjustments(currentImageId_,
+                                          static_cast<int>(v.variantId))
+                        .value_or(currentAdjustments_);
+                itemAdjustments = std::make_shared<const lrc::Adjustments>(
+                    std::move(loaded));
+            }
 
             lrc::RenameTemplateArgs ra;
             ra.tmpl = dlg.renameTemplate().toStdString();
@@ -1441,7 +1450,7 @@ void MainWindow::exportImage() {
             ExportItem item;
             item.imageId = currentImageId_;
             item.filePath = currentFilePath_;
-            item.adjustments = adj;
+            item.adjustments = std::move(itemAdjustments);
             item.outPath = fromStdPath(outPath);
             item.format = static_cast<ExportFormat>(dlg.formatIndex());
             item.quality = dlg.jpegQuality();
@@ -1461,7 +1470,9 @@ void MainWindow::exportImage() {
     QMetaObject::invokeMethod(
         previewWorker_, "exportImage", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(QString, currentFilePath_),
-        Q_ARG(lrc::Adjustments, exportAdj), Q_ARG(QString, out),
+        Q_ARG(lrc::AdjustmentsPtr,
+              std::make_shared<const lrc::Adjustments>(exportAdj)),
+        Q_ARG(QString, out),
         Q_ARG(int, dlg.formatIndex()), Q_ARG(int, dlg.jpegQuality()),
         Q_ARG(int, dlg.maxDim()), Q_ARG(int, dlg.iccIndex()),
         Q_ARG(ExportWatermark, wm));
@@ -1478,10 +1489,13 @@ void MainWindow::onManageSnapshots() {
     // same panel/preview/persist path (without re-pushing the history). The
     // master variant is used for snapshots; virtual copies keep their own.
     connect(&dlg, &SnapshotDialog::applied, this,
-            [this](const lrc::Adjustments& adjustments) {
+            [this](lrc::AdjustmentsPtr adjustments) {
+                if (!adjustments)
+                    return;  // defensive: the dialog always publishes a stack.
                 if (currentVariantId_ == 0)
-                    applyAdjustmentState(adjustments);
-                else if (catalog_->saveAdjustments(currentImageId_, adjustments,
+                    applyAdjustmentState(*adjustments);
+                else if (catalog_->saveAdjustments(currentImageId_,
+                                                  *adjustments,
                                                   currentVariantId_))
                     statusBar()->showMessage(tr("编辑已保存"), 2500);
             });
@@ -1498,8 +1512,10 @@ void MainWindow::onManagePresets() {
     // Applying a preset is a user edit: commit through the same panel/preview/
     // persist path so it lands on the undo stack and can be reverted.
     connect(&dlg, &PresetDialog::applied, this,
-            [this](const lrc::Adjustments& adjustments) {
-                commitAdjustments(adjustments);
+            [this](lrc::AdjustmentsPtr adjustments) {
+                if (!adjustments)
+                    return;  // defensive: the dialog always publishes a stack.
+                commitAdjustments(*adjustments);
             });
     dlg.exec();
 }
@@ -1604,7 +1620,7 @@ void MainWindow::loadImageState(int imageId, int variantId) {
                                keywordFullPathsForImage(imageId));
     statusBar()->showMessage(
         tr("加载 %1 …").arg(QFileInfo(currentFilePath_).fileName()));
-    requestPreview(currentFilePath_, currentAdjustments_);
+    requestPreview(currentFilePath_, adjustmentsSnapshot());
 }
 
 void MainWindow::onCameraMeta(qint64 imageId, const QString& make,
@@ -1639,7 +1655,7 @@ void MainWindow::refreshLensfunProfile(const QString& cameraMake,
         if (currentAdjustments_.lensfunEnabled) {
             currentAdjustments_.lensfunEnabled = false;
             developPanel_->setAdjustments(currentAdjustments_);
-            onAdjustmentsCommitted(currentAdjustments_);
+            onAdjustmentsCommitted(adjustmentsSnapshot());
         }
         developPanel_->setLensfunProfile(
             tr("未找到匹配：%1 / %2").arg(lensMaker, lensModel), false, false);
@@ -1673,7 +1689,7 @@ void MainWindow::refreshLensfunProfile(const QString& cameraMake,
     developPanel_->setAdjustments(currentAdjustments_);
     developPanel_->setLensfunProfile(status, true,
                                      currentAdjustments_.lensfunEnabled);
-    onAdjustmentsCommitted(currentAdjustments_);
+    onAdjustmentsCommitted(adjustmentsSnapshot());
 }
 
 void MainWindow::onLensfunEnabledChanged(bool enabled) {
@@ -1727,7 +1743,7 @@ void MainWindow::onSoftProofParamsChanged(const lrc::SoftProofParams& params,
         previewWorker_, "requestProof", Qt::QueuedConnection,
         Q_ARG(qint64, static_cast<qint64>(currentImageId_)),
         Q_ARG(qint64, previewGeneration_),
-        Q_ARG(lrc::Adjustments, currentAdjustments_),
+        Q_ARG(lrc::AdjustmentsPtr, adjustmentsSnapshot()),
         Q_ARG(lrc::SoftProofParams, params), Q_ARG(bool, enabled));
     // In 1:1 the viewport shows the full-res frame and drops proofReady (it is
     // preview-sized), so the full-res frame itself must be re-rendered. Its
@@ -1771,7 +1787,7 @@ void MainWindow::onExportGamutReport() {
     QMetaObject::invokeMethod(
         previewWorker_, "requestGamutReport", Qt::QueuedConnection,
         Q_ARG(qint64, static_cast<qint64>(currentImageId_)),
-        Q_ARG(lrc::Adjustments, currentAdjustments_),
+        Q_ARG(lrc::AdjustmentsPtr, adjustmentsSnapshot()),
         Q_ARG(lrc::SoftProofParams, softProofParams_));
 }
 
@@ -1978,7 +1994,7 @@ void MainWindow::onDcpProfileSelected(const QString& path) {
     // time and the standard-preview cache is bypassed while a profile is
     // active), so re-issue the preview load rather than a re-render.
     if (currentImageId_ >= 0 && !currentFilePath_.isEmpty())
-        requestPreview(currentFilePath_, currentAdjustments_);
+        requestPreview(currentFilePath_, adjustmentsSnapshot());
 }
 
 void MainWindow::onImageVariantSelected(int64_t imageId, int variantId) {
@@ -1989,10 +2005,13 @@ void MainWindow::onImageVariantSelected(int64_t imageId, int variantId) {
     loadImageState(static_cast<int>(imageId), variantId);
 }
 
-void MainWindow::onAdjustmentsChanged(const lrc::Adjustments& adjustments) {
-    currentAdjustments_ = adjustments;
+void MainWindow::onAdjustmentsChanged(lrc::AdjustmentsPtr adjustments) {
+    if (!adjustments)
+        return;  // defensive: the panel always publishes a stack.
+    adoptPublishedAdjustments(adjustments);
     if (currentImageId_ >= 0) {
-        // Keep the 1920 preview cache / histogram / exit-1:1 path warm.
+        // Keep the 1920 preview cache / histogram / exit-1:1 path warm. The
+        // panel's snapshot is dispatched as-is: no per-request stack copy.
         requestAdjust(adjustments);
         // While the 1:1 full-res view is live, also re-render it so the
         // full-res display stays in sync (no decode, just re-render).
@@ -2002,10 +2021,13 @@ void MainWindow::onAdjustmentsChanged(const lrc::Adjustments& adjustments) {
 }
 
 void MainWindow::onAdjustmentsChangedCoarse(
-    const lrc::Adjustments& adjustments) {
-    currentAdjustments_ = adjustments;
+    lrc::AdjustmentsPtr adjustments) {
+    if (!adjustments)
+        return;  // defensive: the panel always publishes a stack.
+    adoptPublishedAdjustments(adjustments);
     if (currentImageId_ < 0)
         return;
+    // The same snapshot serves the coarse preview + coarse 1:1 pair.
     requestAdjustCoarse(adjustments);
     // While a slider is dragged in 1:1, feed the retained full-res buffer through
     // the coarse path too so the full-res view gets immediate low-res
@@ -2015,7 +2037,9 @@ void MainWindow::onAdjustmentsChangedCoarse(
         requestAdjustFullResCoarse(adjustments);
 }
 
-void MainWindow::onAdjustmentsCommitted(const lrc::Adjustments& adjustments) {
+void MainWindow::onAdjustmentsCommitted(lrc::AdjustmentsPtr adjustments) {
+    if (!adjustments)
+        return;  // defensive: the panel always publishes a stack.
     if (currentImageId_ < 0)
         return;
     if (maskStrokeActive_) {
@@ -2025,19 +2049,20 @@ void MainWindow::onAdjustmentsCommitted(const lrc::Adjustments& adjustments) {
         // debounce (pendingSave_ + saveDebounceTimer_) instead of being done
         // synchronously on every throttled commit; the stroke-end path
         // (onMaskEditFinished -> commitAdjustments) persists the final state.
-        currentAdjustments_ = adjustments;
-        developPanel_->setAdjustments(adjustments);
+        adoptPublishedAdjustments(adjustments);
+        developPanel_->setAdjustments(*adjustments);
+        // Mid-stroke: one snapshot for the preview + 1:1 refreshes.
         requestAdjust(adjustments);
         if (fullResActive_)
             requestAdjustFullRes();
-        pendingSave_ = adjustments;
+        pendingSave_ = *adjustments;
         pendingSaveImageId_ = currentImageId_;
         pendingSaveVariantId_ = currentVariantId_;
         if (saveDebounceTimer_)
             saveDebounceTimer_->start();
         return;
     }
-    commitAdjustments(adjustments);
+    commitAdjustments(*adjustments);
 }
 
 void MainWindow::onAutoRequested() {
@@ -2081,13 +2106,18 @@ void MainWindow::commitAdjustments(const lrc::Adjustments& adjustments) {
     // immediate, the persistence leaves the hot path. The latest
     // value is kept in pendingSave_ and flushed on timeout / image switch /
     // close via flushPendingSave().
-    currentAdjustments_ = adjustments;
+    // Skip the copy when the caller already adopted this exact stack (the
+    // panel's published snapshot): the working copy is then up to date.
+    if (adjustments != currentAdjustments_)
+        currentAdjustments_ = adjustments;
     undoStack_.push(adjustments);  // push() also discards the redo branch.
     developPanel_->setAdjustments(adjustments);
     syncSpotStateFromAdjustments();
     if (currentImageId_ < 0)
         return;
-    requestAdjust(adjustments);
+    // Publish once; the refine + 1:1 requests below share this snapshot.
+    const auto snapshot = adjustmentsSnapshot();
+    requestAdjust(snapshot);
     if (fullResActive_)
         requestAdjustFullRes();
     pendingSave_ = adjustments;
@@ -2100,12 +2130,14 @@ void MainWindow::commitAdjustments(const lrc::Adjustments& adjustments) {
 void MainWindow::applyAdjustmentState(const lrc::Adjustments& adjustments) {
     // Undo/redo replay: same panel/preview/persist path, but does NOT push.
     // The undone/redone state already lives on the other side of the stack.
-    currentAdjustments_ = adjustments;
+    if (adjustments != currentAdjustments_)
+        currentAdjustments_ = adjustments;
     developPanel_->setAdjustments(adjustments);
     syncSpotStateFromAdjustments();
     if (currentImageId_ < 0)
         return;
-    requestAdjust(adjustments);
+    const auto snapshot = adjustmentsSnapshot();
+    requestAdjust(snapshot);
     if (fullResActive_)
         requestAdjustFullRes();
     // Undo/redo persists immediately (not debounced), so the restored state reaches
@@ -2201,14 +2233,14 @@ void MainWindow::onMaskPromptClearRequested(int index) {
         return;
     lrc::Mask& m = currentAdjustments_.masks[static_cast<size_t>(index)];
     if (m.type != lrc::MaskType::AiMask ||
-        m.ai.target != lrc::AiMaskTarget::Prompt)
+        std::as_const(m).ai().target != lrc::AiMaskTarget::Prompt)
         return;
     // Clearing is a committed edit: snapshot for undo, drop the points, bump
     // the version so Pipeline re-rasterizes (Prompt falls back to a zero mask
     // with no points), then keep the viewport draft in sync.
     undoStack_.push(currentAdjustments_);
-    m.ai.points.clear();
-    m.ai.cachedWeightVersion++;
+    m.ai().points.clear();
+    m.ai().cachedWeightVersion++;
     commitAdjustments(currentAdjustments_);
     if (currentMaskIndex_ == index)
         viewport_->setMaskDraft(currentAdjustments_.masks[static_cast<size_t>(index)]);
@@ -2253,10 +2285,10 @@ void MainWindow::onColorRangeSampled(const QColor& color) {
     lrc::Mask& m = adj.masks[static_cast<size_t>(currentMaskIndex_)];
     if (m.type != lrc::MaskType::ColorRange)   // only colour masks
         return;
-    m.color.hasReference = true;
-    m.color.refR = lr;
-    m.color.refG = lg;
-    m.color.refB = lb;
+    m.color().hasReference = true;
+    m.color().refR = lr;
+    m.color().refG = lg;
+    m.color().refB = lb;
     commitAdjustments(adj);
     viewport_->setMaskDraft(m);
     viewport_->setMaskColorReference(color);
@@ -2624,7 +2656,7 @@ void MainWindow::onColorAdjusted(int colorRangeIndex, double saturation,
     ch.saturation = saturation;
     ch.luminance = luminance;
     developPanel_->setAdjustments(currentAdjustments_);
-    requestAdjust(currentAdjustments_);
+    requestAdjust(adjustmentsSnapshot());
 }
 
 void MainWindow::onColorAdjustedFinished() {
@@ -2635,15 +2667,15 @@ void MainWindow::onColorAdjustedFinished() {
 }
 
 void MainWindow::onVisualizationRequested(int mode,
-                                          const lrc::Adjustments& adjustments) {
-    if (currentImageId_ < 0)
+                                          lrc::AdjustmentsPtr adjustments) {
+    if (currentImageId_ < 0 || !adjustments)
         return;
-    currentAdjustments_ = adjustments;
+    adoptPublishedAdjustments(adjustments);
     ++previewGeneration_;
     QMetaObject::invokeMethod(
         previewWorker_, "renderVisualization", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(qint64, previewGeneration_),
-        Q_ARG(int, mode), Q_ARG(lrc::Adjustments, adjustments));
+        Q_ARG(int, mode), Q_ARG(lrc::AdjustmentsPtr, adjustments));
 }
 
 void MainWindow::onVisualizationCleared() {
@@ -2662,29 +2694,52 @@ void MainWindow::onVisualizationReady(qint64 imageId, qint64 generation,
         viewport_->setDiagnosticOverlay(image);
 }
 
+std::shared_ptr<const lrc::Adjustments> MainWindow::adjustmentsSnapshot() {
+    // Reuse the published snapshot while it still compares equal to the working
+    // copy. Adjustments::operator== covers every field (masks, curve, spots,
+    // point-colour targets and the denoise parameters included), so an equal
+    // snapshot is never stale; a changed stack is copied exactly once and then
+    // shared by every queued request derived from this edit.
+    if (!publishedAdjustments_ || *publishedAdjustments_ != currentAdjustments_)
+        publishedAdjustments_ = std::make_shared<const lrc::Adjustments>(
+            currentAdjustments_);
+    return publishedAdjustments_;
+}
+
+void MainWindow::adoptPublishedAdjustments(lrc::AdjustmentsPtr adjustments) {
+    // Keep the editable working copy in sync, but only pay for a copy when the
+    // published stack actually differs. The received pointer then becomes the
+    // published snapshot, so adjustmentsSnapshot() hands the same owner to the
+    // queued dispatches of this edit instead of copying the stack again.
+    if (*adjustments != currentAdjustments_)
+        currentAdjustments_ = *adjustments;
+    publishedAdjustments_ = std::move(adjustments);
+}
+
 void MainWindow::requestPreview(const QString& filePath,
-                                const lrc::Adjustments& adjustments) {
+                                lrc::AdjustmentsPtr adjustments) {
     ++previewGeneration_;
     QMetaObject::invokeMethod(
         previewWorker_, "loadImage", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(QString, filePath),
-        Q_ARG(qint64, previewGeneration_), Q_ARG(lrc::Adjustments, adjustments));
+        Q_ARG(qint64, previewGeneration_),
+        Q_ARG(lrc::AdjustmentsPtr, adjustments));
 }
 
-void MainWindow::requestAdjust(const lrc::Adjustments& adjustments) {
+void MainWindow::requestAdjust(lrc::AdjustmentsPtr adjustments) {
     ++previewGeneration_;
     QMetaObject::invokeMethod(
         previewWorker_, "adjustPreview", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(qint64, previewGeneration_),
-        Q_ARG(lrc::Adjustments, adjustments));
+        Q_ARG(lrc::AdjustmentsPtr, adjustments));
 }
 
-void MainWindow::requestAdjustCoarse(const lrc::Adjustments& adjustments) {
+void MainWindow::requestAdjustCoarse(lrc::AdjustmentsPtr adjustments) {
     ++previewGeneration_;
     QMetaObject::invokeMethod(
         previewWorker_, "adjustPreviewCoarse", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(qint64, previewGeneration_),
-        Q_ARG(lrc::Adjustments, adjustments));
+        Q_ARG(lrc::AdjustmentsPtr, adjustments));
 }
 
 void MainWindow::requestFullRes() {
@@ -2702,7 +2757,7 @@ void MainWindow::requestFullRes() {
         previewWorker_, "loadFullRes", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(QString, currentFilePath_),
         Q_ARG(qint64, previewGeneration_),
-        Q_ARG(lrc::Adjustments, currentAdjustments_));
+        Q_ARG(lrc::AdjustmentsPtr, adjustmentsSnapshot()));
 }
 
 void MainWindow::clearFullRes() {
@@ -2715,16 +2770,15 @@ void MainWindow::requestAdjustFullRes() {
     QMetaObject::invokeMethod(
         previewWorker_, "adjustFullRes", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(qint64, previewGeneration_),
-        Q_ARG(lrc::Adjustments, currentAdjustments_));
+        Q_ARG(lrc::AdjustmentsPtr, adjustmentsSnapshot()));
 }
 
-void MainWindow::requestAdjustFullResCoarse(
-    const lrc::Adjustments& adjustments) {
+void MainWindow::requestAdjustFullResCoarse(lrc::AdjustmentsPtr adjustments) {
     ++previewGeneration_;
     QMetaObject::invokeMethod(
         previewWorker_, "adjustFullResCoarse", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(qint64, previewGeneration_),
-        Q_ARG(lrc::Adjustments, adjustments));
+        Q_ARG(lrc::AdjustmentsPtr, adjustments));
 }
 
 void MainWindow::onFullResRequested(bool needed) {
@@ -3542,7 +3596,8 @@ void MainWindow::onSpotRemovalsEdited(
     }
     currentAdjustments_.spotRemovals = spots;
     developPanel_->setCurrentSpotCount(static_cast<int>(spots.size()));
-    requestAdjust(currentAdjustments_);
+    const auto snapshot = adjustmentsSnapshot();
+    requestAdjust(snapshot);
     if (fullResActive_)
         requestAdjustFullRes();
     pendingSave_ = currentAdjustments_;
@@ -3645,8 +3700,10 @@ void MainWindow::onCompareModeChanged(ImageViewport::CompareMode mode) {
         QMetaObject::invokeMethod(
             previewWorker_, "requestBeforeAfter", Qt::QueuedConnection,
             Q_ARG(qint64, currentImageId_), Q_ARG(qint64, previewGeneration_),
-            Q_ARG(lrc::Adjustments, currentAdjustments_),
-            Q_ARG(lrc::Adjustments, lrc::Adjustments::defaults()),
+            Q_ARG(lrc::AdjustmentsPtr, adjustmentsSnapshot()),
+            Q_ARG(lrc::AdjustmentsPtr,
+                  std::make_shared<const lrc::Adjustments>(
+                      lrc::Adjustments::defaults())),
             Q_ARG(int, lrc::app::kPreviewMaxDim), Q_ARG(bool, true));
     }
 }
@@ -3698,11 +3755,12 @@ void MainWindow::toggleReferenceView() {
     const auto refAdj =
         catalog_->loadAdjustments(refId).value_or(lrc::Adjustments::defaults());
     ++previewGeneration_;
-    QMetaObject::invokeMethod(previewWorker_, "requestReference",
-                              Qt::QueuedConnection, Q_ARG(qint64, refId),
-                              Q_ARG(qint64, previewGeneration_),
-                              Q_ARG(lrc::Adjustments, refAdj),
-                              Q_ARG(int, lrc::app::kPreviewMaxDim));
+    QMetaObject::invokeMethod(
+        previewWorker_, "requestReference", Qt::QueuedConnection,
+        Q_ARG(qint64, refId), Q_ARG(qint64, previewGeneration_),
+        Q_ARG(lrc::AdjustmentsPtr,
+              std::make_shared<const lrc::Adjustments>(refAdj)),
+        Q_ARG(int, lrc::app::kPreviewMaxDim));
     statusBar()->showMessage(tr("正在加载参考视图…"));
 }
 

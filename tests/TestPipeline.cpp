@@ -609,15 +609,15 @@ TEST_CASE("Pipeline: renderLinearFull and renderFullDisplay bypass the cache",
     const Adjustments a = Adjustments::defaults();
 
     // Fill the LRU with a bounded preview first.
-    pipeline.render(71, *buf, a, 4);
+    (void)pipeline.render(71, *buf, a, 4);
     const size_t before = pipeline.cacheBytes();
     REQUIRE(before > 0);
 
     // Full-resolution renders must never grow the preview LRU.
-    pipeline.renderLinearFull(72, *buf, a);
+    (void)pipeline.renderLinearFull(72, *buf, a);
     REQUIRE(pipeline.cacheBytes() == before);
 
-    pipeline.renderFullDisplay(73, *buf, a);
+    (void)pipeline.renderFullDisplay(73, *buf, a);
     REQUIRE(pipeline.cacheBytes() == before);
 }
 
@@ -629,14 +629,14 @@ TEST_CASE("Pipeline: render/renderFull with maxDim=0 still cache full-size",
     const Adjustments a = Adjustments::defaults();
 
     REQUIRE(pipeline.cacheBytes() == 0);
-    pipeline.render(81, *buf, a, 0);
+    (void)pipeline.render(81, *buf, a, 0);
     REQUIRE(pipeline.cacheBytes() > 0);
     const size_t afterRender = pipeline.cacheBytes();
 
     // renderFull is render(..., 0) under the hood, so it caches too. This
     // documents the current state: the 1:1 view must NOT go through these
     // entry points (it uses renderLinearFull + toDisplaySRGB / renderFullDisplay).
-    pipeline.renderFull(82, *buf, a);
+    (void)pipeline.renderFull(82, *buf, a);
     REQUIRE(pipeline.cacheBytes() > afterRender);
 }
 

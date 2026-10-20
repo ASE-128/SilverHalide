@@ -170,14 +170,20 @@ public slots:
                      const std::vector<std::string>& keywordNames);
 
 signals:
+    // The three edit signals below carry lrc::AdjustmentsPtr (a shared_ptr to a
+    // const Adjustments) instead of a const reference: the panel publishes one
+    // immutable snapshot per emission, MainWindow adopts that same pointer for
+    // its queued preview/1:1 dispatches, and no Adjustments copy is made merely
+    // to move the stack across the panel -> window hop. The pointee is never
+    // mutated after publication (lrc::AdjustmentsPtr is shared_ptr<const ...>).
     // Fired (debounced) while dragging — drives the live preview.
-    void adjustmentsChanged(const lrc::Adjustments& adjustments);
+    void adjustmentsChanged(lrc::AdjustmentsPtr adjustments);
     // Fired (coarse-debounced, 30 ms) while a slider is dragged. Drives the
     // low-resolution live preview; adjustmentsChanged (refine) follows on pause
     // or release.
-    void adjustmentsChangedCoarse(const lrc::Adjustments& adjustments);
+    void adjustmentsChangedCoarse(lrc::AdjustmentsPtr adjustments);
     // Fired once on release / spin commit — drives persistence.
-    void adjustmentsCommitted(const lrc::Adjustments& adjustments);
+    void adjustmentsCommitted(lrc::AdjustmentsPtr adjustments);
     // User asked for the pipeline auto-adjust suggestion (MainWindow computes
     // it from the current linear image and calls setAdjustments back).
     void autoRequested();
@@ -192,7 +198,9 @@ signals:
     // LR-style Alt-key visualization: emitted (debounced) while the user holds
     // Alt and drags a slider whose adjustment has a diagnostic view. `mode` is
     // Pipeline::VisualizeMode as an int. Cleared when Alt is released.
-    void visualizationRequested(int mode, const lrc::Adjustments& adjustments);
+    // The stack travels as an immutable snapshot for the same reason as the
+    // edit signals above.
+    void visualizationRequested(int mode, lrc::AdjustmentsPtr adjustments);
     void visualizationCleared();
 
     // --- Masked local adjustments ------------------------------------------

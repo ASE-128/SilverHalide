@@ -118,13 +118,16 @@ private slots:
     void onManageSnapshots();
     void onFiltersChanged(int minRating, int flagFilter, int labelColorFilter);
     void onImageSelected(int imageId);
-    void onAdjustmentsChanged(const lrc::Adjustments& adjustments);
+    // The develop panel publishes an immutable snapshot per edit (see
+    // DevelopPanel's edit signals); these slots adopt that pointer instead of
+    // copying the stack and reuse it for the queued preview/1:1 dispatches.
+    void onAdjustmentsChanged(lrc::AdjustmentsPtr adjustments);
     /**
      * @brief Coarse-then-refine: slider drag (30 ms throttle) drives a low-res
      *        preview; onAdjustmentsChanged (refine) still fires on pause/release.
      */
-    void onAdjustmentsChangedCoarse(const lrc::Adjustments& adjustments);
-    void onAdjustmentsCommitted(const lrc::Adjustments& adjustments);
+    void onAdjustmentsChangedCoarse(lrc::AdjustmentsPtr adjustments);
+    void onAdjustmentsCommitted(lrc::AdjustmentsPtr adjustments);
     void onAutoRequested();
     void onAutoAdjustReady(const lrc::Adjustments& adjustments);
     void onAutoCropSuggestionReady(bool hasCrop, float left, float top,
@@ -147,8 +150,7 @@ private slots:
     void onColorRangeSampled(const QColor& color);
     void onEditGestureStarted();
     void onEditGestureFinished();
-    void onVisualizationRequested(int mode,
-                                  const lrc::Adjustments& adjustments);
+    void onVisualizationRequested(int mode, lrc::AdjustmentsPtr adjustments);
     void onVisualizationCleared();
     void onVisualizationReady(qint64 imageId, qint64 generation,
                               const lrc::ImageBufferPtr& overlay);
@@ -333,18 +335,44 @@ private:
                      const QString& destRoot = QString(),
                      const QString& renameTemplate = QString());
     void convertToDng();
-    void requestPreview(const QString& filePath, const lrc::Adjustments& adjustments);
-    void requestAdjust(const lrc::Adjustments& adjustments);
+    // Cross-thread adjustment hand-off: every request below takes a shared,
+    // immutable snapshot (see adjustmentsSnapshot()) so the queued event carries
+    // a shared_ptr instead of a deep copy of the stack. The worker only reads it.
+    void requestPreview(const QString& filePath, lrc::AdjustmentsPtr adjustments);
+    void requestAdjust(lrc::AdjustmentsPtr adjustments);
     // Low-res (kCoarseMaxDim) re-render of the working image; mirrors
     // requestAdjust but targets PreviewWorker::adjustPreviewCoarse.
-    void requestAdjustCoarse(const lrc::Adjustments& adjustments);
+    void requestAdjustCoarse(lrc::AdjustmentsPtr adjustments);
     void requestFullRes();
     void clearFullRes();
     void requestAdjustFullRes();
     // 1:1 coarse-then-refine -- fast low-res re-render of the retained full-res
     // buffer while a slider is dragged in 1:1 (mirrors requestAdjustFullRes but
     // targets PreviewWorker::adjustFullResCoarse).
-    void requestAdjustFullResCoarse(const lrc::Adjustments& adjustments);
+    void requestAdjustFullResCoarse(lrc::AdjustmentsPtr adjustments);
+    /**
+     * @brief Returns a shared, immutable snapshot of currentAdjustments_.
+     *
+     * The snapshot is reused while the working copy still compares equal to it
+     * (Adjustments::operator== is exhaustive), so one edit deep-copies the stack
+     * once instead of once per queued request: the coarse/refine/full-res
+     * dispatches derived from the same edit all share the returned pointer.
+     *
+     * @return A non-null published snapshot. Callers must not mutate the
+     *         pointee; queued worker slots take a shared reference to it and
+     *         only read.
+     */
+    std::shared_ptr<const lrc::Adjustments> adjustmentsSnapshot();
+    /**
+     * @brief Adopts a snapshot published by the panel / preset / snapshot dialog.
+     *
+     * Copies it into the editable working copy only when the values differ, then
+     * keeps the received pointer as the published snapshot so the dispatches of
+     * this edit reuse it (adjustmentsSnapshot() then returns it unchanged).
+     *
+     * @param adjustments Non-null published snapshot; the caller rejects null.
+     */
+    void adoptPublishedAdjustments(lrc::AdjustmentsPtr adjustments);
     void updateHistogramAndStatus(const QImage& image);
     void setFilterFolder(const QString& folder);
     QImage toQImage(const lrc::ImageBufferPtr& buffer) const;
@@ -506,6 +534,10 @@ private:
     int currentMaskIndex_ = -1;  // mask being edited by the viewport tool
     QString currentFilePath_;
     lrc::Adjustments currentAdjustments_;
+    // Last snapshot published by adjustmentsSnapshot(); reused while the
+    // working copy above still compares equal to it, so the queued dispatches of
+    // one edit share a single deep copy instead of copying per request.
+    std::shared_ptr<const lrc::Adjustments> publishedAdjustments_;
     lrc::UndoStack<lrc::Adjustments> undoStack_;  // 50-step undo history
     bool maskStrokeActive_ = false;  // true while a mask stroke is being drawn
     bool gestureActive_ = false;     // a slider-drag gesture is in progress

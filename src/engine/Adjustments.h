@@ -7,7 +7,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "engine/AiInference.h"  // SamPoint, SamMaskResult (for Prompt click masks)
@@ -155,15 +157,56 @@ struct AiMaskParams {
     bool operator==(const AiMaskParams&) const = default;
 };
 
+// --- Mask geometry (discriminated union) ------------------------------------
+// A mask owns exactly one geometry (linear / radial / brush stroke / colour
+// range / AI parameters) plus the flat local-adjustment and sub-mask fields
+// below. This used to be a "keep every geometry resident" struct, which made
+// Mask ~350 bytes and allowed illegal combinations (e.g. a radial mask that
+// still carried stale brush dabs). std::variant makes "one geometry at a
+// time" structural while keeping the observable behaviour identical: an unused
+// geometry reads as its default-constructed value, exactly like the old unused
+// member did.
+
+// Brush-stroke geometry: the ordered dab list of a MaskType::Brush mask.
+// Wrapped in a struct instead of storing std::vector<BrushDab> directly so the
+// variant alternative names the shape and can grow per-stroke metadata later.
+struct BrushGeometry {
+    std::vector<BrushDab> dabs;
+
+    bool operator==(const BrushGeometry&) const = default;
+};
+
+/**
+ * @brief The single resident geometry of a Mask.
+ *
+ * LinearGradientMask is deliberately the first alternative: a default-
+ * constructed Mask therefore already owns a writable linear geometry, which
+ * keeps the ubiquitous `Mask m; m.type = MaskType::LinearGradient;
+ * m.linear().startX = ...;` sequence valid without extra initialisation.
+ * std::monostate (last) is the explicit "no geometry" state selected by
+ * MaskType::None.
+ *
+ * @note Prefer the Mask accessors (linear() / radial() / brush() / color() /
+ *       ai()) or Mask::setType() over manipulating the variant directly: a
+ *       mismatch between Mask::type and the resident alternative is harmless to
+ *       read (the accessors fall back to that alternative's defaults) but
+ *       switching the resident alternative drops the previous geometry.
+ */
+using MaskShape = std::variant<LinearGradientMask, RadialGradientMask,
+                               BrushGeometry, ColorRangeMask, AiMaskParams,
+                               std::monostate>;
+
 // A local-adjustment mask: weight = maskWeight * opacity, optionally inverted.
 // The local adjustments mirror a subset of the global stack.
 struct Mask {
+    // Authoritative selector. The UI, ProfileIO and Pipeline all dispatch on
+    // this; it also decides which MaskShape alternative is the resident one.
     MaskType type = MaskType::None;
-    LinearGradientMask linear;
-    RadialGradientMask radial;
-    std::vector<BrushDab> brush;
-    ColorRangeMask color;        // only meaningful when type == ColorRange
-    AiMaskParams ai;             // only meaningful when type == AiMask
+
+    // Storage for the single resident geometry (see MaskShape). Access it
+    // through the accessors below instead of poking the variant directly.
+    MaskShape shape;
+
     bool invert = false;
     double opacity = 1.0; // 0..1
 
@@ -208,17 +251,144 @@ struct Mask {
     //   true  -> weight = max(geometry, colour, luminance) (union)
     bool maskUnion = false;
 
+    // --- Geometry accessors ---------------------------------------------------
+    // `type` is the authoritative selector and the accessors never change it.
+    // Consumers must branch on `type` first; the accessors then make the
+    // matching geometry readable/writable without a throw in any state.
+
+    /**
+     * @brief Resident linear-gradient geometry (mutable).
+     *
+     * Returns the resident LinearGradientMask when the variant holds one;
+     * otherwise re-seats the variant to a default-constructed LinearGradientMask
+     * and returns that instance, so a write always has a home. Does not change
+     * Mask::type. Never throws and never touches shared state.
+     */
+    LinearGradientMask& linear() { return mutableShape<LinearGradientMask>(); }
+
+    /**
+     * @brief Resident linear-gradient geometry or its defaults (read-only).
+     *
+     * Returns the resident LinearGradientMask when the variant holds one;
+     * otherwise a function-local immutable default instance. Safe from any
+     * number of threads: a const Mask (e.g. shared through AdjustmentsPtr) is
+     * never mutated, so concurrent readers only read the immutable default.
+     */
+    const LinearGradientMask& linear() const noexcept {
+        return residentOrDefault<LinearGradientMask>();
+    }
+
+    /**
+     * @brief Resident radial-gradient geometry (mutable); re-seated on demand.
+     * @see linear() for the exact re-seating / thread-safety contract.
+     */
+    RadialGradientMask& radial() { return mutableShape<RadialGradientMask>(); }
+
+    /**
+     * @brief Resident radial-gradient geometry or its defaults (read-only).
+     * @see linear() const for the thread-safety contract.
+     */
+    const RadialGradientMask& radial() const noexcept {
+        return residentOrDefault<RadialGradientMask>();
+    }
+
+    /**
+     * @brief Resident brush dabs (mutable); the BrushGeometry is re-seated to
+     *        an empty stroke when the variant does not hold one.
+     * @see linear() for the exact re-seating contract.
+     */
+    std::vector<BrushDab>& brush() { return mutableShape<BrushGeometry>().dabs; }
+
+    /**
+     * @brief Resident brush dabs, or an empty immutable list (read-only).
+     * @see linear() const for the thread-safety contract.
+     */
+    const std::vector<BrushDab>& brush() const noexcept {
+        return residentOrDefault<BrushGeometry>().dabs;
+    }
+
+    /**
+     * @brief Resident colour-range geometry (mutable); re-seated on demand.
+     * @see linear() for the exact re-seating / thread-safety contract.
+     */
+    ColorRangeMask& color() { return mutableShape<ColorRangeMask>(); }
+
+    /**
+     * @brief Resident colour-range geometry or its defaults (read-only).
+     * @see linear() const for the thread-safety contract.
+     */
+    const ColorRangeMask& color() const noexcept {
+        return residentOrDefault<ColorRangeMask>();
+    }
+
+    /**
+     * @brief Resident AI-mask parameters (mutable); re-seated on demand.
+     * @see linear() for the exact re-seating / thread-safety contract.
+     */
+    AiMaskParams& ai() { return mutableShape<AiMaskParams>(); }
+
+    /**
+     * @brief Resident AI-mask parameters or their defaults (read-only).
+     * @see linear() const for the thread-safety contract.
+     */
+    const AiMaskParams& ai() const noexcept {
+        return residentOrDefault<AiMaskParams>();
+    }
+
+    /**
+     * @brief Sets Mask::type and re-seats the resident geometry to match it.
+     *
+     * The payload is kept when the variant already holds the requested
+     * alternative; otherwise the alternative is default-constructed, which
+     * discards the previously resident geometry (that geometry is unused for
+     * the new type, matching the old "all geometries resident" behaviour for
+     * everything the renderer reads).
+     *
+     * @param t New mask type (MaskType::None re-seats to std::monostate).
+     */
+    void setType(MaskType t);
+
+    /**
+     * @brief True when the resident alternative is the one `type` selects.
+     *
+     * Diagnostic / test helper; the accessors do not require this to hold.
+     * A default-constructed Mask reports false because MaskShape intentionally
+     * seeds a (unused) LinearGradientMask while `type` is MaskType::None.
+     */
+    bool shapeMatchesType() const noexcept;
+
+    /**
+     * @brief Copies type, invert and the linear/radial/brush geometry from
+     *        `other`, leaving opacity, local adjustments and sub-mask
+     *        modifiers untouched.
+     *
+     * Mirrors what the develop panel's viewport-draft sync used to do field by
+     * field (type + linear + radial + brush + invert). The colour-range and AI
+     * alternatives are deliberately not copied: they are edited through their
+     * own paths, not through the viewport geometry draft.
+     */
+    void copyGeometryFrom(const Mask& other);
+
     bool operator==(const Mask& other) const;
-    size_t hash() const;
+    /** @brief Full-content hash (every field that can change the rendered result).
+     *
+     * @note noexcept: pure mixing of values already in memory; the const
+     *       geometry accessors it reads never allocate or throw.
+     */
+    size_t hash() const noexcept;
 
     // Narrower hash covering only the fields that shape the weight field
     // (type + geometry + invert + the sub-mask modifiers). Opacity and the
     // local-adjustment values are excluded, so dragging a local slider never
     // invalidates a cached weight field. Used as the cache key by
     // Pipeline::brushWeightField and by the viewport's overlay rebuild check.
-    size_t geometryHash() const;
+    /** @brief Geometry-only hash shaping the cached weight field.
+     *
+     * @note noexcept: same contract as hash(), over a strict subset of fields.
+     */
+    size_t geometryHash() const noexcept;
 
-    bool hasEffect() const {
+    bool hasEffect() const noexcept {
         if (opacity <= 0.0) return false;   // fully transparent: never contributes
         return exposure != 0.0 || contrast != 0.0 || highlights != 0.0 ||
                shadows != 0.0 || whites != 0.0 || blacks != 0.0 ||
@@ -226,6 +396,28 @@ struct Mask {
                temperature != 0.0 || tint != 0.0 ||
                useColorRange || useLuminance ||
                (type == MaskType::AiMask);  // AI mask always contributes weight
+    }
+
+  private:
+    // Mutable accessor: returns the resident alternative, re-seating the
+    // variant to a default-constructed one on a miss so the caller can write.
+    template <class T>
+    T& mutableShape() {
+        if (T* resident = std::get_if<T>(&shape))
+            return *resident;
+        return shape.emplace<T>();
+    }
+
+    // Const accessor: never mutates (a const Mask can be shared across
+    // threads). On a miss it returns a function-local immutable default; the
+    // magic static is initialised exactly once and is safe to read
+    // concurrently.
+    template <class T>
+    const T& residentOrDefault() const {
+        if (const T* resident = std::get_if<T>(&shape))
+            return *resident;
+        static const T kDefaultInstance{};
+        return kDefaultInstance;
     }
 };
 
@@ -273,7 +465,7 @@ struct AiDenoise {
     int modelVersion = 0;         // bumped automatically on update
 
     bool operator==(const AiDenoise& o) const = default;
-    bool hasEffect() const { return enabled && strength > 0.0f; }
+    bool hasEffect() const noexcept { return enabled && strength > 0.0f; }
 };
 
 // --- AI Mask parameters ---------------------------------------------------
@@ -297,9 +489,13 @@ struct ColorTarget {
     double amount = 100.0;   // 0..100  overall strength
 
     bool operator==(const ColorTarget&) const = default;
-    size_t hash() const;
+    /** @brief Content hash used by the render cache keys.
+     *
+     * @note noexcept: pure scalar mixing, no allocation.
+     */
+    size_t hash() const noexcept;
 
-    bool hasEffect() const {
+    bool hasEffect() const noexcept {
         return hueShift != 0.0 || saturation != 0.0 || luminance != 0.0;
     }
 };
@@ -390,11 +586,28 @@ struct Adjustments {
     // --- AI Denoise ------------------------------------------------------------
     AiDenoise aiDenoise;
 
+    // HARD CONTRACT: every field of this struct must be compared by
+    // operator== and mixed into hash() (plus the matching hashStageX() when the
+    // field belongs to a stage). The UI's shared-snapshot publishing relies on
+    // operator== being exhaustive: MainWindow::adjustmentsSnapshot() and
+    // adoptPublishedAdjustments() reuse the published snapshot while it compares
+    // equal, so a field that is missing here would make a changed stack look
+    // unchanged and dispatch a STALE adjustment stack to the preview/export
+    // worker. A new field with a default value must be added to operator== in the
+    // same change.
     bool operator==(const Adjustments& other) const;
     bool operator!=(const Adjustments& other) const { return !(*this == other); }
 
     void reset();
-    size_t hash() const;
+    // HARD CONTRACT: see the operator== note above - a field missing from the
+    // hash mix makes the render caches collapse two different stacks into one
+    // entry (stale preview), not just a weaker checksum.
+    /** @brief Full-content hash of the whole adjustment stack.
+     *
+     * @note noexcept: mixes values already in memory (including masks and
+     *       strings) without allocating; cache keys rely on this being cheap.
+     */
+    size_t hash() const noexcept;
 
     // Per-stage hashes for the incremental render cache. Each covers
     // exactly the parameters that influence one pipeline stage, so the cache can
@@ -406,14 +619,36 @@ struct Adjustments {
     //   E: spatial (texture/clarity/sharpening/NR/distortion/grain/vignette/
     //      masks/spot removals)
     //   F: sRGB output -- no adjustment parameters, returns a constant.
-    size_t hashStageA() const;
-    size_t hashStageB() const;
-    size_t hashStageC() const;
-    size_t hashStageD() const;
-    size_t hashStageE() const;
-    static size_t hashStageF();
+    size_t hashStageA() const noexcept;
+    size_t hashStageB() const noexcept;
+    size_t hashStageC() const noexcept;
+    size_t hashStageD() const noexcept;
+    size_t hashStageE() const noexcept;
+    static size_t hashStageF() noexcept;
 
-    static Adjustments defaults();
+    /** @brief Default-constructed stack (all sliders neutral).
+     *
+     * @note Ignoring the returned stack is always a bug, hence [[nodiscard]].
+     *       Not noexcept: it allocates the contained vectors / strings.
+     */
+    [[nodiscard]] static Adjustments defaults();
 };
+
+/**
+ * @brief Immutable, shared adjustment stack for cross-thread hand-off.
+ *
+ * The UI owns the mutable working copy (Adjustments) and publishes snapshots of
+ * it as this type: preview/export workers and queued slots receive the pointer
+ * and only read through it. This avoids copying the mask / curve / spot vectors
+ * into every queued request, and because the pointee is const no consumer can
+ * mutate the stack behind the UI's back.
+ *
+ * @note Build one snapshot per edit and pass it to every request derived from
+ *       that edit; the shared owner may outlive the UI request, so the pointee
+ *       must never be mutated after publication. Thread safety is that of
+ *       const access to a fully constructed stack: any number of readers are
+ *       safe once the publishing thread has finished writing it.
+ */
+using AdjustmentsPtr = std::shared_ptr<const Adjustments>;
 
 } // namespace lrc

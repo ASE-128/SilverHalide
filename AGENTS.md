@@ -21,7 +21,7 @@
 4. 若 Git、构建/测试结果和文档冲突，以可复现的 Git 状态与实测结果为准，并在回复中明确冲突和日期。
 5. 在报告任务状态时区分 `已提交`、`工作区未提交`、`代码已落地但未验收`、`待实施`，不要把“有代码框架”写成“已完成”。
 
-当前核对快照（2026-09-05）：分支为 `main`，最近提交为 `cde52c6`（`v1.0.0`）；文档归档迁移在工作区存在未提交的删除/新增组合。当前没有可信的、未归档的进行中任务清单；性能 M1-M5 的实施规格显示部分代码已落地、部分验收仍待确认，四阶段加速报告显示代码层交付完成但部分基线性能数字尚未实测。开始新任务前必须重新执行上述检查，不能把本快照当作永久状态。
+当前核对快照（2026-10-20）：分支为 `main`，最近提交为 `1d6a624`；工作区有一大批**未提交**的「现代 C++ 改造（IM-1 ~ IM-11）」改动（29 个源码/测试文件 + 文档，另 `src/engine/Pipeline.cpp.orig` 的删除），验收数字与遗留见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md)。`packaging/installer.iss` 存在与本轮无关的预先改动。无其它已知进行中的任务；性能 M1-M5 的真机锚点仍待验。开始新任务前必须重新执行上述检查，不能把本快照当作永久状态。
 
 状态参考： [STATUS.md](STATUS.md)、[docs/archive/perf-m1-m5-implementation-spec.md](docs/archive/perf-m1-m5-implementation-spec.md)、[docs/archive/Speedup_Four_Stages_Report.md](docs/archive/Speedup_Four_Stages_Report.md)、[docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md](docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md)。
 
@@ -83,7 +83,8 @@
 
 - 不要编辑生成目录中的源码或汇编产物；如 [build_gui](build_gui) 和 [build_headless](build_headless) 都是 CMake/Ninja 产物目录
 - 不要把打包路径指向 `lightroom-clone-cpp/build_gui` 这类历史 VS 旧树（源码上提后已不存在）
-- 若需要做发布打包，先遵循 [packaging/installer.nsi](packaging/installer.nsi) 的说明，并将发布文件暂存到 `build_gui/install_stage`
+- 若需要做发布打包，按 [packaging/installer.iss](packaging/installer.iss)（Inno Setup，主入口）头部注释暂存载荷到 `build_gui/install_stage` 后编译；[packaging/installer.nsi](packaging/installer.nsi) 仅为历史参考
+- **Ninja + 中文版 MSVC 的 `/showIncludes` 前缀会被 CMake 错误转码**，导致 `CMakeFiles/rules.ninja` 里的 `msvc_deps_prefix` 匹配不上、所有 `.obj` 记录 `#deps 0`：改头文件不触发重编，增量构建会静默使用陈旧 obj（曾导致 Json 布局变更后 SIGSEGV）。每次 configure 后必须先跑 `build_headless\_fix_msvc_deps.ps1 -BuildDir <dir>`，并用 `ninja -C <dir> -t deps <obj>` 确认 `#deps > 0`；改头文件后的验证结论以 clean 重建为准（详见 [docs/DEVELOPMENT_EXPERIENCE.md](docs/DEVELOPMENT_EXPERIENCE.md) §10）
 - 代码改动应优先以 headless 构建和测试作为快速反馈，GUI 相关改动再补 GUI 构建或直接跑对应 exe
 
 ## 7. 任务时的工作方式

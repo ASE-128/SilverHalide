@@ -209,9 +209,21 @@ size_t defaultGrain(size_t n) {
     return std::max<size_t>(64, n / (threads * 8));
 }
 
-void parallelFor(size_t n, size_t grain,
-                 const std::function<void(size_t, size_t)>& fn) {
+namespace detail {
+
+bool onPoolThread() noexcept {
+    return tInPool;
+}
+
+void parallelForErased(size_t n, size_t grain,
+                       const std::function<void(size_t, size_t)>& fn) {
+    // The pool owns the chunking contract (grain clamping, cursor-based chunk
+    // order, caller participation and the completion/exception wait). Only the
+    // inline fast paths moved into the header template; this call must stay a
+    // thin forwarder so no scheduling semantics drift.
     Pool::instance().parallelFor(n, grain, fn);
 }
+
+} // namespace detail
 
 } // namespace lrc::parallel

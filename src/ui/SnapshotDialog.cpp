@@ -139,7 +139,9 @@ void SnapshotDialog::onApplyClicked() {
         okMessage(tr("无法读取该快照。"));
         return;
     }
-    emit applied(*adj);
+    // Publish the loaded snapshot as an immutable shared stack (see the signal
+    // contract in the header).
+    emit applied(std::make_shared<const lrc::Adjustments>(*adj));
     accept();  // applying closes the dialog (the develop view now reflects it)
 }
 

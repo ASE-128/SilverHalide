@@ -143,7 +143,10 @@ void PresetDialog::onApplyClicked() {
         okMessage(tr("无法读取该预设（文件可能已损坏或被移动）。"));
         return;
     }
-    emit applied(*preset);
+    // Publish the loaded preset as an immutable snapshot: the dialog's optional
+    // local goes away when this slot returns, so the receiver gets shared
+    // ownership instead of a reference to a temporary.
+    emit applied(std::make_shared<const lrc::Adjustments>(*preset));
     accept();  // applying closes the dialog (the develop view now reflects it)
 }
 

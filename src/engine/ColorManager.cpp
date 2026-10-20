@@ -37,8 +37,23 @@ thread_local std::vector<float> tlsScratch;
 
 } // namespace
 
+// Both deleters are the single teardown site for their handle type; they
+// replace the hand-written close calls of the old destructor. noexcept is part
+// of the contract: a deleter that throws inside a destructor would terminate.
+void ColorManager::CmsProfileDeleter::operator()(void* handle) const noexcept {
+    if (handle)
+        cmsCloseProfile(reinterpret_cast<cmsHPROFILE>(handle));
+}
+
+void ColorManager::CmsTransformDeleter::operator()(void* handle) const noexcept {
+    if (handle)
+        cmsDeleteTransform(reinterpret_cast<cmsHTRANSFORM>(handle));
+}
+
 ColorManager::ColorManager() {
-    srgb_ = cmsCreate_sRGBProfile();
+    // Each reset() adopts the freshly created handle; a null result (lcms
+    // allocation failure) simply leaves the member empty, as before.
+    srgb_.reset(cmsCreate_sRGBProfile());
 
     // Build a ProPhoto (ROMM RGB) profile from primaries + LINEAR TRC.
     // The pipeline works in linear light (gamma 1.0), so the working-space
@@ -55,7 +70,7 @@ ColorManager::ColorManager() {
     prim.Red.Y = prim.Green.Y = prim.Blue.Y = 1.0;
     cmsToneCurve* gamma = cmsBuildGamma(0, 1.0);
     cmsToneCurve* gammaRGB[3] = {gamma, gamma, gamma};
-    prophoto_ = cmsCreateRGBProfile(&d50, &prim, gammaRGB);
+    prophoto_.reset(cmsCreateRGBProfile(&d50, &prim, gammaRGB));
 
     // libraw's output_color=4 workspace: the same ProPhoto primaries but
     // anchored at the D65 white point (dcraw normalizes the working-space white
@@ -63,49 +78,37 @@ ColorManager::ColorManager() {
     // D50 ProPhoto working space via lcms.
     cmsCIExyY d65xyY{};
     cmsWhitePointFromTemp(&d65xyY, 6504.0);
-    dcrawProPhoto_ = cmsCreateRGBProfile(&d65xyY, &prim, gammaRGB);
+    dcrawProPhoto_.reset(cmsCreateRGBProfile(&d65xyY, &prim, gammaRGB));
     cmsFreeToneCurve(gamma);
 
-    display_ = srgb_;
+    // No display override has been loaded, so activeDisplayProfile() resolves
+    // to srgb_ - the same target the old "display_ = srgb_" alias expressed.
     rebuildTransforms();
 }
 
-ColorManager::~ColorManager() {
-    if (srgbToLinear_)
-        cmsDeleteTransform(srgbToLinear_);
-    if (linearToDisplay_)
-        cmsDeleteTransform(linearToDisplay_);
-    if (dcrawToProPhoto_)
-        cmsDeleteTransform(dcrawToProPhoto_);
-    if (prophoto_)
-        cmsCloseProfile(prophoto_);
-    if (dcrawProPhoto_)
-        cmsCloseProfile(dcrawProPhoto_);
-    // srgb_ may be shared with display_ when no display profile is loaded.
-    if (display_ && display_ != srgb_)
-        cmsCloseProfile(display_);
-    if (srgb_)
-        cmsCloseProfile(srgb_);
-}
+// The members' own destructors close every lcms handle (transforms first, then
+// profiles - see the declaration-order note in the header), so no manual
+// teardown is needed here.
+ColorManager::~ColorManager() = default;
 
 void ColorManager::rebuildTransforms() {
-    if (linearToDisplay_)
-        cmsDeleteTransform(linearToDisplay_);
-    linearToDisplay_ = cmsCreateTransform(
-        prophoto_, TYPE_RGB_FLT, display_, TYPE_RGB_FLT, INTENT_PERCEPTUAL,
-        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE);
-    if (srgbToLinear_)
-        cmsDeleteTransform(srgbToLinear_);
-    srgbToLinear_ = cmsCreateTransform(
-        srgb_, TYPE_RGB_8, prophoto_, TYPE_RGB_FLT, INTENT_PERCEPTUAL,
-        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE);
+    // reset() drops the previous transform and adopts the new one. This is
+    // called either from the constructor or under the exclusive lock in
+    // loadDisplayProfile, so no conversion can observe a half-replaced member.
+    linearToDisplay_.reset(cmsCreateTransform(
+        prophoto_.get(), TYPE_RGB_FLT, activeDisplayProfile(), TYPE_RGB_FLT,
+        INTENT_PERCEPTUAL,
+        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE));
+    srgbToLinear_.reset(cmsCreateTransform(
+        srgb_.get(), TYPE_RGB_8, prophoto_.get(), TYPE_RGB_FLT,
+        INTENT_PERCEPTUAL,
+        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE));
     // dcraw ProPhoto (D65) -> working ProPhoto (D50): independent of the display
     // profile, so it is (re)built alongside the others for symmetry.
-    if (dcrawToProPhoto_)
-        cmsDeleteTransform(dcrawToProPhoto_);
-    dcrawToProPhoto_ = cmsCreateTransform(
-        dcrawProPhoto_, TYPE_RGB_FLT, prophoto_, TYPE_RGB_FLT, INTENT_PERCEPTUAL,
-        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE);
+    dcrawToProPhoto_.reset(cmsCreateTransform(
+        dcrawProPhoto_.get(), TYPE_RGB_FLT, prophoto_.get(), TYPE_RGB_FLT,
+        INTENT_PERCEPTUAL,
+        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE));
 }
 
 void ColorManager::loadDisplayProfile(const std::filesystem::path& iccPath) {
@@ -133,18 +136,21 @@ void ColorManager::loadDisplayProfile(const std::filesystem::path& iccPath) {
         iccBytes.data(), static_cast<cmsUInt32Number>(iccBytes.size()));
     if (!candidate)
         return; // keep previous display profile
-    if (display_ && display_ != srgb_)
-        cmsCloseProfile(display_);
-    display_ = candidate;
+    // Adopt the candidate first: reset() closes the previously loaded display
+    // profile (if any), so consecutive calls neither leak nor double-close. The
+    // built-in sRGB profile is owned by srgb_ and is never closed here; when no
+    // override is loaded, activeDisplayProfile() falls back to it.
+    ownedDisplay_.reset(candidate);
     rebuildTransforms();
 }
 
 std::vector<uint8_t> ColorManager::exportProfileBytes(
     ExportColorProfile profile) {
-    cmsHPROFILE h = nullptr;
+    // Per-call profile; the owner closes it on every return path below.
+    CmsProfile h;
     switch (profile) {
         case ExportColorProfile::SRGB:
-            h = cmsCreate_sRGBProfile();
+            h.reset(cmsCreate_sRGBProfile());
             break;
         case ExportColorProfile::AdobeRGB: {
             // Adobe RGB (1998): primaries + D65 white point + 2.2-ish TRC.
@@ -157,7 +163,7 @@ std::vector<uint8_t> ColorManager::exportProfileBytes(
             };
             cmsToneCurve* gamma = cmsBuildGamma(nullptr, 2.2);
             cmsToneCurve* trc[3] = {gamma, gamma, gamma};
-            h = cmsCreateRGBProfile(&d65, &aPrimaries, trc);
+            h.reset(cmsCreateRGBProfile(&d65, &aPrimaries, trc));
             cmsFreeToneCurve(gamma);
             break;
         }
@@ -174,7 +180,7 @@ std::vector<uint8_t> ColorManager::exportProfileBytes(
             };
             cmsToneCurve* gamma = cmsBuildGamma(nullptr, 2.2);
             cmsToneCurve* trc[3] = {gamma, gamma, gamma};
-            h = cmsCreateRGBProfile(&d65, &p3Primaries, trc);
+            h.reset(cmsCreateRGBProfile(&d65, &p3Primaries, trc));
             cmsFreeToneCurve(gamma);
             break;
         }
@@ -183,16 +189,11 @@ std::vector<uint8_t> ColorManager::exportProfileBytes(
         return {};
 
     cmsUInt32Number size = 0;
-    if (!cmsSaveProfileToMem(h, nullptr, &size) || size == 0) {
-        cmsCloseProfile(h);
+    if (!cmsSaveProfileToMem(h.get(), nullptr, &size) || size == 0)
         return {};
-    }
     std::vector<uint8_t> bytes(static_cast<size_t>(size));
-    if (!cmsSaveProfileToMem(h, bytes.data(), &size)) {
-        cmsCloseProfile(h);
+    if (!cmsSaveProfileToMem(h.get(), bytes.data(), &size))
         return {};
-    }
-    cmsCloseProfile(h);
 
     // Pin the creation timestamp (ICC header offset 24: six big-endian uInt16
     // values — year, month, day, hour, minute, second). lcms stamps it with the
@@ -228,32 +229,32 @@ ImageBufferPtr ColorManager::sRGBEncodedToProfile(
     if (iccBytes.empty() || !srgb_)
         return clone();
 
-    cmsHPROFILE dst = cmsOpenProfileFromMem(
-        iccBytes.data(), static_cast<cmsUInt32Number>(iccBytes.size()));
+    // The caller's ICC bytes are the single source of truth for the target
+    // space, so a failed open falls back to a copy of the input.
+    CmsProfile dst(cmsOpenProfileFromMem(
+        iccBytes.data(), static_cast<cmsUInt32Number>(iccBytes.size())));
     if (!dst)
         return clone();
 
     const bool is16 = (enc.format() == PixelFormat::U16);
     const cmsUInt32Number fmt = is16 ? TYPE_RGB_16 : TYPE_RGB_8;
-    cmsHTRANSFORM t = cmsCreateTransform(
-        srgb_, fmt, dst, fmt, INTENT_RELATIVE_COLORIMETRIC,
-        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE);
-    cmsCloseProfile(dst);
+    CmsTransform t(cmsCreateTransform(
+        srgb_.get(), fmt, dst.get(), fmt, INTENT_RELATIVE_COLORIMETRIC,
+        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE));
     if (!t)
         return clone();
 
     auto out = ImageBuffer::create(enc.width(), enc.height(), enc.format());
     const cmsUInt32Number pixels = static_cast<cmsUInt32Number>(
         static_cast<size_t>(enc.width()) * static_cast<size_t>(enc.height()));
-    cmsDoTransform(t, enc.data().data(), out->data().data(), pixels);
-    cmsDeleteTransform(t);
+    cmsDoTransform(t.get(), enc.data().data(), out->data().data(), pixels);
     return out;
 }
 
 void ColorManager::linearProPhotoToSRGB(const float* src, float* dst,
                                         size_t pixelCount) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    cmsDoTransform(linearToDisplay_, src, dst, pixelCount);
+    cmsDoTransform(linearToDisplay_.get(), src, dst, pixelCount);
     const size_t n = pixelCount * 3;
     for (size_t i = 0; i < n; ++i)
         dst[i] = std::clamp(dst[i], 0.0f, 1.0f);
@@ -268,8 +269,8 @@ ImageBufferPtr ColorManager::srgbToLinearProPhoto(
     auto out = ImageBuffer::create(srgbU8.width(), srgbU8.height(),
                                    PixelFormat::F32);
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    cmsDoTransform(srgbToLinear_, srgbU8.data().data(), out->data().data(),
-                   pixelCount);
+    cmsDoTransform(srgbToLinear_.get(), srgbU8.data().data(),
+                   out->data().data(), pixelCount);
     return out;
 }
 
@@ -280,24 +281,28 @@ ImageBufferPtr ColorManager::sourceToLinearProPhoto(
         return ImageBuffer::create(0, 0, PixelFormat::F32);
 
     // Source colour space: the embedded ICC when present, else a documented
-    // sRGB fallback so ICC-less files behave exactly as before.
-    cmsHPROFILE source = nullptr;
+    // sRGB fallback so ICC-less files behave exactly as before. Owned per
+    // call, released on every return path.
+    CmsProfile source;
     if (!iccBytes.empty())
-        source = cmsOpenProfileFromMem(iccBytes.data(),
-                                       static_cast<cmsUInt32Number>(
-                                           iccBytes.size()));
+        source.reset(cmsOpenProfileFromMem(
+            iccBytes.data(),
+            static_cast<cmsUInt32Number>(iccBytes.size())));
     if (!source)
-        source = cmsCreate_sRGBProfile();
+        source.reset(cmsCreate_sRGBProfile());
 
     const cmsUInt32Number inType =
         (src.format() == PixelFormat::U16) ? TYPE_RGB_16 : TYPE_RGB_8;
     std::shared_lock<std::shared_mutex> lock(mutex_);
     // prophoto_ is immutable after construction; a per-call transform is cheap
     // for import-sized images (profiles are small, recreate per invocation and
-    // cache nothing).
-    cmsHTRANSFORM tr = cmsCreateTransform(
-        source, inType, prophoto_, TYPE_RGB_FLT, INTENT_PERCEPTUAL,
-        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE);
+    // cache nothing). The transform is declared after the lock on purpose:
+    // locals are destroyed in reverse order, so it is released before the
+    // shared lock is dropped - the same extent as the previous explicit
+    // cmsDeleteTransform call inside the lock scope.
+    CmsTransform tr(cmsCreateTransform(
+        source.get(), inType, prophoto_.get(), TYPE_RGB_FLT, INTENT_PERCEPTUAL,
+        cmsFLAGS_HIGHRESPRECALC | cmsFLAGS_NOOPTIMIZE | cmsFLAGS_NOCACHE));
 
     ImageBufferPtr out;
     if (tr) {
@@ -306,11 +311,9 @@ ImageBufferPtr ColorManager::sourceToLinearProPhoto(
             static_cast<size_t>(src.width()) * src.height();
         // 16-bit input is converted directly (TYPE_RGB_16), never truncated to
         // 8 bits first, so the extra precision survives the colour transform.
-        cmsDoTransform(tr, src.data().data(), out->data().data(),
+        cmsDoTransform(tr.get(), src.data().data(), out->data().data(),
                        static_cast<cmsUInt32Number>(pixelCount));
-        cmsDeleteTransform(tr);
     }
-    cmsCloseProfile(source);  // sRGB fallback and mem-opened profiles both free here.
 
     if (!out)
         return ImageBuffer::create(0, 0, PixelFormat::F32);
@@ -342,7 +345,8 @@ ImageBufferPtr ColorManager::fromDcrawProPhoto(
         std::vector<float> tmp(count * 3);
         {
             std::shared_lock<std::shared_mutex> lock(mutex_);
-            cmsDoTransform(dcrawToProPhoto_, src + begin * 3, tmp.data(),
+            cmsDoTransform(dcrawToProPhoto_.get(), src + begin * 3,
+                           tmp.data(),
                            static_cast<cmsUInt32Number>(count));
         }
         for (size_t i = 0; i < count; ++i) {
@@ -370,7 +374,8 @@ void ColorManager::srgbPixelToLinearProPhoto(uint8_t r, uint8_t g, uint8_t b,
     auto dst = ImageBuffer::create(1, 1, PixelFormat::F32);
 
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    cmsDoTransform(srgbToLinear_, src->data().data(), dst->data().data(), 1);
+    cmsDoTransform(srgbToLinear_.get(), src->data().data(),
+                   dst->data().data(), 1);
 
     const float* out = reinterpret_cast<const float*>(dst->data().data());
     lr = out[0];
@@ -414,7 +419,8 @@ ImageBufferPtr ColorManager::toDisplaySRGB(
             // chunks convert in parallel. Chunk sizes stay well below the
             // cmsUInt32Number pixel limit.
             std::shared_lock<std::shared_mutex> lock(mutex_);
-            cmsDoTransform(linearToDisplay_, src + begin * 3, tlsScratch.data(),
+            cmsDoTransform(linearToDisplay_.get(), src + begin * 3,
+                           tlsScratch.data(),
                            static_cast<cmsUInt32Number>(count));
         }
         for (size_t i = 0; i < count; ++i) {
@@ -428,7 +434,7 @@ ImageBufferPtr ColorManager::toDisplaySRGB(
     return out;
 }
 
-std::array<double, 9> ColorManager::xyzD65ToProPhoto() {
+std::array<double, 9> ColorManager::xyzD65ToProPhoto() noexcept {
     // M = XyzD50ToProPhoto * Bradford(D65->D50)
     std::array<double, 9> m{};
     for (int row = 0; row < 3; ++row) {
@@ -443,7 +449,7 @@ std::array<double, 9> ColorManager::xyzD65ToProPhoto() {
 }
 
 std::array<double, 9> ColorManager::cameraToProPhoto(
-    const std::array<double, 9>& camToXyzD65) {
+    const std::array<double, 9>& camToXyzD65) noexcept {
     const std::array<double, 9> xyzToPro =
         xyzD65ToProPhoto(); // XYZ(D65) -> ProPhoto
     std::array<double, 9> m{};

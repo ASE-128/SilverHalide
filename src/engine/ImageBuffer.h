@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace lrc {
@@ -60,19 +61,31 @@ public:
      *       throw exactly as the constructor does (see above). The returned
      *       pointer is non-null even for a 0 x 0 request.
      */
-    static std::shared_ptr<ImageBuffer> create(int width, int height,
-                                               PixelFormat format);
+    [[nodiscard]] static std::shared_ptr<ImageBuffer> create(
+        int width, int height, PixelFormat format);
 
     // --- metadata -------------------------------------------------------
-    int width() const { return width_; }
-    int height() const { return height_; }
-    int channels() const { return channels_; }
-    PixelFormat format() const { return format_; }
-    bool empty() const { return width_ == 0 || height_ == 0; }
-    size_t sizeBytes() const { return data_.size(); }
+    /**
+     * @brief Image metadata and raw storage accessors; none of them throw.
+     *
+     * width()/height() are the pixel dimensions, channels() is always 3, and
+     * empty() is true when either dimension is 0. sizeBytes() is the byte size
+     * of the underlying allocation (the exact extent of a well-formed buffer).
+     * The two data() overloads expose that same storage for serialization and
+     * bulk copies; they alias the bytes the typed views and pixel() read.
+     *
+     * @note All of these are noexcept: they only read member state, so they
+     *       are safe to call from a destructor or exception path.
+     */
+    int width() const noexcept { return width_; }
+    int height() const noexcept { return height_; }
+    int channels() const noexcept { return channels_; }
+    PixelFormat format() const noexcept { return format_; }
+    bool empty() const noexcept { return width_ == 0 || height_ == 0; }
+    size_t sizeBytes() const noexcept { return data_.size(); }
 
-    std::vector<uint8_t>& data() { return data_; }
-    const std::vector<uint8_t>& data() const { return data_; }
+    std::vector<uint8_t>& data() noexcept { return data_; }
+    const std::vector<uint8_t>& data() const noexcept { return data_; }
 
     // --- normalized pixel access ----------------------------------------
     /**
@@ -84,26 +97,77 @@ public:
      * @param y Row index in [0, height).
      * @param channel Channel index in [0, channels).
      * @return Normalized value, or 0.0 for out-of-range coordinates.
+     *
+     * @note Never throws: it only reads this buffer, so out-of-range input is
+     *       reported as 0.0 instead of an exception.
      */
-    float pixel(int x, int y, int channel) const;
+    float pixel(int x, int y, int channel) const noexcept;
 
     /**
      * @brief Writes a normalized [0,1] value into one channel.
      *
      * Same coordinate constraints as `pixel`; out-of-range writes are ignored.
+     *
+     * @note Never throws: this is a plain store into the existing allocation
+     *       (coordinates outside the buffer are dropped), so it cannot fail
+     *       with std::out_of_range / std::bad_alloc.
      */
-    void setPixel(int x, int y, int channel, float value);
+    void setPixel(int x, int y, int channel, float value) noexcept;
+
+    // --- typed F32 views -------------------------------------------------
+    /**
+     * @brief Read-only typed view over the interleaved F32 pixel storage.
+     *
+     * The span aliases the same bytes as data(), reinterpreted as float, with
+     * length width() * height() * channels(). Element index
+     * (y * width() + x) * channels() + c addresses exactly the value that
+     * pixel(x, y, c) returns, so a hot loop can hoist the format switch and
+     * the per-pixel bounds checks out of its body.
+     *
+     * @return A view of the storage when format() == F32 and the buffer is
+     *         non-empty; otherwise an empty span. This accessor never throws
+     *         and never allocates, so non-F32 and empty inputs are reported
+     *         through size() == 0 and the caller must check before indexing.
+     *
+     * @warning Non-owning view. It is invalidated by anything that
+     *          reallocates or resizes the buffer (construction, assignment,
+     *          data() mutation, conversion-producing operations) and must not
+     *          outlive the ImageBuffer. Concurrent reads through several
+     *          spans are fine as long as no thread mutates the buffer.
+     * @note Storage type, byte layout and PixelFormat values are unchanged;
+     *       this is a view, not a second representation.
+     * @note Never throws: it only wraps the existing bytes in a span.
+     */
+    std::span<const float> asFloatSpan() const noexcept;
+
+    /**
+     * @brief Mutable typed view over the interleaved F32 pixel storage.
+     *
+     * Same layout and length contract as asFloatSpan(). Writing span[i] is
+     * equivalent to setPixel(x, y, c, v) for the matching index, minus the
+     * per-write format switch.
+     *
+     * @return A writable view when format() == F32 and the buffer is
+     *         non-empty; otherwise an empty span (checked with size() == 0).
+     *
+     * @warning Requires exclusive access to this buffer: no other thread may
+     *          read or write it while the span is in use. The view must not
+     *          outlive the ImageBuffer or survive any reallocation.
+     * @note Never throws: it only wraps the existing bytes in a span.
+     */
+    std::span<float> asMutableFloatSpan() noexcept;
 
     // --- operations returning new buffers --------------------------------
-    std::shared_ptr<ImageBuffer> crop(int x, int y, int width,
-                                      int height) const;
+    [[nodiscard]] std::shared_ptr<ImageBuffer> crop(int x, int y, int width,
+                                                    int height) const;
 
     /**
      * @brief Area-average downscale / nearest upscale.
      *
      * The safe path for previews. Preserves the source PixelFormat.
      */
-    std::shared_ptr<ImageBuffer> resize(int newWidth, int newHeight) const;
+    [[nodiscard]] std::shared_ptr<ImageBuffer> resize(int newWidth,
+                                                     int newHeight) const;
 
     /**
      * @brief Area-average downscale into a float buffer.
@@ -113,7 +177,8 @@ public:
      * precision-losing F32->U16->F32 roundtrip that "resize then toF32" would
      * incur for a U16 source.
      */
-    std::shared_ptr<ImageBuffer> resizeToF32(int newWidth, int newHeight) const;
+    [[nodiscard]] std::shared_ptr<ImageBuffer> resizeToF32(
+        int newWidth, int newHeight) const;
 
     /**
      * @brief Converts to a display-ready U8 sRGB buffer.
@@ -121,12 +186,13 @@ public:
      * @param cm Color manager used for the colour transform.
      * @return New U8 sRGB buffer.
      */
-    std::shared_ptr<ImageBuffer> to8bitSRGB(const ColorManager& cm) const;
+    [[nodiscard]] std::shared_ptr<ImageBuffer> to8bitSRGB(
+        const ColorManager& cm) const;
 
     /**
      * @brief Converts this buffer to an equal-sized F32 buffer.
      */
-    std::shared_ptr<ImageBuffer> toF32() const;
+    [[nodiscard]] std::shared_ptr<ImageBuffer> toF32() const;
 
     /**
      * @brief Converts this buffer to an equal-sized U16 buffer.
@@ -134,7 +200,7 @@ public:
      * F32/U8 channel values are clamped to [0,1] and scaled to the U16
      * range; an already-U16 source is copied unchanged.
      */
-    std::shared_ptr<ImageBuffer> toU16() const;
+    [[nodiscard]] std::shared_ptr<ImageBuffer> toU16() const;
 
 private:
     // Shared area-average core; `format` selects the output storage type.

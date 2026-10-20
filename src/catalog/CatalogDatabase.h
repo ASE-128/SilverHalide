@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -134,9 +135,9 @@ struct SmartCollection {
  * @return true when the predicate matches; an empty/invalid rule set never
  *         matches.
  */
-bool evaluatePredicate(const json::Value& predicate, const ImageRecord& img,
-                       const std::vector<std::string>& keywords,
-                       bool hasAdjustments);
+[[nodiscard]] bool evaluatePredicate(
+    const json::Value& predicate, const ImageRecord& img,
+    const std::vector<std::string>& keywords, bool hasAdjustments);
 
 // Filters for listImages(). Default (all zeros/empty) returns every image.
 struct ImageFilter {
@@ -185,14 +186,25 @@ public:
      *
      * @return true on success; false leaves lastError() populated.
      */
-    bool open();
+    [[nodiscard]] bool open();
     void close();  ///< Closes the connection and releases all cached statements.
-    bool isOpen() const { return db_ != nullptr; }
+    /** @brief True while the SQLite connection is open.
+     *
+     * @note noexcept: a null check on the stored handle, no lock and no
+     *       allocation, so it is safe from any thread (it may observe a
+     *       concurrent open()/close() as either state).
+     */
+    bool isOpen() const noexcept { return db_ != nullptr; }
     std::string lastError() const { return lastError_; }
-    // Number of prepared statements currently held in the reuse cache.
-    // Observability hook used by the tests to confirm statements are cached
-    // and reused rather than re-prepared on every call.
-    size_t stmtCacheSize() const { return stmtCache_.size(); }
+    /** @brief Number of prepared statements currently held in the reuse cache.
+     *
+     *  Observability hook used by the tests to confirm statements are cached
+     *  and reused rather than re-prepared on every call.
+     *
+     *  @note noexcept: reads the cache size only. Like the historical
+     *        implementation it takes no lock, so it is a best-effort probe.
+     */
+    size_t stmtCacheSize() const noexcept { return stmtCache_.size(); }
 
     // --- images ----------------------------------------------------------
     /**
@@ -215,8 +227,8 @@ public:
     bool setFingerprint(int64_t id, int64_t fileSize, int64_t fileMtime);
     // Returns the ids whose stored fingerprint no longer matches the given
     // (size, mtime) — i.e. externally modified files to re-import / re-decode.
-    std::vector<int64_t> detectModifiedImages(int64_t fileSize,
-                                              int64_t fileMtime) const;
+    [[nodiscard]] std::vector<int64_t> detectModifiedImages(
+        int64_t fileSize, int64_t fileMtime) const;
     bool setRating(int64_t id, int rating);
     bool setLabelColor(int64_t id, int color);
     bool setFlag(int64_t id, int flag);
@@ -244,15 +256,26 @@ public:
      * @return nullopt when the image is absent or has not been pregraded
      *         (stored score == -1).
      */
-    std::optional<PregradeRecord> getPregrade(int64_t id) const;
+    [[nodiscard]] std::optional<PregradeRecord> getPregrade(int64_t id) const;
 
     bool removeImage(int64_t id);
-    std::vector<ImageRecord> listImages() const;
+    [[nodiscard]] std::vector<ImageRecord> listImages() const;
     // Filtered listing (empty/default filter returns everything).
-    std::vector<ImageRecord> listImages(const ImageFilter& filter) const;
-    std::optional<ImageRecord> findImageByPath(const std::string& filePath) const;
+    [[nodiscard]] std::vector<ImageRecord> listImages(
+        const ImageFilter& filter) const;
+    /** @brief Looks up an image by its exact stored file path.
+     *
+     *  @param filePath Path to match. It is only read during the call (SQLite
+     *         copies the bytes via SQLITE_TRANSIENT), so it does not need to
+     *         be NUL-terminated and may be empty, in which case nothing
+     *         matches.
+     *  @return The matching row, or nullopt when the database is closed or no
+     *          row has that path.
+     */
+    [[nodiscard]] std::optional<ImageRecord> findImageByPath(
+        std::string_view filePath) const;
     /** Look up a single image by primary key. Empty when id <= 0 or absent. */
-    std::optional<ImageRecord> findImageById(int64_t id) const;
+    [[nodiscard]] std::optional<ImageRecord> findImageById(int64_t id) const;
     /** Updates the stored file path for an image after a rename/move on disk.
      *  Returns false when `newFilePath` already belongs to another row (would
      *  violate the UNIQUE(file_path) constraint) or the image is absent. */
@@ -272,16 +295,16 @@ public:
                       int width = 0, int height = 0);
     // Returns the embedded preview bytes by reading the externalized file, or
     // nullopt when absent.
-    std::optional<std::vector<uint8_t>> loadPreview(
+    [[nodiscard]] std::optional<std::vector<uint8_t>> loadPreview(
         int64_t imageId, PreviewKind kind) const;
     // Embedded preview pixel dimensions (0,0 when not recorded), or nullopt
     // when the preview is absent.
-    std::optional<std::pair<int, int>> previewSize(
+    [[nodiscard]] std::optional<std::pair<int, int>> previewSize(
         int64_t imageId, PreviewKind kind) const;
     // Absolute path of the externalized preview file for (imageId, kind), or
     // nullopt when it is not recorded. Callers that read the bytes themselves
     // (e.g. mmap / streaming) can use this to skip the byte round-trip.
-    std::optional<std::filesystem::path> previewFilePath(
+    [[nodiscard]] std::optional<std::filesystem::path> previewFilePath(
         int64_t imageId, PreviewKind kind) const;
 
     // --- standard preview --------------------------------------------------
@@ -302,8 +325,8 @@ public:
      *         record) or when the stored blob is malformed. Never crashes on a
      *         corrupt record.
      */
-    std::optional<std::shared_ptr<ImageBuffer>> getStandardPreview(
-        int64_t imageId) const;
+    [[nodiscard]] std::optional<std::shared_ptr<ImageBuffer>>
+    getStandardPreview(int64_t imageId) const;
 
     /** @brief Like getStandardPreview but also returns the native full-res
      *         dimensions carried in the v2 blob header (0 for v1 blobs).
@@ -315,12 +338,12 @@ public:
         int nativeWidth = 0;
         int nativeHeight = 0;
     };
-    std::optional<DecodedStandardPreviewEntry> getStandardPreviewWithMeta(
-        int64_t imageId) const;
+    [[nodiscard]] std::optional<DecodedStandardPreviewEntry>
+    getStandardPreviewWithMeta(int64_t imageId) const;
 
     // True when a Standard preview record exists for the image (regardless of
     // whether its blob is decodable -- use getStandardPreview to check that).
-    bool hasStandardPreview(int64_t imageId) const;
+    [[nodiscard]] bool hasStandardPreview(int64_t imageId) const;
 
     // Removes every preview row (embedded thumb/full-res and standard) for the
     // image. Called when the source file is modified in place so a stale
@@ -335,7 +358,16 @@ public:
 
     // --- settings (catalog-level key/value state) -------------------------
     bool setSetting(const std::string& key, const std::string& value);
-    std::optional<std::string> getSetting(const std::string& key) const;
+    /** @brief Reads a catalog-level setting.
+     *
+     *  @param key Setting key. Only read during the call (SQLite copies it),
+     *         so a string literal, a temporary or an empty view is fine; an
+     *         empty key matches nothing.
+     *  @return The stored value, or nullopt when the key is absent or the
+     *          database is closed.
+     */
+    [[nodiscard]] std::optional<std::string> getSetting(
+        std::string_view key) const;
 
     // --- edits (non-destructive parameter stack) -------------------------
     /**
@@ -350,20 +382,21 @@ public:
      */
     bool saveAdjustments(int64_t imageId, const Adjustments& adjustments,
                          int variantId = 0);
-    std::optional<Adjustments> loadAdjustments(int64_t imageId,
-                                               int variantId = 0) const;
+    [[nodiscard]] std::optional<Adjustments> loadAdjustments(
+        int64_t imageId, int variantId = 0) const;
 
     // --- edit history (undo snapshots, newest last) -----------------------
     // `name` labels a snapshot. Empty names produce ordinary unlabelled
     // undo-history entries (the automatic saveAdjustments() path); non-empty
     // names mark user-created snapshots shown by the snapshot panel.
-    int64_t saveEditSnapshot(int64_t imageId, const Adjustments& adjustments,
-                             int variantId = 0, const std::string& name = {});
-    std::vector<EditSnapshot> listEditHistory(int64_t imageId,
-                                              int variantId = 0) const;
-    std::optional<Adjustments> loadEditSnapshot(int64_t imageId,
-                                                int64_t snapshotId,
-                                                int variantId = 0) const;
+    int64_t saveEditSnapshot(int64_t imageId,
+                                          const Adjustments& adjustments,
+                                          int variantId = 0,
+                                          const std::string& name = {});
+    [[nodiscard]] std::vector<EditSnapshot> listEditHistory(
+        int64_t imageId, int variantId = 0) const;
+    [[nodiscard]] std::optional<Adjustments> loadEditSnapshot(
+        int64_t imageId, int64_t snapshotId, int variantId = 0) const;
     bool deleteEditSnapshot(int64_t imageId, int64_t snapshotId,
                             int variantId = 0);
     // Renames a history/snapshot record (used by the snapshot panel). Returns
@@ -383,7 +416,7 @@ public:
      */
     int createVirtualCopy(int64_t imageId);
     // Lists the virtual copies (including the master) registered for an image.
-    std::vector<EditVariant> listVariants(int64_t imageId) const;
+    [[nodiscard]] std::vector<EditVariant> listVariants(int64_t imageId) const;
     bool renameVariant(int64_t imageId, int variantId,
                        const std::string& name);
     // Deletes a virtual copy (its edits/history/variant row). Deleting the
@@ -391,24 +424,27 @@ public:
     bool deleteVariant(int64_t imageId, int variantId);
 
     // --- folders ---------------------------------------------------------
-    int64_t addFolder(const std::string& folderPath, int64_t parentId = 0);
-    std::vector<std::string> listFolders() const;
+    int64_t addFolder(const std::string& folderPath,
+                                    int64_t parentId = 0);
+    [[nodiscard]] std::vector<std::string> listFolders() const;
 
     // --- collections (albums / favorites) ---------------------------------
     // Creates a named collection. Returns the new id, or -1 on failure.
     int64_t createCollection(const std::string& name);
     bool renameCollection(int64_t collectionId, const std::string& newName);
     bool deleteCollection(int64_t collectionId);      // cascades to members
-    std::vector<Collection> listCollections() const;  // order by sort_order, then id
+    [[nodiscard]] std::vector<Collection> listCollections() const;  // order by sort_order, then id
     bool addToCollection(int64_t collectionId, int64_t imageId);  // idempotent
     bool removeFromCollection(int64_t collectionId, int64_t imageId);
-    bool isImageInCollection(int64_t collectionId, int64_t imageId) const;
-    std::vector<ImageRecord> listImagesInCollection(int64_t collectionId) const;
+    [[nodiscard]] bool isImageInCollection(int64_t collectionId,
+                                           int64_t imageId) const;
+    [[nodiscard]] std::vector<ImageRecord> listImagesInCollection(
+        int64_t collectionId) const;
     // Single-query replacement for the N+1 pattern (calling
     // listImagesInCollection() once per collection, as refreshFilmstrip did).
     // Returns imageId -> the collection ids that contain it; images that
     // belong to no collection are absent from the map.
-    std::unordered_map<int64_t, std::vector<int64_t>>
+    [[nodiscard]] std::unordered_map<int64_t, std::vector<int64_t>>
     listCollectionMemberships() const;
 
     // --- keywords & metadata -----------------------------------------------
@@ -418,44 +454,54 @@ public:
     // Assigns / removes a keyword on an image (both idempotent).
     bool assignKeyword(int64_t imageId, int64_t keywordId);
     bool removeKeyword(int64_t imageId, int64_t keywordId);
-    std::vector<int64_t> keywordsForImage(int64_t imageId) const;
-    std::vector<KeywordInfo> listKeywords() const;
+    [[nodiscard]] std::vector<int64_t> keywordsForImage(int64_t imageId) const;
+    [[nodiscard]] std::vector<KeywordInfo> listKeywords() const;
     // Images tagged with `keywordId` or any descendant keyword.
-    std::vector<int64_t> findImagesByKeyword(int64_t keywordId) const;
+    [[nodiscard]] std::vector<int64_t> findImagesByKeyword(
+        int64_t keywordId) const;
     bool setPhotoMetadata(int64_t imageId, const std::string& title,
                           const std::string& caption,
                           const std::string& copyright,
                           const std::string& creator,
                           const std::string& dateTaken);
-    PhotoMetadata getPhotoMetadata(int64_t imageId) const;
-    // LIKE search over title / caption / keyword names for the search box.
-    std::vector<ImageRecord> searchImages(const std::string& text) const;
+    [[nodiscard]] PhotoMetadata getPhotoMetadata(int64_t imageId) const;
+    /** @brief LIKE / FTS search over title, caption, file name and keywords.
+     *
+     *  @param text Search text. Only read during the call (tokens are copied
+     *         into the FTS query internally); an empty view returns no rows,
+     *         which matches the pre-existing behavior.
+     *  @return Matching rows, newest first.
+     */
+    [[nodiscard]] std::vector<ImageRecord> searchImages(
+        std::string_view text) const;
 
     // --- smart collections ---------------------------------------------------
     // Creates a rule-based collection. `matchType` is "ALL" or "ANY"; the
     // matching mode is also injected into `predicateJson` so the evaluator is
     // self-contained. The member set is refreshed immediately. Returns the new
     // id, or -1 on failure.
-    int64_t createSmartCollection(const std::string& name,
-                                  const std::string& predicateJson,
-                                  const std::string& matchType);
+    int64_t createSmartCollection(
+        const std::string& name, const std::string& predicateJson,
+        const std::string& matchType);
     bool updateSmartCollection(int64_t id, const std::string& name,
                                const std::string& predicateJson,
                                const std::string& matchType);
     bool deleteSmartCollection(int64_t id); // cascades to members
-    std::vector<SmartCollection> listSmartCollections() const;
+    [[nodiscard]] std::vector<SmartCollection> listSmartCollections() const;
     // Recomputes the members of a smart collection by evaluating every image
     // against its predicate. Returns the number of matching images, or -1 on
     // failure.
     int refreshSmartCollection(int64_t id);
-    std::vector<int64_t> listImagesInSmartCollection(int64_t id) const;
+    [[nodiscard]] std::vector<int64_t> listImagesInSmartCollection(
+        int64_t id) const;
 
     // --- panorama sources ----------------------------------------------------
     // Records (replacing) the source images that produced a panorama. Calling
     // twice with the same set is a no-op.
     bool recordPanoramaSources(int64_t panoramaImageId,
                                const std::vector<int64_t>& sourceImageIds);
-    std::vector<int64_t> listPanoramaSources(int64_t panoramaImageId) const;
+    [[nodiscard]] std::vector<int64_t> listPanoramaSources(
+        int64_t panoramaImageId) const;
 
     // --- photo_features (duplicate detection / stacking) --------------------
     // pHash (64-bit perceptual), 64-dim embedding (raw BLOB), and an
@@ -475,7 +521,8 @@ public:
         int modelVersion = 0;
         std::vector<float> embedding;
     };
-    std::optional<PhotoFeatureRow> getPhotoFeatures(int64_t imageId) const;
+    [[nodiscard]] std::optional<PhotoFeatureRow> getPhotoFeatures(
+        int64_t imageId) const;
     // Returns image_ids whose phash hamming distance <= `maxHamming` against
     // every row in the catalog — the call site then re-ranks by embedding
     // cosine distance (so distances larger than maxHamming never reach the
@@ -486,14 +533,14 @@ public:
         int64_t bId;
         int hamming;
     };
-    std::vector<PhashCandidatePair> scanPhashCandidates(
+    [[nodiscard]] std::vector<PhashCandidatePair> scanPhashCandidates(
         int maxHamming = 8) const;
     // Approximate nearest neighbours in the 64-dim embedding space via the
     // sqlite-vec vec0 virtual table. Returns the k closest image ids
     // ordered by ascending distance, or empty when the vec index is
     // unavailable (sqlite-vec not linked) or has no data.
-    std::vector<int64_t> annByEmbedding(const std::vector<float>& query,
-                                        int k = 200) const;
+    [[nodiscard]] std::vector<int64_t> annByEmbedding(
+        const std::vector<float>& query, int k = 200) const;
     // Rebuilds the derived search data (keyword/phash-segment/embedding
     // indices). Returns false only when the database is closed.
     bool rebuildSearchIndexes();
@@ -501,7 +548,7 @@ public:
     bool setStackId(int64_t imageId, int64_t stackId);
     // Returns every image id belonging to the same stack (including the
     // passed-in id itself).  Empty when the image is not in a stack.
-    std::vector<int64_t> getStackMembers(int64_t stackId) const;
+    [[nodiscard]] std::vector<int64_t> getStackMembers(int64_t stackId) const;
     // Next available stack id: MAX(stack_id) + 1 from the rows that are
     // stacked at all, or 1 when no stack has ever been created.
     int64_t nextStackId() const;
@@ -554,7 +601,7 @@ private:
     void ensureEditsVariant();
     // True when the image has a variant-0 edit that differs from the defaults.
     bool hasNonDefaultEdits(int64_t imageId);
-    bool isInTransaction() const { return inTransaction_; }
+    bool isInTransaction() const noexcept { return inTransaction_; }
     // Shared insert body for addImage; `errOut` selects the error slot.
     int64_t addImageImpl(sqlite3* db, const std::string& filePath,
                          const std::string& thumbnailPath, bool isManaged,

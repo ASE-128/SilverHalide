@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -256,7 +257,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
         current_.curve.clear();
         curveEditor_->resetToLinear();
         scheduleDebounce();
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(curveEditor_, &CurveEditor::curveChanged, this,
             [this](const std::vector<lrc::ToneCurvePoint>& points) {
@@ -277,7 +278,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     });
     connect(curveEditor_, &CurveEditor::editingFinished, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
 
     // Detail section.
@@ -464,7 +465,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     wheelsRow->addWidget(shadowWheel_, 1);
     st->addLayout(wheelsRow);
 
-    auto commitFromWheel = [this]() { emit adjustmentsCommitted(current_); };
+    auto commitFromWheel = [this]() { emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_)); };
     wheelCommit_.setSingleShot(true);
     wheelCommit_.setInterval(lrc::app::throttle::kColorWheelCommitMs);
     connect(&wheelCommit_, &QTimer::timeout, this, commitFromWheel);
@@ -624,7 +625,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                 current_.vignetteStyle = std::clamp(index, 0, 2);
                 scheduleDebounce();
                 if (!dragging_)
-                    emit adjustmentsCommitted(current_);
+                    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
             });
 
     // Lens correction section.
@@ -684,7 +685,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                 // Specific notification first (MainWindow surfaces it to the
                 // user), then the generic commit that persists + re-renders.
                 emit lensfunEnabledChanged(checked);
-                emit adjustmentsCommitted(current_);
+                emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
             });
 
     // Mask (local adjustments) section.
@@ -813,12 +814,12 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                 onMaskFeatherChanged(v);
                 // Keyboard edits never release the slider, so commit here too.
                 if (!suppressSignals_ && !dragging_)
-                    emit adjustmentsCommitted(current_);
+                    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
             });
     connectSliderGesture(maskFeatherSlider_);
     connect(maskFeatherSlider_, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(maskFeatherSpin_,
             QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
@@ -827,7 +828,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
             });
     connect(maskFeatherSpin_, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
 
     // Brush size row (shown for brush masks): slider 0..10000 -> radius /20000
@@ -934,13 +935,13 @@ DevelopPanel::DevelopPanel(QWidget* parent)
         connectSliderGesture(slider);
         connect(slider, &QSlider::sliderReleased, this, [this]() {
             if (!suppressSignals_)
-                emit adjustmentsCommitted(current_);
+                emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
         });
         connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 this, &DevelopPanel::onColorRangeToleranceSpin);
         connect(spin, &QDoubleSpinBox::editingFinished, this, [this]() {
             if (!suppressSignals_)
-                emit adjustmentsCommitted(current_);
+                emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
         });
     };
     connectColorTolerance(colorHueSlider_, colorHueSpin_);
@@ -1037,7 +1038,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connectSliderGesture(subColorRangeSlider_);
     connect(subColorRangeSlider_, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(subColorRangeSpin_,
             QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
@@ -1045,14 +1046,14 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(subColorRangeSpin_, &QDoubleSpinBox::editingFinished, this,
             [this]() {
                 if (!suppressSignals_)
-                    emit adjustmentsCommitted(current_);
+                    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
             });
     connect(subColorSmoothSlider_, &QSlider::valueChanged, this,
             &DevelopPanel::onSubColorSmoothSlider);
     connectSliderGesture(subColorSmoothSlider_);
     connect(subColorSmoothSlider_, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(subColorSmoothSpin_,
             QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
@@ -1060,7 +1061,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(subColorSmoothSpin_, &QDoubleSpinBox::editingFinished, this,
             [this]() {
                 if (!suppressSignals_)
-                    emit adjustmentsCommitted(current_);
+                    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
             });
 
     connect(subLumaEnableCheck_, &QCheckBox::toggled, this,
@@ -1072,7 +1073,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connectSliderGesture(subLumaRangeSlider_);
     connect(subLumaRangeSlider_, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(subLumaRangeSpin_,
             QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
@@ -1080,14 +1081,14 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(subLumaRangeSpin_, &QDoubleSpinBox::editingFinished, this,
             [this]() {
                 if (!suppressSignals_)
-                    emit adjustmentsCommitted(current_);
+                    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
             });
     connect(subLumaSmoothSlider_, &QSlider::valueChanged, this,
             &DevelopPanel::onSubLumaSmoothSlider);
     connectSliderGesture(subLumaSmoothSlider_);
     connect(subLumaSmoothSlider_, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(subLumaSmoothSpin_,
             QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
@@ -1095,7 +1096,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     connect(subLumaSmoothSpin_, &QDoubleSpinBox::editingFinished, this,
             [this]() {
                 if (!suppressSignals_)
-                    emit adjustmentsCommitted(current_);
+                    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
             });
 
     connect(subUnionCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -1120,12 +1121,12 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                 onMaskOpacityChanged(v);
                 // Keyboard edits never release the slider, so commit here too.
                 if (!suppressSignals_ && !dragging_)
-                    emit adjustmentsCommitted(current_);
+                    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
             });
     connectSliderGesture(maskOpacitySlider_);
     connect(maskOpacitySlider_, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
 
     maskInvertCheck_ = new QCheckBox(tr("反转蒙版"), this);
@@ -1330,7 +1331,7 @@ void DevelopPanel::addRow(Row row) {
             });
     connect(r.slider, &QSlider::sliderReleased, this, [this, index]() {
         if (!suppressSignals_ && index < rows_.size())
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
         // Restore the normal preview once the Alt-drag ends.
         if (vizActive_)
             clearAltVisualization();
@@ -1343,7 +1344,7 @@ void DevelopPanel::addRow(Row row) {
     connect(r.spin, &QDoubleSpinBox::editingFinished, this,
             [this, index]() {
                 if (!suppressSignals_ && index < rows_.size())
-                    emit adjustmentsCommitted(current_);
+                    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
             });
     connectSliderGesture(r.slider);
     syncRow(rows_[index]);
@@ -1377,7 +1378,7 @@ void DevelopPanel::addHSLRow(int colorIndex, HSLRow row) {
             });
     connect(r.slider, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(r.spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, [this, ci, idx](double v) {
@@ -1387,7 +1388,7 @@ void DevelopPanel::addHSLRow(int colorIndex, HSLRow row) {
             });
     connect(r.spin, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connectSliderGesture(r.slider);
     syncHSLRow(colorIndex, r);
@@ -1405,7 +1406,7 @@ void DevelopPanel::addSplitToneRow(SplitToneRow row) {
             });
     connect(r.slider, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(r.spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, [this, index](double v) {
@@ -1414,7 +1415,7 @@ void DevelopPanel::addSplitToneRow(SplitToneRow row) {
             });
     connect(r.spin, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connectSliderGesture(r.slider);
     syncSplitToneRow(r);
@@ -1434,7 +1435,7 @@ void DevelopPanel::addMaskRow(MaskRow row) {
             });
     connect(r.slider, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(r.spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, [this, index](double v) {
@@ -1443,7 +1444,7 @@ void DevelopPanel::addMaskRow(MaskRow row) {
             });
     connect(r.spin, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connectSliderGesture(r.slider);
     syncMaskRow(r);
@@ -1466,7 +1467,7 @@ void DevelopPanel::onMaskSliderChanged(const MaskRow& row, int value) {
     // so persist + push one undo entry here as well. While dragging (dragging_
     // true) the sliderReleased path owns the commit.
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onMaskSpinChanged(const MaskRow& row, double value) {
@@ -1548,7 +1549,7 @@ void DevelopPanel::activateMaskTool(lrc::MaskType tool) {
             // Fresh colour-range mask: type set, reference absent (inert until
             // a colour is sampled).
             m.type = lrc::MaskType::ColorRange;
-            m.color = lrc::ColorRangeMask{};
+            m.color() = lrc::ColorRangeMask{};
             break;
         default:
             m.type = tool;
@@ -1599,12 +1600,12 @@ void DevelopPanel::addAiMask(lrc::AiMaskTarget target) {
     }
     lrc::Mask m;
     m.type = lrc::MaskType::AiMask;
-    m.ai.target = target;
-    m.ai.threshold = 0.5f;
-    m.ai.feather = 0.05f;
-    m.ai.invert = false;
-    m.ai.modelInputSize = 1024;
-    m.ai.cachedWeightVersion = 1;  // >0: distinct from a default-constructed
+    m.ai().target = target;
+    m.ai().threshold = 0.5f;
+    m.ai().feather = 0.05f;
+    m.ai().invert = false;
+    m.ai().modelInputSize = 1024;
+    m.ai().cachedWeightVersion = 1;  // >0: distinct from a default-constructed
                                    // mask so geometryHash treats it as set
     current_.masks.push_back(m);
     activeMaskTool_ = lrc::MaskType::AiMask;
@@ -1692,7 +1693,7 @@ void DevelopPanel::onMaskDelete() {
     emit maskEditRequested(lrc::Mask{}, -1);
     emit maskToolActivated(lrc::MaskType::None);
     scheduleDebounce();
-    emit adjustmentsCommitted(current_);
+    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onMaskOpacityChanged(int value) {
@@ -1714,7 +1715,7 @@ void DevelopPanel::onMaskInvertToggled(bool checked) {
     // A checkbox toggle never releases a slider, so persist it explicitly
     // (previously lost on image switch).
     if (!suppressSignals_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onMaskFeatherChanged(int value) {
@@ -1724,11 +1725,11 @@ void DevelopPanel::onMaskFeatherChanged(int value) {
     lrc::Mask& m = current_.masks[static_cast<size_t>(idx)];
     const float f = static_cast<float>(value) / 10000.0f;
     if (m.type == lrc::MaskType::LinearGradient)
-        m.linear.feather = f;
+        m.linear().feather = f;
     else if (m.type == lrc::MaskType::RadialGradient)
-        m.radial.feather = f;
+        m.radial().feather = f;
     else if (m.type == lrc::MaskType::AiMask)
-        m.ai.feather = f;
+        m.ai().feather = f;
     else
         return;
     // Keep the slider and spin in sync (spin shows 0..100, slider 0..10000).
@@ -1784,7 +1785,7 @@ void DevelopPanel::adjustExposure(double deltaEv) {
                 row.spin->setValue(rounded);
             }
             scheduleDebounce();
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
         }
         break;
     }
@@ -1803,12 +1804,10 @@ void DevelopPanel::updateMaskGeometry(int index, const lrc::Mask& mask) {
         return;
     lrc::Mask& dst = current_.masks[static_cast<size_t>(index)];
     // Copy geometry only; keep the local adjustment values + opacity that the
-    // panel owns so the viewport's draft can't clobber the sliders.
-    dst.type = mask.type;
-    dst.linear = mask.linear;
-    dst.radial = mask.radial;
-    dst.brush = mask.brush;
-    dst.invert = mask.invert;
+    // panel owns so the viewport's draft can't clobber the sliders. The helper
+    // copies type + invert + the resident linear/radial/brush geometry, which
+    // matches the previous field-by-field sync.
+    dst.copyGeometryFrom(mask);
     scheduleDebounce();
     // Coalesce the commit while the stroke is in flight. Every mouse move reaches
     // here, and emitting adjustmentsCommitted per move made MainWindow re-sync
@@ -1831,7 +1830,7 @@ void DevelopPanel::flushMaskGeometryCommit() {
         return;
     maskGeometryDirty_ = false;
     if (!suppressSignals_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::syncMaskRow(const MaskRow& row) {
@@ -1869,11 +1868,11 @@ void DevelopPanel::syncMaskSliders() {
     if (has) {
         const lrc::Mask& m = current_.masks[static_cast<size_t>(idx)];
         if (m.type == lrc::MaskType::LinearGradient)
-            feather = m.linear.feather;
+            feather = m.linear().feather;
         else if (m.type == lrc::MaskType::RadialGradient)
-            feather = m.radial.feather;
+            feather = m.radial().feather;
         else if (m.type == lrc::MaskType::AiMask)
-            feather = m.ai.feather;
+            feather = m.ai().feather;
     }
     {
         const QSignalBlocker b1(maskFeatherSlider_);
@@ -1900,7 +1899,7 @@ void DevelopPanel::syncMaskSection() {
             const lrc::Mask& mask = current_.masks[i];
             QString label;
             if (mask.type == lrc::MaskType::AiMask) {
-                switch (mask.ai.target) {
+                switch (mask.ai().target) {
                     case lrc::AiMaskTarget::Subject:
                         label = tr("AI 主体");
                         break;
@@ -1946,9 +1945,11 @@ void DevelopPanel::updateMaskSectionVisibility() {
         // brush), not the standalone colour-range mask.
         showSubRange = has && t != lrc::MaskType::None &&
                        t != lrc::MaskType::ColorRange;
-        showPrompt = (t == lrc::MaskType::AiMask &&
-                      current_.masks[static_cast<size_t>(idx)].ai.target ==
-                          lrc::AiMaskTarget::Prompt);
+        showPrompt =
+            (t == lrc::MaskType::AiMask &&
+             std::as_const(current_.masks[static_cast<size_t>(idx)])
+                     .ai()
+                     .target == lrc::AiMaskTarget::Prompt);
     }
     maskFeatherRow_->setVisible(showFeather);
     maskBrushRow_->setVisible(showBrush);
@@ -1999,16 +2000,16 @@ void DevelopPanel::onColorRangeToleranceSlider(int value) {
 
     QDoubleSpinBox* spin = nullptr;
     if (sender() == colorHueSlider_) {
-        m.color.hueTolerance = static_cast<double>(value) / 100.0;  // degrees.
+        m.color().hueTolerance = static_cast<double>(value) / 100.0;  // degrees.
         spin = colorHueSpin_;
     } else if (sender() == colorSatSlider_) {
-        m.color.satTolerance = static_cast<double>(value) / 10000.0;
+        m.color().satTolerance = static_cast<double>(value) / 10000.0;
         spin = colorSatSpin_;
     } else if (sender() == colorLumaSlider_) {
-        m.color.lumaTolerance = static_cast<double>(value) / 10000.0;
+        m.color().lumaTolerance = static_cast<double>(value) / 10000.0;
         spin = colorLumaSpin_;
     } else if (sender() == colorSoftnessSlider_) {
-        m.color.softness = static_cast<double>(value) / 10000.0;
+        m.color().softness = static_cast<double>(value) / 10000.0;
         spin = colorSoftnessSpin_;
     } else {
         return;
@@ -2024,7 +2025,7 @@ void DevelopPanel::onColorRangeToleranceSlider(int value) {
     scheduleDebounce();
     // Keyboard edits never release the slider, so commit here too (keyboard).
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onColorRangeToleranceSpin(double value) {
@@ -2039,16 +2040,16 @@ void DevelopPanel::onColorRangeToleranceSpin(double value) {
 
     QSlider* slider = nullptr;
     if (sender() == colorHueSpin_) {
-        m.color.hueTolerance = value;  // degrees.
+        m.color().hueTolerance = value;  // degrees.
         slider = colorHueSlider_;
     } else if (sender() == colorSatSpin_) {
-        m.color.satTolerance = value / 100.0;
+        m.color().satTolerance = value / 100.0;
         slider = colorSatSlider_;
     } else if (sender() == colorLumaSpin_) {
-        m.color.lumaTolerance = value / 100.0;
+        m.color().lumaTolerance = value / 100.0;
         slider = colorLumaSlider_;
     } else if (sender() == colorSoftnessSpin_) {
-        m.color.softness = value / 100.0;
+        m.color().softness = value / 100.0;
         slider = colorSoftnessSlider_;
     } else {
         return;
@@ -2082,7 +2083,7 @@ void DevelopPanel::syncColorRangeSection() {
         const lrc::Mask& m = current_.masks[static_cast<size_t>(idx)];
         isColorRange = (m.type == lrc::MaskType::ColorRange);
         if (isColorRange)
-            color = m.color;
+            color = m.color();
     }
 
     const double hue = color.hueTolerance;          // degrees.
@@ -2190,7 +2191,7 @@ void DevelopPanel::onSubColorEnableToggled(bool checked) {
     refreshMaskDraft();
     scheduleDebounce();
     if (!suppressSignals_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onSubColorRangeSlider(int value) {
@@ -2211,7 +2212,7 @@ void DevelopPanel::onSubColorRangeSlider(int value) {
     refreshMaskDraft();
     scheduleDebounce();
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onSubColorRangeSpin(double value) {
@@ -2251,7 +2252,7 @@ void DevelopPanel::onSubColorSmoothSlider(int value) {
     refreshMaskDraft();
     scheduleDebounce();
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onSubColorSmoothSpin(double value) {
@@ -2298,7 +2299,7 @@ void DevelopPanel::onSubLumaEnableToggled(bool checked) {
     refreshMaskDraft();
     scheduleDebounce();
     if (!suppressSignals_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onSubLumaRangeSlider(int value) {
@@ -2319,7 +2320,7 @@ void DevelopPanel::onSubLumaRangeSlider(int value) {
     refreshMaskDraft();
     scheduleDebounce();
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onSubLumaRangeSpin(double value) {
@@ -2359,7 +2360,7 @@ void DevelopPanel::onSubLumaSmoothSlider(int value) {
     refreshMaskDraft();
     scheduleDebounce();
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onSubLumaSmoothSpin(double value) {
@@ -2405,7 +2406,7 @@ void DevelopPanel::onSubUnionChanged(int index) {
     refreshMaskDraft();
     scheduleDebounce();
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::syncSubRangeSection() {
@@ -2527,7 +2528,7 @@ void DevelopPanel::setColorRangeSubReference(const QColor& srgb, float lr,
     updateSubColorSwatch(srgb);   // exact sampled display colour.
     refreshMaskDraft();
     scheduleDebounce();
-    emit adjustmentsCommitted(current_);
+    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::setLuminanceSubReference(double luma) {
@@ -2542,7 +2543,7 @@ void DevelopPanel::setLuminanceSubReference(double luma) {
     syncSubRangeSection();
     refreshMaskDraft();
     scheduleDebounce();
-    emit adjustmentsCommitted(current_);
+    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::setRangeSubSamplerChecked(bool active) {
@@ -2575,7 +2576,7 @@ void DevelopPanel::addColorTargetRow(ColorTargetRow row) {
             });
     connect(r.slider, &QSlider::sliderReleased, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connect(r.spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, [this, index](double v) {
@@ -2584,7 +2585,7 @@ void DevelopPanel::addColorTargetRow(ColorTargetRow row) {
             });
     connect(r.spin, &QDoubleSpinBox::editingFinished, this, [this]() {
         if (!suppressSignals_)
-            emit adjustmentsCommitted(current_);
+            emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
     });
     connectSliderGesture(r.slider);
     syncColorTargetRow(r);
@@ -2606,7 +2607,7 @@ void DevelopPanel::onColorTargetSliderChanged(const ColorTargetRow& row,
     scheduleDebounce();
     // Keyboard edits never release the slider; commit here too (keyboard commit).
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onColorTargetSpinChanged(const ColorTargetRow& row,
@@ -2643,7 +2644,7 @@ void DevelopPanel::onColorTargetAdd() {
         colorTargetCombo_->setCurrentIndex(index);
     }
     syncColorTargetSliders();
-    emit adjustmentsCommitted(current_);
+    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onColorTargetDelete() {
@@ -2654,7 +2655,7 @@ void DevelopPanel::onColorTargetDelete() {
     syncColorTargetSection();
     syncColorTargetSliders();
     scheduleDebounce();
-    emit adjustmentsCommitted(current_);
+    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onColorTargetEnabledToggled(bool checked) {
@@ -2663,7 +2664,7 @@ void DevelopPanel::onColorTargetEnabledToggled(bool checked) {
         return;
     current_.colorTargets[static_cast<size_t>(idx)].enabled = checked;
     scheduleDebounce();
-    emit adjustmentsCommitted(current_);
+    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::syncColorTargetRow(const ColorTargetRow& row) {
@@ -2755,7 +2756,7 @@ void DevelopPanel::setColorTargetReference(int index, const QColor& displayColor
         updateColorTargetSwatch(displayColor);
     syncColorTargetSliders();
     scheduleDebounce();
-    emit adjustmentsCommitted(current_);
+    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::setColorTargetSamplerChecked(bool active) {
@@ -2782,7 +2783,7 @@ void DevelopPanel::onSliderChanged(const Row& row, int value) {
     // so persist + push one undo entry here as well. While dragging (dragging_
     // true) the sliderReleased path owns the commit.
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onSpinChanged(const Row& row, double value) {
@@ -2801,7 +2802,8 @@ void DevelopPanel::requestAltVisualization(const Row& row) {
     if (row.vizMode == VizNone)
         return;
     vizActive_ = true;
-    emit visualizationRequested(row.vizMode, current_);
+    emit visualizationRequested(
+        row.vizMode, std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::clearAltVisualization() {
@@ -2823,7 +2825,7 @@ void DevelopPanel::onHSLSliderChanged(int colorIndex, const HSLRow& row, int val
     scheduleDebounce();
     // Keyboard edits never release the slider; commit here too (keyboard commit).
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onHSLSpinChanged(int colorIndex, const HSLRow& row, double value) {
@@ -2850,7 +2852,7 @@ void DevelopPanel::onSplitToneSliderChanged(const SplitToneRow& row, int value) 
     scheduleDebounce();
     // Keyboard edits never release the slider; commit here too (keyboard commit).
     if (!dragging_)
-        emit adjustmentsCommitted(current_);
+        emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::onSplitToneSpinChanged(const SplitToneRow& row, double value) {
@@ -2876,10 +2878,10 @@ void DevelopPanel::scheduleDebounce() {
 }
 
 void DevelopPanel::applyCoarseDebounce() {
-    emit adjustmentsChangedCoarse(current_);
+    emit adjustmentsChangedCoarse(std::make_shared<const lrc::Adjustments>(current_));
 }
 
-void DevelopPanel::applyDebounce() { emit adjustmentsChanged(current_); }
+void DevelopPanel::applyDebounce() { emit adjustmentsChanged(std::make_shared<const lrc::Adjustments>(current_)); }
 
 void DevelopPanel::syncRow(const Row& row) {
     const QSignalBlocker s(row.slider);
@@ -3020,8 +3022,8 @@ void DevelopPanel::resetAll() {
     setAdjustments(lrc::Adjustments::defaults());
     clearMaskTool();
     curveEditor_->resetToLinear();
-    emit adjustmentsChanged(current_);
-    emit adjustmentsCommitted(current_);
+    emit adjustmentsChanged(std::make_shared<const lrc::Adjustments>(current_));
+    emit adjustmentsCommitted(std::make_shared<const lrc::Adjustments>(current_));
 }
 
 // --- Spot removal -------------------------------------------------------------

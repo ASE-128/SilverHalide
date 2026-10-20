@@ -193,7 +193,9 @@ void BatchExportTest::batchExportWritesAllFormats() {
         ExportItem it;
         it.imageId = 1;  // catalog id is only threaded through by encodeAndWrite
         it.filePath = QString::fromStdWString(src.wstring());
-        it.adjustments = Adjustments::defaults();
+        // IM-6: the stack is frozen into a shared snapshot at enqueue time.
+        it.adjustments =
+            std::make_shared<const Adjustments>(Adjustments::defaults());
         it.outPath = QString::fromStdWString((workDir_ / c.out).wstring());
         it.format = c.fmt;
         it.quality = 92;
@@ -307,6 +309,27 @@ void DialogSmokeTest::snapshotDialogSmoke() {
     SnapshotDialog dlg(*db_, imageId_, 0, nullptr);
     QVERIFY(qobject_cast<QDialog*>(&dlg) != nullptr);
     dlg.reload();
+
+    // IM-6: applying a snapshot publishes an immutable shared snapshot. Store a
+    // named snapshot with a distinctive stack, then apply it through the dialog
+    // and check the signal payload is a non-null, fully populated pointer.
+    Adjustments stored = Adjustments::defaults();
+    stored.exposure = 0.75;
+    stored.contrast = 30.0;
+    QVERIFY(db_->saveEditSnapshot(imageId_, stored, 0, "SharedSignal") > 0);
+    dlg.reload();
+    // The dialog has a single list and does not name it.
+    auto* list = dlg.findChild<QListWidget*>();
+    QVERIFY(list != nullptr);
+    QVERIFY(list->count() >= 1);
+    QSignalSpy appliedSpy(&dlg, &SnapshotDialog::applied);
+    list->setCurrentRow(0);
+    QMetaObject::invokeMethod(&dlg, "onApplyClicked", Qt::DirectConnection);
+    QCOMPARE(appliedSpy.count(), 1);
+    const auto applied = appliedSpy.at(0).at(0).value<lrc::AdjustmentsPtr>();
+    QVERIFY(applied != nullptr);
+    QCOMPARE(applied->exposure, 0.75);
+    QCOMPARE(applied->contrast, 30.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -356,9 +379,11 @@ void PresetDialogSmokeTest::presetDialogFlow() {
     list->setCurrentRow(0);
     QMetaObject::invokeMethod(&dlg, "onApplyClicked", Qt::DirectConnection);
     QCOMPARE(appliedSpy.count(), 1);
-    const auto adj = appliedSpy.at(0).at(0).value<lrc::Adjustments>();
-    QCOMPARE(adj.exposure, 0.5);
-    QCOMPARE(adj.contrast, 25.0);
+    // IM-6: applied() publishes an immutable shared snapshot, not a reference.
+    const auto adjPtr = appliedSpy.at(0).at(0).value<lrc::AdjustmentsPtr>();
+    QVERIFY(adjPtr != nullptr);
+    QCOMPARE(adjPtr->exposure, 0.5);
+    QCOMPARE(adjPtr->contrast, 25.0);
 
     // Delete through the library; a fresh dialog then shows only the
     // empty-library placeholder row (no preset entries).
@@ -583,7 +608,7 @@ void MaskOverlayRenderTest::aiMaskOverlayFollowsFieldWithSubMask() {
 
     lrc::Mask m;
     m.type = lrc::MaskType::AiMask;
-    m.ai.target = lrc::AiMaskTarget::Sky;
+    m.ai().target = lrc::AiMaskTarget::Sky;
     // A luminance sub-mask that passes every pixel (widest range, no softness),
     // so the combined weight is exactly the AI field. This is the branch that
     // used to multiply the 0.5 placeholder by the sub-mask.
@@ -613,8 +638,8 @@ void MaskOverlayRenderTest::aiOverlayRecomputeIsDebounced() {
 
     lrc::Mask m;
     m.type = lrc::MaskType::AiMask;
-    m.ai.target = lrc::AiMaskTarget::Sky;
-    m.ai.threshold = 0.5f;
+    m.ai().target = lrc::AiMaskTarget::Sky;
+    m.ai().threshold = 0.5f;
     vp.setMaskTool(lrc::MaskType::AiMask);
     vp.setMaskDraft(m);
 
@@ -626,7 +651,7 @@ void MaskOverlayRenderTest::aiOverlayRecomputeIsDebounced() {
     // when the debounce expires. That is what stops a drag of the AI feather
     // slider from running one inference per tick on the GUI thread.
     lrc::Mask hot = m;
-    hot.ai.threshold = 0.9f;  // far above the heuristic's upper-region weight
+    hot.ai().threshold = 0.9f;  // far above the heuristic's upper-region weight
     vp.setMaskDraft(hot);
     const double duringDrag = meanOverlayAlpha(vp.maskOverlayImage(), 0.05, 0.20);
     QVERIFY2(duringDrag > before - 5.0 && duringDrag < before + 5.0,
@@ -751,6 +776,42 @@ void ColorRangeSamplerTest::checkedMirrorIsSilent() {
     panel.setColorRangeSamplerChecked(false);
     QCOMPARE(button->isChecked(), false);
     QCOMPARE(spy.count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// IM-6: edit-entry signals publish immutable shared snapshots
+//
+// The develop panel used to emit `const Adjustments&`, which forced MainWindow
+// to deep-copy the stack for every edit entry. The panel now publishes
+// `lrc::AdjustmentsPtr`; the contract worth pinning is that the receiver gets a
+// non-null, fully populated snapshot it can adopt and dispatch without copying
+// the stack again.
+// ---------------------------------------------------------------------------
+class AdjustmentsSignalTest : public QObject {
+    Q_OBJECT
+private slots:
+    void panelPublishesSharedSnapshot();
+};
+
+void AdjustmentsSignalTest::panelPublishesSharedSnapshot() {
+    DevelopPanel panel;
+    QSignalSpy changedSpy(&panel, &DevelopPanel::adjustmentsChanged);
+    QSignalSpy committedSpy(&panel, &DevelopPanel::adjustmentsCommitted);
+
+    // resetAll() is a public one-shot edit path that emits both edit signals.
+    panel.resetAll();
+
+    QCOMPARE(changedSpy.count(), 1);
+    QCOMPARE(committedSpy.count(), 1);
+    const auto changed = changedSpy.at(0).at(0).value<lrc::AdjustmentsPtr>();
+    const auto committed =
+        committedSpy.at(0).at(0).value<lrc::AdjustmentsPtr>();
+    QVERIFY(changed != nullptr);
+    QVERIFY(committed != nullptr);
+    QCOMPARE(changed->exposure, 0.0);
+    QVERIFY(*changed == *committed);
+    // The published snapshot is the panel's clamped current state.
+    QVERIFY(*changed == panel.adjustments());
 }
 
 void ColorRangeSamplerTest::subSamplerMirrorIsSilent() {
@@ -1071,6 +1132,8 @@ void SoftProofRenderPathsTest::coarseDragFrameIsProofed() {
     QVERIFY(h.ok);
 
     const auto adj = Adjustments::defaults();
+    // IM-6: queued requests carry a shared immutable snapshot of the stack.
+    const auto adjPtr = std::make_shared<const Adjustments>(adj);
     const QString path = QString::fromStdWString(image.wstring());
 
     // Decode the fixture into the worker's working linear buffer (no catalog row
@@ -1078,7 +1141,7 @@ void SoftProofRenderPathsTest::coarseDragFrameIsProofed() {
     QSignalSpy previewSpy(h.worker, &PreviewWorker::previewReady);
     QMetaObject::invokeMethod(h.worker, "loadImage", Qt::QueuedConnection,
                               Q_ARG(qint64, 1), Q_ARG(QString, path),
-                              Q_ARG(qint64, 1), Q_ARG(lrc::Adjustments, adj));
+                              Q_ARG(qint64, 1), Q_ARG(lrc::AdjustmentsPtr, adjPtr));
     QTRY_COMPARE_WITH_TIMEOUT(previewSpy.count(), 1, 60000);
 
     QSignalSpy coarseSpy(h.worker, &PreviewWorker::previewReadyCoarse);
@@ -1086,7 +1149,7 @@ void SoftProofRenderPathsTest::coarseDragFrameIsProofed() {
     // Baseline: an unarmed coarse frame carries no alarm colour.
     QMetaObject::invokeMethod(h.worker, "adjustPreviewCoarse",
                               Qt::QueuedConnection, Q_ARG(qint64, 1),
-                              Q_ARG(qint64, 2), Q_ARG(lrc::Adjustments, adj));
+                              Q_ARG(qint64, 2), Q_ARG(lrc::AdjustmentsPtr, adjPtr));
     QTRY_COMPARE_WITH_TIMEOUT(coarseSpy.count(), 1, 60000);
     auto plain = coarseSpy.at(0).at(1).value<lrc::ImageBufferPtr>();
     QVERIFY(plain && !plain->empty());
@@ -1100,7 +1163,7 @@ void SoftProofRenderPathsTest::coarseDragFrameIsProofed() {
                               Q_ARG(bool, true));
     QMetaObject::invokeMethod(h.worker, "adjustPreviewCoarse",
                               Qt::QueuedConnection, Q_ARG(qint64, 1),
-                              Q_ARG(qint64, 3), Q_ARG(lrc::Adjustments, adj));
+                              Q_ARG(qint64, 3), Q_ARG(lrc::AdjustmentsPtr, adjPtr));
     QTRY_COMPARE_WITH_TIMEOUT(coarseSpy.count(), 2, 60000);
     auto proofed = coarseSpy.at(1).at(1).value<lrc::ImageBufferPtr>();
     QVERIFY(proofed && !proofed->empty());
@@ -1117,6 +1180,8 @@ void SoftProofRenderPathsTest::fullResFrameIsProofed() {
     QVERIFY(h.ok);
 
     const auto adj = Adjustments::defaults();
+    // IM-6: one shared snapshot serves every queued request of this test.
+    const auto adjPtr = std::make_shared<const Adjustments>(adj);
     const QString path = QString::fromStdWString(image.wstring());
     QSignalSpy fullSpy(h.worker, &PreviewWorker::fullResReady);
 
@@ -1127,7 +1192,7 @@ void SoftProofRenderPathsTest::fullResFrameIsProofed() {
                               Q_ARG(bool, true));
     QMetaObject::invokeMethod(h.worker, "loadFullRes", Qt::QueuedConnection,
                               Q_ARG(qint64, 1), Q_ARG(QString, path),
-                              Q_ARG(qint64, 1), Q_ARG(lrc::Adjustments, adj));
+                              Q_ARG(qint64, 1), Q_ARG(lrc::AdjustmentsPtr, adjPtr));
     QTRY_COMPARE_WITH_TIMEOUT(fullSpy.count(), 1, 120000);
     auto proofed = fullSpy.at(0).at(1).value<lrc::ImageBufferPtr>();
     QVERIFY(proofed && !proofed->empty());
@@ -1142,7 +1207,7 @@ void SoftProofRenderPathsTest::fullResFrameIsProofed() {
                               Q_ARG(bool, false));
     QMetaObject::invokeMethod(h.worker, "adjustFullRes", Qt::QueuedConnection,
                               Q_ARG(qint64, 1), Q_ARG(qint64, 2),
-                              Q_ARG(lrc::Adjustments, adj));
+                              Q_ARG(lrc::AdjustmentsPtr, adjPtr));
     QTRY_COMPARE_WITH_TIMEOUT(fullSpy.count(), 2, 120000);
     auto plain = fullSpy.at(1).at(1).value<lrc::ImageBufferPtr>();
     QVERIFY(plain && !plain->empty());
@@ -1267,7 +1332,9 @@ FullResTiming timeFullResEntry(FullResHarness& h, qint64 generation) {
         h.worker, "loadFullRes", Qt::QueuedConnection, Q_ARG(qint64, h.imageId),
         Q_ARG(QString, QString::fromStdWString(h.image.wstring())),
         Q_ARG(qint64, generation),
-        Q_ARG(lrc::Adjustments, lrc::Adjustments::defaults()));
+        Q_ARG(lrc::AdjustmentsPtr,
+              std::make_shared<const lrc::Adjustments>(
+                  lrc::Adjustments::defaults())));
     if (!readySpy.wait(30000))
         return out;  // ms stays -1: no frame (timeout or loadFailed).
     out.ms = clock.elapsed();
@@ -1364,7 +1431,9 @@ void FullResHotPathTest::repeatRequestHitsEarlyReturnWithoutRender() {
         Q_ARG(qint64, h.imageId),
         Q_ARG(QString, QString::fromStdWString(h.image.wstring())),
         Q_ARG(qint64, 2),
-        Q_ARG(lrc::Adjustments, lrc::Adjustments::defaults()));
+        Q_ARG(lrc::AdjustmentsPtr,
+              std::make_shared<const lrc::Adjustments>(
+                  lrc::Adjustments::defaults())));
     QCOMPARE(readySpy.count(), 0);
     qInfo("[PERF1A][test] repeat entry took hit=earlyReturn: no render, no "
           "frame (excluded from the B-1 anchor verdict)");
@@ -1623,6 +1692,9 @@ int main(int argc, char** argv) {
 
     // Register the metatype used across the queued worker connection.
     qRegisterMetaType<QList<ExportItem>>("QList<ExportItem>");
+    // IM-6: the edit-entry signals publish a shared immutable adjustment stack
+    // and QSignalSpy captures it by metatype.
+    qRegisterMetaType<lrc::AdjustmentsPtr>();
     // Soft proofing parameters cross the UI -> preview-worker queued invocation
     // and are captured by QSignalSpy in the dialog smoke test.
     qRegisterMetaType<lrc::SoftProofParams>();
@@ -1662,6 +1734,10 @@ int main(int argc, char** argv) {
     }
     {
         ColorRangeSamplerTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        AdjustmentsSignalTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
     {
