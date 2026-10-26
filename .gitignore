@@ -94,3 +94,7 @@ models/
 !resources/models/
 resources/models/*.onnx
 !resources/models/manifest.json
+
+# ===== 非代码交付物（本地保留，不入版本库）=====
+/architecture.html
+/promo_ppt/
