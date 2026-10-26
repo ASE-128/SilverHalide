@@ -27,13 +27,14 @@
 #define APP_PUBLISHER "ASE-128"
 #define APP_COPYRIGHT "Copyright (C) ASE-128 2026"
 
-; Payload is staged relative to this script file (packaging/../../build_gui =
-; the active Ninja build tree in the repository's parent directory).
-#define STAGE_DIR     "..\..\build_gui\install_stage"
+; Payload is staged relative to this script file (packaging/../build_gui = the
+; active Ninja build tree at the repository root, alongside this repo's
+; packaging/ directory).
+#define STAGE_DIR     "..\build_gui\install_stage"
 ; Camera DCP profiles and the Lensfun database live under build_gui/resources
 ; (copied there by the build / staging step). Sourced directly rather than via
 ; install_stage so the installer always packages the complete current set.
-#define RES_DIR       "..\..\build_gui\resources"
+#define RES_DIR       "..\build_gui\resources"
 
 [Setup]
 ; Branding
