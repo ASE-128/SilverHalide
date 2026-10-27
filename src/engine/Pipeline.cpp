@@ -2797,8 +2797,10 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
             // Nothing changed: serve the cached final frame directly.
             lastRecomputeStage_ = -1;
             lastReuseStartStage_ = -1;
-            if (renderState_.finalFrame)
+            if (renderState_.finalFrame) {
+                cacheHits_.fetch_add(1, std::memory_order_relaxed);
                 return renderState_.finalFrame;
+            }
             firstChanged = 0;
         }
     }
@@ -2853,6 +2855,15 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
         if (!chain)
             start = 0;  // defensive: a missing snapshot restarts from the source
     }
+    // Cache diagnostics: a render that starts above stage A is served (at least
+    // partly) from the retained stage chain, so it counts as a preview-cache
+    // hit; a from-source render is a miss. Together with the LRU counters in
+    // lookupCache() this makes the perf dialog meaningful for slider edits,
+    // which always take this incremental path.
+    if (start > 0)
+        cacheHits_.fetch_add(1, std::memory_order_relaxed);
+    else
+        cacheMisses_.fetch_add(1, std::memory_order_relaxed);
     if (start == 0) {
         // A from-source render recomputes every stage, so the previous
         // snapshots are dead weight: release them into the work pool *before*
@@ -3698,8 +3709,11 @@ ImageBufferPtr Pipeline::renderInternal(const ImageBuffer& linear,
 bool Pipeline::lookupCache(const CacheKey& key, ImageBufferPtr& out) {
     std::lock_guard<std::mutex> lock(cacheMutex_);
     auto it = cache_.find(key);
-    if (it == cache_.end())
+    if (it == cache_.end()) {
+        cacheMisses_.fetch_add(1, std::memory_order_relaxed);
         return false;
+    }
+    cacheHits_.fetch_add(1, std::memory_order_relaxed);
     // Move to the front of the LRU list.
     lru_.remove(key);
     lru_.push_front(key);
@@ -3733,6 +3747,19 @@ void Pipeline::clearCache() {
     cache_.clear();
     lru_.clear();
     cacheBytes_ = 0;
+    // A hard reset also resets the diagnostic counters, so a hit rate shown in
+    // the perf dialog always corresponds to the cache generation it measured.
+    cacheHits_.store(0, std::memory_order_relaxed);
+    cacheMisses_.store(0, std::memory_order_relaxed);
+}
+
+Pipeline::CacheStats Pipeline::cacheStats() const {
+    // Lock only to serialise with writers; the counters themselves are atomic.
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    CacheStats stats;
+    stats.hits = cacheHits_.load(std::memory_order_relaxed);
+    stats.misses = cacheMisses_.load(std::memory_order_relaxed);
+    return stats;
 }
 
 void Pipeline::setCacheCapacity(size_t capacityBytes) {

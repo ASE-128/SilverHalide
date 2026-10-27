@@ -37,6 +37,7 @@
 // The slots below carry engine types (Adjustments, ImageBufferPtr, HistogramBins,
 // SoftProofParams): their metatypes must be declared before moc uses them.
 #include "ui/MetaTypes.h"
+#include "utils/PerfStats.h"
 #include "utils/UndoStack.h"
 
 namespace lrc {
@@ -49,6 +50,7 @@ class Pipeline;
 class PresetLibrary;           // named preset store (P3-3)
 class ThumbnailCache;
 class SoftProofingDialog;      // modeless proofing dialog (视图 → 软打样…)
+class PerfDiagnosticsDialog;   // modeless perf dialog (视图 → 性能诊断…)
 } // namespace lrc
 
 class CollectionsDialog;
@@ -60,6 +62,7 @@ class PreviewWorker;
 class QAction;
 class QButtonGroup;
 class QCloseEvent;
+class QLabel;
 class QLineEdit;
 class QScrollArea;
 class QThread;
@@ -155,6 +158,17 @@ private slots:
     void onVisualizationReady(qint64 imageId, qint64 generation,
                               const lrc::ImageBufferPtr& overlay);
     void onPreviewReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
+    /**
+     * @brief A2 refined-frame timing sample from the preview worker.
+     *
+     * Feeds the 30-sample window behind the status-bar chip and the perf
+     * diagnostics dialog. UI repaints are throttled to 200 ms inside the slot.
+     */
+    void onPreviewTimingReady(qint64 imageId, double ms);
+    /**
+     * @brief Opens (or re-raises) the modeless performance diagnostics dialog.
+     */
+    void onOpenPerfDiagnostics();
     void onPreviewReadyCoarse(qint64 imageId,
                               const lrc::ImageBufferPtr& rgbU8);
     /**
@@ -311,6 +325,15 @@ private:
     // (resize(1320, 820) and the splitter sizes set in buildUi) on a first run
     // or whenever a stored value is missing or unusable.
     void restoreUiState();
+    /**
+     * @brief Applies "像素加速" (auto / force CPU), persists it and updates UI.
+     *
+     * Rebuilds the process-wide pixel backend, so it can be toggled while the
+     * app runs. Thread-affine: UI thread only.
+     */
+    void setPixelAccelerationMode(bool forceCpu);
+    /// @return Chip text for the actually-active backend ("GPU: d3d11 · 精帧 …").
+    QString pixelChipText() const;
     // Request abort + quit the event loops of every background worker.
     void requestWorkersStop();
     // True once no worker thread is still running.
@@ -596,6 +619,16 @@ private:
     QElapsedTimer perfFullResClock_;
     qint64 perfFullResGeneration_ = -1;  // generation of the measured 1:1 entry
     qint64 perfFullResImageId_ = -1;     // image that entry was requested for
+
+    // --- Performance diagnostics (状态栏 chip + 视图 → 性能诊断…) --------------
+    // Refined-frame timings reported by PreviewWorker (A2 metric). Only the UI
+    // thread touches this window; the chip repaint is throttled to 200 ms.
+    QLabel* perfChip_ = nullptr;
+    lrc::PerfStats perfStats_;
+    QElapsedTimer perfChipClock_;
+    qint64 lastChipMs_ = -10000;  // force the first chip update immediately
+    lrc::PerfDiagnosticsDialog* perfDialog_ = nullptr;
+    QString pixelAcceleration_ = QStringLiteral("auto");  // auto | cpu
 
     // --- Debounced adjustment persistence --------------------------------------
     std::optional<lrc::Adjustments> pendingSave_;  // latest value awaiting flush

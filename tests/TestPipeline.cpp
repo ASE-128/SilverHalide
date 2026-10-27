@@ -661,6 +661,37 @@ TEST_CASE("Pipeline: setCacheCapacity updates cacheCapacityBytes",
     REQUIRE(pipeline.cacheCapacityBytes() == 8 * 1024 * 1024);
 }
 
+TEST_CASE("Pipeline: preview LRU records hits and misses", "[pipeline][cache]") {
+    auto cm = std::make_shared<ColorManager>();
+    Pipeline pipeline(cm);
+    auto buf = makeFullResGradient();
+    const Adjustments a = Adjustments::defaults();
+
+    // Fresh pipeline starts with empty counters.
+    REQUIRE(pipeline.cacheStats().hits == 0);
+    REQUIRE(pipeline.cacheStats().misses == 0);
+
+    // First render of a key misses, then inserts the frame.
+    (void)pipeline.render(91, *buf, a, 4);
+    const Pipeline::CacheStats afterMiss = pipeline.cacheStats();
+    REQUIRE(afterMiss.misses == 1);
+    REQUIRE(afterMiss.hits == 0);
+    REQUIRE(afterMiss.hitRate() == Approx(0.0));
+
+    // The identical key is served from the LRU.
+    (void)pipeline.render(91, *buf, a, 4);
+    const Pipeline::CacheStats afterHit = pipeline.cacheStats();
+    REQUIRE(afterHit.hits == 1);
+    REQUIRE(afterHit.misses == 1);
+    REQUIRE(afterHit.hitRate() == Approx(0.5));
+
+    // clearCache() is a hard reset: counters go with the cached bytes.
+    pipeline.clearCache();
+    REQUIRE(pipeline.cacheBytes() == 0);
+    REQUIRE(pipeline.cacheStats().hits == 0);
+    REQUIRE(pipeline.cacheStats().misses == 0);
+}
+
 // --- Fast gaussian (box path) & neutral fast path ----------------------------
 
 namespace {

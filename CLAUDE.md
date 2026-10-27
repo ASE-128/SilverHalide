@@ -83,7 +83,7 @@ qt\6.8.3\msvc2022_64\bin\windeployqt.exe --release --no-translations --compiler-
 | 开关 | 说明 |
 |------|------|
 | `-DLRC_ENABLE_SIMD=ON` | AVX2 快速路径（默认 OFF，标量路径逐位一致） |
-| `-DLRC_ENABLE_D3D=ON` | D3D11 DirectCompute GPU 像素后端（Windows，默认 OFF） |
+| `-DLRC_ENABLE_D3D=ON` | D3D11 DirectCompute GPU 像素后端（Windows，默认 ON；失败自动回退 CPU，可用「仅 CPU」设置强制） |
 | `-DLRC_ENABLE_AI=ON` | ONNX Runtime 推理（`build_x64.bat` 已默认开启） |
 | `-DLRC_PROXY=https://ghfast.top/` | FetchContent 代理（中国网络） |
 

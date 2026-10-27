@@ -676,7 +676,12 @@ void MaskOverlayRenderTest::aiOverlayRecomputeIsDebounced() {
 // DevelopPanel::aiModelUnavailable with the missing manifest id, and the AI
 // mask must still be created (heuristic fallback) so the feature degrades
 // loudly instead of vanishing.
+//
+// The controls this test drives do not exist in a no-AI build (they are
+// #if LRC_ENABLE_AI-gated in DevelopPanel), so the case is compiled only when
+// the engine provides AI support.
 // ---------------------------------------------------------------------------
+#if LRC_ENABLE_AI
 class AiModelAvailabilityTest : public QObject {
     Q_OBJECT
 private slots:
@@ -729,6 +734,7 @@ void AiModelAvailabilityTest::aiDenoiseEnableWarnsWhenModelMissing() {
     // feature did nothing.
     QCOMPARE(warnSpy.at(0).at(2).toBool(), false);
 }
+#endif  // LRC_ENABLE_AI (AI model availability tests)
 
 // ---------------------------------------------------------------------------
 // Independent colour-range sampler (regression).
@@ -1728,10 +1734,12 @@ int main(int argc, char** argv) {
         MaskOverlayRenderTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
+#if LRC_ENABLE_AI
     {
         AiModelAvailabilityTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
+#endif
     {
         ColorRangeSamplerTest t;
         status |= QTest::qExec(&t, argc, argv);

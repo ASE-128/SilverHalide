@@ -13,6 +13,72 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
+## 性能兑现：D3D11 默认开启与可感知化（2026-10-26，工作区未提交）
+
+按 [.claude/artifacts/spec/next-product-direction/spec.md](.claude/artifacts/spec/next-product-direction/spec.md)
+（T1~T10）实施，未提交、未推送。
+
+### 1. 关键修复：D3D11 后端此前从未真正生效
+
+`LRC_ENABLE_D3D` 默认值改为 `ON` 后，启动探针在真机上**仍然全部回落到 CPU**。逐层排除设备创建
+（原始 `D3D11CreateDevice` = `0x0`）、着色器编译（最小 `cs_5_0` 编译成功）、常量上传回读（staging 读回 = 1.0）
+之后，用 `D3DReflect` 反射常量缓冲定位到根因：
+
+- **D3DCompiler 给 cbuffer 数组每个元素分配 16 字节槽位**。HLSL 侧 `float gKernel[64]` 反射出的
+  cbuffer 是 **1056 字节**（数组部分 1012 字节），而 CPU 侧 `Params` 只有 288 字节，GPU 实际按
+  4 倍步长读权重（H pass 输出 0.246469 = k[0] + k[4]，最终 0.0607471 = 0.246469²），探针恒定失败。
+- 改为 `float4 gKernel[16]` 后反射结果 **288 字节 / 数组 256 字节**，与 C++ 布局逐字节一致；
+  权重经 `gWeight(k) = gKernel[k >> 2][k & 3u]` 索引，两处卷积循环同步修改。
+
+修复后真机 `activeSpatialBackendName()` 返回 `d3d11`。同时把 GPU 执行体收进 `__try/__except`
+（`executeGpu` 只持有 POD 局部变量，规避 C2712）+ `dead` 原子标志，任何设备/驱动异常都退回
+`detail::gaussianBlur` CPU 实现，避免驱动故障直接崩溃。
+
+### 2. 真机锚点（本机 Intel + RTX A4000，50MP 合成图）
+
+| 锚点 | GPU（auto） | CPU（ForceCpu） | 判定 |
+|---|---|---|---|
+| B-2 1920 refine 中位 | 70.67 ms（min 69.52） | 69.43 ms（min 68.59） | GPU 慢 1.8%，< 5% 门槛 → 默认保持 ON |
+| B-1 fullDisplay 8000×6000 | 503.02 ms | 508.73 ms | GPU 略快 |
+
+`TestPerfAnchors` 同机复测：B-2 refine min **69.69 / avg 75.96 ms**，B-1 engine-leg **513.85 ms**，
+D-1 作用域提交后 **76.04 MB**，D-2 回退后工作集 **687.996 MB ×2**（与既有 688 MB 基线一致，无回退）。
+
+### 3. 跨后端一致性口径（原 AC-3 已按实测修订）
+
+Auto 与 ForceCpu **不是逐位一致**（浮点求和顺序不同：`pl.preview.a` 589ae0c25ae79fbb vs
+54a1b3e9957a5d08 等 28 项 hash 全部不同）。因此验收口径改为：
+
+- **逐后端确定性**：同一后端连续两次运行输出逐字节相同（auto×2、cpu×2 均为 `True`）；
+- **跨后端容差**：既有用例 “Spatial backend: D3D11 DirectCompute matches CPU block-wise” 以
+  Δ < 0.008 通过（真实 GPU 路径）。
+
+### 4. 可感知化（状态栏 chip + 非模态诊断对话框）
+
+- 状态栏右侧常驻 `GPU: <backend> · 精帧 <median>ms`，200 ms 节流刷新；`设置 → 像素加速`
+  提供「自动 / 仅 CPU」互斥项并经 `QSettings("perf/pixelAcceleration")` 持久化，重启后保持。
+- `视图 → 性能诊断…` 为**非模态**对话框（独立顶层窗口，500 ms 轮询快照），四行分别显示
+  像素后端与偏好、精帧 min/中位/max/样本数、预览缓存命中/未命中/命中率/占用、进程工作集。
+- 实测（kimi-cu 真机）：导入 3 张（RW2/ARW/JPEG）后拖曝光，chip 由 `精帧 0ms` 变为 `精帧 15ms`；
+  对话框同步显示 `样本 3 · 最大 15.4 ms`；切「仅 CPU」chip 立即变 `GPU: cpu`，重启后仍为 cpu，
+  切回「自动」恢复 `GPU: d3d11`；1:1 ↔ 适合窗口往返版式不变（中央预览 + 底部胶片栏）。
+- 导出 JPEG 落盘校验为 **4608×3464（原始尺寸）**，非预览尺寸。
+
+### 5. 缓存计数补全
+
+原实现只在 `render()` 的预览 LRU（`lookupCache`）计数，而滑杆编辑走 `renderPreview` 的
+**增量分段缓存**，导致对话框命中率恒为 `0 / 0`。补上该路径计数（重启于 stage A = miss，
+复用保留阶段 = hit），编辑时即出现真实比例（实测 `命中 2 · 未命中 2 · 50.0%`）。
+`clearCache()` 仍同时清零两种缓存状态与计数。
+
+### 6. 验证
+
+- headless：`ctest --test-dir build_headless` 通过（519 用例 / 979,236 断言）；新增
+  `TestPerfStats`、SpatialFilter 后端偏好用例、Pipeline 缓存计数用例。
+- GUI：`cmake --build build_gui` 0 error，`windeployqt` 后真机操作验收如上。
+- 教训：**HLSL cbuffer 数组不得按 C 布局直觉声明**；任何 cbuffer 布局变更都应以
+  `D3DReflect` 的字节偏移为准。
+
 ## 现代 C++ 改造：IM-1 ~ IM-11 落地（2026-10-19 ~ 10-20，工作区未提交）
 
 按 [docs/spec/modern-cpp-adoption-audit.md](docs/spec/modern-cpp-adoption-audit.md) 的审计结论与验收清单实施（Agent Teams，两阶段 T0~T13 + U1~U5）。逐项 before/after、证据与遗留见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md)，基线数字与两份逐位 oracle 见 [docs/spec/modern-cpp-adoption-baseline.md](docs/spec/modern-cpp-adoption-baseline.md)。

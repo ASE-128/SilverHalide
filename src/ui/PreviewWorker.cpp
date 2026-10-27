@@ -254,6 +254,10 @@ void PreviewWorker::setPreviewTargetSize(const QSize& size) {
 
 void PreviewWorker::adjustPreview(qint64 imageId, qint64 generation,
                                   lrc::AdjustmentsPtr adjustmentsPtr) {
+    // A2 metric: worker-thread wall clock from the request being dequeued to the
+    // refined previewReady emission. Coarse frames are deliberately excluded.
+    QElapsedTimer refineTimer;
+    refineTimer.start();
     if (!adjustmentsPtr)
         return;  // defensive: the UI always publishes a stack.
     const lrc::Adjustments& adjustments = *adjustmentsPtr;
@@ -274,12 +278,14 @@ void PreviewWorker::adjustPreview(qint64 imageId, qint64 generation,
             &linearDisplay);
         if (abort_.load())
             return;  // abort during render.
-        emitPreviewWithHistogram(imageId, generation, linearDisplay, out);
+        emitPreviewWithHistogram(imageId, generation, linearDisplay, out,
+                                 refineTimer.nsecsElapsed() / 1.0e6);
     } else {
         out = pipeline_.render(imageId, *linear_, adjustments, 0);
         if (abort_.load())
             return;  // abort during render.
-        emitPreviewWithHistogram(imageId, generation, nullptr, out);
+        emitPreviewWithHistogram(imageId, generation, nullptr, out,
+                                 refineTimer.nsecsElapsed() / 1.0e6);
     }
 }
 
@@ -803,10 +809,14 @@ lrc::ImageBufferPtr PreviewWorker::renderPreviewFrame(
 void PreviewWorker::emitPreviewWithHistogram(
     qint64 imageId, qint64 generation,
     const lrc::ImageBufferPtr& linearDisplay,
-    const lrc::ImageBufferPtr& rgbU8) {
+    const lrc::ImageBufferPtr& rgbU8, double renderMs) {
     if (abort_.load() || generation != latestGeneration_)
         return;  // stale request superseded by a newer one.
     emit previewReady(imageId, rgbU8);
+    // Perf diagnostics: reported after the frame is on its way to the UI, so the
+    // sample includes the signal emission cost of the refined frame only.
+    if (renderMs >= 0.0)
+        emit previewTimingReady(imageId, renderMs);
     // P3-1: derive the histogram from the adjusted linear F32 display buffer
     // (full traversal, no sampling). When the incremental cache served the
     // unchanged preview, renderPreview leaves linearDisplay null -- fall back

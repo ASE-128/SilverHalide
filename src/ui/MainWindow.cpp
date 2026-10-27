@@ -16,6 +16,7 @@
 #include <QAbstractSlider>
 #include <QAbstractSpinBox>
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QButtonGroup>
 #include <QByteArray>
@@ -54,6 +55,11 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
+#endif
+
 #include "app/Application.h"
 #include "app/Constants.h"
 #include "catalog/CatalogDatabase.h"
@@ -65,6 +71,7 @@
 #include "engine/ImageIO.h"
 #include "engine/Pipeline.h"
 #include "engine/RawDecoder.h"
+#include "engine/SpatialFilter.h"
 // AI inference wiring. ModelManager reads the bundled manifest
 // and probes <applicationDirPath>/models (read-only, ships with the installer)
 // before the per-user cache, so an installed copy finds its bundled models
@@ -84,9 +91,12 @@
 #include "ui/ImageViewport.h"
 #include "ui/ImportDialog.h"
 #include "ui/ImportWorker.h"
+#if LRC_ENABLE_AI
 #include "ui/ModelManagementWidget.h"
+#endif
 #include "ui/NavigatorWidget.h"
 #include "ui/PanoramaDialog.h"
+#include "ui/PerfDiagnosticsDialog.h"
 #include "ui/PresetDialog.h"
 #include "ui/PreviewWorker.h"
 #include "ui/SmartCollectionsDialog.h"
@@ -112,6 +122,25 @@ constexpr int kWorkerStopWaitMs = 20000;
 
 std::filesystem::path toStdPath(const QString& path) {
     return std::filesystem::path(path.toStdWString());
+}
+
+// Process working-set sample for the performance diagnostics dialog. Returns
+// zeros on non-Windows hosts (or if the query fails), which the dialog renders
+// as "—".
+struct ProcessMemoryBytes {
+    std::uint64_t workingSet = 0;
+    std::uint64_t peakWorkingSet = 0;
+};
+
+ProcessMemoryBytes sampleProcessMemory() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS pmc{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)) != 0) {
+        return {static_cast<std::uint64_t>(pmc.WorkingSetSize),
+                static_cast<std::uint64_t>(pmc.PeakWorkingSetSize)};
+    }
+#endif
+    return {};
 }
 
 QString fromStdPath(const std::filesystem::path& path) {
@@ -144,6 +173,26 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Lets the decoder convert imported JPEG/PNG/TIFF into linear ProPhoto.
     decoder_.setColorManager(colorManager_);
     pipeline_ = std::make_unique<lrc::Pipeline>(colorManager_);
+
+    // Pixel acceleration preference (设置 → 像素加速). Applied before any worker
+    // starts rendering, so the process-wide backend is built with the stored
+    // choice; the stored value is also what the menu reflects at startup.
+    {
+        QSettings perfSettings;
+        pixelAcceleration_ =
+            perfSettings
+                .value(QStringLiteral("perf/pixelAcceleration"),
+                       QStringLiteral("auto"))
+                .toString();
+        if (pixelAcceleration_ != QStringLiteral("cpu"))
+            pixelAcceleration_ = QStringLiteral("auto");
+        lrc::setPixelBackendPreference(
+            pixelAcceleration_ == QStringLiteral("cpu")
+                ? lrc::PixelBackendPreference::ForceCpu
+                : lrc::PixelBackendPreference::Auto);
+        qInfo("pixel backend: %s (preference: %s)",
+              lrc::activeSpatialBackendName(), pixelAcceleration_.toUtf8().constData());
+    }
 
     // AI engine + model manager. The bundled installer ships models at
     // <applicationDirPath>/models; ModelManager probes that directory via
@@ -257,6 +306,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Application-level key filter implements the bare-key shortcuts.
     qApp->installEventFilter(this);
     statusBar()->showMessage(tr("就绪"));
+
+    // Performance chip: always present, so the active backend and the recent
+    // refined-frame median are visible without opening any dialog.
+    perfChip_ = new QLabel(this);
+    perfChip_->setContentsMargins(0, 0, 8, 0);
+    perfChipClock_.start();
+    perfChip_->setText(pixelChipText());
+    statusBar()->addPermanentWidget(perfChip_);
 }
 
 MainWindow::~MainWindow() {
@@ -683,12 +740,34 @@ void MainWindow::buildMenus() {
                         QKeySequence::ZoomOut);
     viewMenu->addSeparator();
     viewMenu->addAction(tr("软打样…"), this, &MainWindow::openSoftProofing);
+    viewMenu->addSeparator();
+    viewMenu->addAction(tr("性能诊断…"), this, &MainWindow::onOpenPerfDiagnostics);
 
     QMenu* settingsMenu = menuBar()->addMenu(tr("设置"));
+#if LRC_ENABLE_AI
     settingsMenu->addAction(tr("模型管理…"), this, [this]() {
         ModelManagementWidget dlg(this);
         dlg.exec();
     });
+    settingsMenu->addSeparator();
+#endif
+    // Mutually exclusive pixel-acceleration choices. "自动" keeps the runtime
+    // probe (GPU when compiled in and available); "仅 CPU" never touches D3D.
+    auto* pixelAccelMenu = settingsMenu->addMenu(tr("像素加速"));
+    auto* pixelAccelGroup = new QActionGroup(this);
+    pixelAccelGroup->setExclusive(true);
+    QAction* autoPixel = pixelAccelMenu->addAction(tr("自动"));
+    autoPixel->setCheckable(true);
+    autoPixel->setChecked(pixelAcceleration_ != QStringLiteral("cpu"));
+    QAction* cpuPixel = pixelAccelMenu->addAction(tr("仅 CPU"));
+    cpuPixel->setCheckable(true);
+    cpuPixel->setChecked(pixelAcceleration_ == QStringLiteral("cpu"));
+    pixelAccelGroup->addAction(autoPixel);
+    pixelAccelGroup->addAction(cpuPixel);
+    connect(autoPixel, &QAction::triggered, this,
+            [this]() { setPixelAccelerationMode(false); });
+    connect(cpuPixel, &QAction::triggered, this,
+            [this]() { setPixelAccelerationMode(true); });
 
     QMenu* helpMenu = menuBar()->addMenu(tr("帮助"));
     helpMenu->addAction(tr("关于"), this, [this]() {
@@ -1046,6 +1125,9 @@ void MainWindow::startWorkers() {
             &QObject::deleteLater);
     connect(previewWorker_, &PreviewWorker::previewReady, this,
             &MainWindow::onPreviewReady);
+    // A2 refined-frame timing (worker thread -> UI chip / diagnostics dialog).
+    connect(previewWorker_, &PreviewWorker::previewTimingReady, this,
+            &MainWindow::onPreviewTimingReady);
     // P3-1: linear-light histogram arrives right after each previewReady (the
     // worker emits it second), replacing the old 8-bit sampled histogram.
     connect(previewWorker_, &PreviewWorker::histogramReady, this,
@@ -1722,6 +1804,84 @@ void MainWindow::openSoftProofing() {
     softProofDialog_->activateWindow();
 }
 
+// --- Performance diagnostics (状态栏 chip + 视图 → 性能诊断…) ------------------
+
+QString MainWindow::pixelChipText() const {
+    // The active backend name forces the lazy probe, which is exactly what the
+    // chip must report: what the pipeline actually uses, not what was asked for.
+    const QString backend =
+        QString::fromLatin1(lrc::activeSpatialBackendName());
+    const double median =
+        perfStats_.sampleCount() == 0 ? 0.0 : perfStats_.medianMs();
+    return tr("GPU: %1 · 精帧 %2ms").arg(backend).arg(median, 0, 'f', 0);
+}
+
+void MainWindow::onPreviewTimingReady(qint64 imageId, double ms) {
+    if (imageId != currentImageId_)
+        return;  // frame belongs to an image the user already left.
+    perfStats_.add(ms);
+    // 200 ms repaint throttle: a slider drag emits several refined frames per
+    // second and the chip text must not re-layout the status bar each time.
+    const qint64 now = perfChipClock_.elapsed();
+    if (perfChip_ != nullptr && now - lastChipMs_ >= 200) {
+        lastChipMs_ = now;
+        perfChip_->setText(pixelChipText());
+    }
+}
+
+void MainWindow::setPixelAccelerationMode(bool forceCpu) {
+    pixelAcceleration_ = forceCpu ? QStringLiteral("cpu")
+                                  : QStringLiteral("auto");
+    QSettings settings;
+    settings.setValue(QStringLiteral("perf/pixelAcceleration"),
+                      pixelAcceleration_);
+    lrc::setPixelBackendPreference(
+        forceCpu ? lrc::PixelBackendPreference::ForceCpu
+                 : lrc::PixelBackendPreference::Auto);
+    // Frame times from the previous backend are not comparable, and the chip
+    // must show the new backend immediately.
+    perfStats_.clear();
+    lastChipMs_ = -10000;
+    if (perfChip_ != nullptr)
+        perfChip_->setText(pixelChipText());
+    qInfo("pixel backend: %s (preference: %s)",
+          lrc::activeSpatialBackendName(),
+          pixelAcceleration_.toUtf8().constData());
+}
+
+void MainWindow::onOpenPerfDiagnostics() {
+    if (perfDialog_ == nullptr) {
+        // Modeless and purely snapshot-driven: it polls the counters every
+        // 500 ms and never subscribes to the render signals, so opening it
+        // cannot slow previews down.
+        perfDialog_ = new lrc::PerfDiagnosticsDialog(
+            [this]() {
+                lrc::PerfDiagnosticsSnapshot snap;
+                snap.backend =
+                    QString::fromLatin1(lrc::activeSpatialBackendName());
+                snap.preference = pixelAcceleration_;
+                snap.sampleCount = perfStats_.sampleCount();
+                snap.minMs = perfStats_.minMs();
+                snap.medianMs = perfStats_.medianMs();
+                snap.maxMs = perfStats_.maxMs();
+                const lrc::Pipeline::CacheStats cache = pipeline_->cacheStats();
+                snap.cacheHits = cache.hits;
+                snap.cacheMisses = cache.misses;
+                snap.cacheHitRate = cache.hitRate();
+                snap.cacheBytes = pipeline_->cacheBytes();
+                snap.cacheCapacityBytes = pipeline_->cacheCapacityBytes();
+                const ProcessMemoryBytes mem = sampleProcessMemory();
+                snap.workingSetBytes = mem.workingSet;
+                snap.peakWorkingSetBytes = mem.peakWorkingSet;
+                return snap;
+            },
+            this);
+    }
+    perfDialog_->show();
+    perfDialog_->raise();
+    perfDialog_->activateWindow();
+}
+
 void MainWindow::onSoftProofParamsChanged(const lrc::SoftProofParams& params,
                                           bool enabled) {
     softProofParams_ = params;
@@ -2350,13 +2510,13 @@ void MainWindow::setSidePanelsVisible(bool visible) {
         developScroll_->setVisible(visible);
 }
 
-// AI engine bootstrap. The body is #ifdef-guarded so a
-// LRC_ENABLE_AI=OFF GUI build links cleanly (no ONNX Runtime symbols). When
-// AI is enabled but the bundled manifest is missing (dev build without the
-// installer stage), this logs a single warning and leaves aiEngine_ null;
-// Pipeline then runs its pure-C++ fallback paths exactly as before.
+// AI engine bootstrap. The body is compiled only when LRC_ENABLE_AI=1 so a
+// no-AI build never constructs ModelManager/AiInferenceEngine and links no
+// ONNX Runtime symbols. When AI is enabled but the bundled manifest is missing
+// (dev build without the installer stage), this logs a single warning and
+// leaves aiEngine_ null; Pipeline then runs its pure-C++ fallback paths.
 void MainWindow::initializeAiEngine() {
-#ifdef LRC_ENABLE_AI
+#if LRC_ENABLE_AI
     try {
         // Prefer the manifest bundled beside the exe (<appDir>/models/
         // manifest.json); fall back to ModelManager's default search path

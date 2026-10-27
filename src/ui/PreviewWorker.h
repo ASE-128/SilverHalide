@@ -348,6 +348,15 @@ signals:
      */
     void previewReady(qint64 imageId, const lrc::ImageBufferPtr& rgbU8);
     /**
+     * @brief Wall-clock cost of the refined frame just emitted.
+     *
+     * Measured on the worker thread from the moment the request is dequeued
+     * until previewReady is emitted for that frame (the A2 metric). Coarse
+     * drag frames and image loads deliberately do not emit it. Values are
+     * milliseconds and always >= 0.
+     */
+    void previewTimingReady(qint64 imageId, double ms);
+    /**
      * @brief Display-encoded RGB histogram for the preview just emitted.
      *
      * Emitted right after previewReady, computed on the worker thread from the
@@ -635,10 +644,17 @@ private:
      * never runs the statistics. When @p linearDisplay is null/empty (the
      * incremental cache served the unchanged preview), the U8 frame itself is
      * used instead. Both signals are guarded by the generation token.
+     *
+     * @param renderMs Worker-thread wall clock measured from the request being
+     *                 dequeued to this frame, in milliseconds. Emitted via
+     *                 previewTimingReady right after previewReady. Pass a
+     *                 negative value for paths that are not part of the A2
+     *                 refined-frame metric (load and coarse frames).
      */
     void emitPreviewWithHistogram(qint64 imageId, qint64 generation,
                                   const lrc::ImageBufferPtr& linearDisplay,
-                                  const lrc::ImageBufferPtr& rgbU8);
+                                  const lrc::ImageBufferPtr& rgbU8,
+                                  double renderMs = -1.0);
     /**
      * @brief Resolves the catalog file path for an image id. Empty when unknown.
      *

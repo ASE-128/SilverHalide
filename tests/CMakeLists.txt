@@ -56,7 +56,9 @@ add_executable(lrc_tests
   TestPerfAnchors.cpp
   # Offline AI: auto-develop suggestions + batch pregrade.
   TestAutoDevelop.cpp
-  TestPregrade.cpp)
+  TestPregrade.cpp
+  # Performance diagnostics: 30-sample timing window (status-bar chip).
+  TestPerfStats.cpp)
 
 target_link_libraries(lrc_tests PRIVATE lrc_catalog Catch2::Catch2WithMain)
 # TestPerfAnchors.cpp uses GetProcessMemoryInfo (process-memory sampling) on

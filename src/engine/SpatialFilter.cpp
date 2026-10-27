@@ -8,6 +8,8 @@
 
 #include "engine/SpatialFilter.h"
 
+#include <atomic>
+#include <mutex>
 #include <utility>
 
 #include "engine/GaussianBlur.h"
@@ -30,6 +32,19 @@ public:
     }
 };
 
+// Requested backend preference (process-global). Relaxed ordering is enough:
+// the value is only read to decide which backend to construct under the
+// instance mutex below, never to synchronise data.
+std::atomic<PixelBackendPreference> g_preference{PixelBackendPreference::Auto};
+
+// Process-wide pipeline backend instance. The atomic shared_ptr gives render
+// call sites a lock-free fast path while setPixelBackendPreference() may swap
+// the instance from the UI thread; any in-flight render keeps its own
+// shared_ptr copy, so a swap cannot invalidate a running blur.
+std::atomic<std::shared_ptr<const SpatialFilterBackend>> g_pipelineBackend;
+
+std::mutex g_backendMutex;
+
 }  // namespace
 
 std::shared_ptr<const SpatialFilterBackend> cpuSpatialFilterBackend() {
@@ -42,6 +57,13 @@ std::shared_ptr<const SpatialFilterBackend> cpuSpatialFilterBackend() {
 }
 
 std::shared_ptr<const SpatialFilterBackend> createSpatialFilterBackend() {
+    // Forced CPU is an explicit user preference: skip the device probe entirely
+    // so a broken driver can never be touched (see the preference contract in
+    // SpatialFilter.h).
+    if (g_preference.load(std::memory_order_relaxed) ==
+        PixelBackendPreference::ForceCpu) {
+        return cpuSpatialFilterBackend();
+    }
 #if defined(LRC_ENABLE_D3D)
     // Hardware only: WARP has no speed advantage over the CPU backend, so the
     // production factory never picks it (tests may create a WARP backend
@@ -55,11 +77,41 @@ std::shared_ptr<const SpatialFilterBackend> createSpatialFilterBackend() {
 }
 
 std::shared_ptr<const SpatialFilterBackend> pipelineSpatialFilterBackend() {
-    // Lazily probed once per process; the probe (device creation) may take a
-    // few milliseconds on first use, after which the instance is stable.
-    static const std::shared_ptr<const SpatialFilterBackend> inst =
-        createSpatialFilterBackend();
+    // Fast path: one atomic shared_ptr load per blur call site invocation.
+    if (std::shared_ptr<const SpatialFilterBackend> inst =
+            g_pipelineBackend.load(std::memory_order_acquire)) {
+        return inst;
+    }
+    // Slow path: the probe (device creation) runs once, under the mutex; after
+    // that the instance is stable until the preference is changed.
+    std::lock_guard<std::mutex> lock(g_backendMutex);
+    std::shared_ptr<const SpatialFilterBackend> inst =
+        g_pipelineBackend.load(std::memory_order_relaxed);
+    if (!inst) {
+        inst = createSpatialFilterBackend();
+        g_pipelineBackend.store(inst, std::memory_order_release);
+    }
     return inst;
+}
+
+void setPixelBackendPreference(PixelBackendPreference preference) noexcept {
+    g_preference.store(preference, std::memory_order_relaxed);
+    try {
+        std::lock_guard<std::mutex> lock(g_backendMutex);
+        g_pipelineBackend.store(createSpatialFilterBackend(),
+                                std::memory_order_release);
+    } catch (...) {
+        // Out of memory while rebuilding: keep the previous instance. The
+        // preference is already stored, so a later accessor call retries.
+    }
+}
+
+PixelBackendPreference pixelBackendPreference() noexcept {
+    return g_preference.load(std::memory_order_relaxed);
+}
+
+const char* activeSpatialBackendName() noexcept {
+    return pipelineSpatialFilterBackend()->name();
 }
 
 }  // namespace lrc

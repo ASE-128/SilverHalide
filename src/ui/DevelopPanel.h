@@ -477,6 +477,9 @@ private:
     // on click; selecting one creates a new Mask with type=AiMask and the
     // corresponding target. Pipeline::applyLocalAdjustments runs the bundled
     // BiRefNet/u2net model via globalAiEngine() and rasterizes the weight.
+    // Compiled only when LRC_ENABLE_AI=1: a no-AI build must not expose any
+    // entry point that can request an ONNX inference.
+#if LRC_ENABLE_AI
     QPushButton* maskAiSubjectBtn_ = nullptr;
     QPushButton* maskAiSkyBtn_ = nullptr;
     QPushButton* maskAiBackgroundBtn_ = nullptr;
@@ -485,6 +488,7 @@ private:
     QPushButton* maskPromptFgBtn_ = nullptr;
     QPushButton* maskPromptBgBtn_ = nullptr;
     QPushButton* maskPromptClearBtn_ = nullptr;
+#endif
     QComboBox* maskCombo_ = nullptr;
     QPushButton* maskDeleteBtn_ = nullptr;
     QWidget* maskFeatherRow_ = nullptr;
@@ -501,9 +505,12 @@ private:
     // AI Denoise controls (Detail section). enabled+strength map
     // directly to Adjustments::aiDenoise; Pipeline::applySpatialAdjustments
     // runs the bundled NAFNet model when globalAiEngine() reports it ready.
+    // Compiled only when LRC_ENABLE_AI=1 (see the mask buttons above).
+#if LRC_ENABLE_AI
     QCheckBox* aiDenoiseEnabledCheck_ = nullptr;
     QSlider* aiDenoiseStrengthSlider_ = nullptr;
     QDoubleSpinBox* aiDenoiseStrengthSpin_ = nullptr;
+#endif
 
     // --- colour-range mask (UI) ----------------------------------------------
     QPushButton* maskColorBtn_ = nullptr;

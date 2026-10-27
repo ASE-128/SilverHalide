@@ -73,7 +73,7 @@ option(LRC_USE_OPENCV "Enable OpenCV auxiliary helpers (heavy dependency)" OFF)
 option(LRC_ENABLE_AI "Enable AI features (ONNX Runtime)" ON)
 option(LRC_ENABLE_LENSFUN "Enable Lensfun lens correction profiles" ON)
 option(LRC_ENABLE_SIMD "Enable SIMD fast paths (gaussianBlur AVX2, batch passes)" OFF)
-option(LRC_ENABLE_D3D "Enable D3D11 DirectCompute GPU pixel-filter backend (Windows)" OFF)
+option(LRC_ENABLE_D3D "Enable D3D11 DirectCompute GPU pixel-filter backend (Windows)" ON)
 
 # ---------------------------------------------------------------------------
 # External dependencies. Two acquisition strategies:
@@ -399,10 +399,12 @@ if(LRC_ENABLE_SIMD)
   # engine's `#ifdef LRC_ENABLE_SIMD` (not just `==1`) guards stay false,
   # exactly matching their pre-P2-2 default-disabled behaviour.
 endif()
-# --- Optional D3D11 DirectCompute backend (LRC_ENABLE_D3D, default OFF) ------
-# P3-4: GPU pixel pipeline. When ON, define the guard macro PUBLIC (so the
-# GPU-gated tests in TestSpatialBackend.cpp compile too), compile the
-# DirectCompute backend and link the Windows SDK D3D11 + shader compiler.
+# --- Optional D3D11 DirectCompute backend (LRC_ENABLE_D3D, default ON) -------
+# GPU pixel pipeline. When ON, define the guard macro PUBLIC (so the GPU-gated
+# tests in TestSpatialBackend.cpp compile too), compile the DirectCompute
+# backend and link the Windows SDK D3D11 + shader compiler. Device creation
+# failure or a driver hang falls back to the CPU path at runtime, and the UI
+# exposes a "CPU only" escape hatch.
 # Windows-only: the option is forced OFF on non-MSVC/non-Windows hosts.
 if(LRC_ENABLE_D3D)
   if(NOT WIN32)
@@ -495,12 +497,19 @@ if(LRC_ENABLE_QT)
     # --- PHASE_14 / 15: Dialogs -----------------------------------------
     src/ui/DuplicateResultsDialog.cpp
     src/ui/SoftProofingDialog.cpp
-    src/ui/ModelManagementWidget.cpp)
+    # 视图 → 性能诊断…: modeless snapshot dialog (status-bar chip companion).
+    src/ui/PerfDiagnosticsDialog.cpp)
   # WIN32 => GUI-subsystem executable: no console window on launch. The
   # Qt6::EntryPointPrivate (qtmain) target supplies the WinMain shim that
   # forwards to the app's own main().
   add_executable(lrc_lightroom WIN32 src/main.cpp ${LRC_UI_SOURCES}
                  resources/resources.qrc)
+  # Model management (download/verify ONNX weights) is itself an AI-facing UI;
+  # a LRC_ENABLE_AI=OFF build compiles it out entirely, mirroring the
+  # #if LRC_ENABLE_AI guards around the AI controls in MainWindow/DevelopPanel.
+  if(LRC_ENABLE_AI)
+    target_sources(lrc_lightroom PRIVATE src/ui/ModelManagementWidget.cpp)
+  endif()
   if(WIN32)
     # Embed the application icon and version info into the .exe via a resource
     # script. The relative path in resources/app.rc is resolved against the
@@ -518,6 +527,10 @@ if(LRC_ENABLE_QT)
     Qt6::Widgets Qt6::Network Qt6::Concurrent Qt6::EntryPointPrivate
     Qt6::CorePrivate)  # for QZipReader (private API) — used by ModelManager to extract .onnx from .zip download_url (Qualcomm NAFNet)
   target_include_directories(lrc_lightroom PRIVATE src)
+  if(WIN32)
+    # GetProcessMemoryInfo (性能诊断对话框的工作集采样).
+    target_link_libraries(lrc_lightroom PRIVATE psapi)
+  endif()
   add_custom_command(TARGET lrc_lightroom POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_LIST_DIR}/resources/Camera"

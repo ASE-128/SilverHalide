@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #include "engine/Pipeline.h"
@@ -213,6 +214,28 @@ TEST_CASE("Spatial backend: factory never returns null and stays in tolerance",
             REQUIRE(delta < 0.008f);
         }
     }
+}
+
+TEST_CASE("Spatial backend: ForceCpu preference short-circuits the GPU probe",
+          "[spatial][backend][preference]") {
+    // The preference is process-global; collect the observations first and
+    // restore Auto before asserting so a failed REQUIRE cannot leak ForceCpu
+    // into the remaining tests of this binary.
+    setPixelBackendPreference(PixelBackendPreference::ForceCpu);
+    const bool forcedIsCpu = !pipelineSpatialFilterBackend()->isGpu();
+    const std::string forcedName = activeSpatialBackendName();
+    const bool factoryIsCpu = !createSpatialFilterBackend()->isGpu();
+
+    setPixelBackendPreference(PixelBackendPreference::Auto);
+    const bool autoRestored =
+        pixelBackendPreference() == PixelBackendPreference::Auto;
+    const bool autoBackendAlive = pipelineSpatialFilterBackend() != nullptr;
+
+    REQUIRE(forcedIsCpu);
+    REQUIRE(forcedName == "cpu");
+    REQUIRE(factoryIsCpu);
+    REQUIRE(autoRestored);
+    REQUIRE(autoBackendAlive);
 }
 
 #if defined(LRC_ENABLE_D3D)

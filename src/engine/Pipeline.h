@@ -195,6 +195,39 @@ public:
     size_t cacheCapacityBytes() const;
     size_t cacheBytes() const;
 
+    /**
+     * @brief Cumulative preview-cache request counters.
+     *
+     * `hits` counts requests served from a cache, `misses` requests that had to
+     * render from the source. Two cache layers feed these counters:
+     * - the bounded preview LRU in render() (lookupCache);
+     * - the incremental per-stage chain in renderPreview(), where a restart
+     *   above stage A counts as a hit and a from-source render as a miss.
+     *
+     * Counters are monotonically increasing for the lifetime of the Pipeline,
+     * except that clearCache() resets them together with the cache state (it is
+     * a hard reset of the cache).
+     *
+     * @note Thread-safe. The 1:1 full-res path and renderLinearBounded
+     *       deliberately bypass both caches and are not counted.
+     */
+    struct CacheStats {
+        uint64_t hits = 0;
+        uint64_t misses = 0;
+
+        /// @return Fraction of lookups served from the cache in [0,1]; 0 when
+        ///         no lookup happened yet.
+        double hitRate() const noexcept {
+            const uint64_t total = hits + misses;
+            return total == 0 ? 0.0
+                              : static_cast<double>(hits) /
+                                    static_cast<double>(total);
+        }
+    };
+
+    /// @return Coherent snapshot of the preview-LRU counters (thread-safe).
+    CacheStats cacheStats() const;
+
     // Applies the adjustment stack to an F32 buffer in place (linear light).
     static void applyAdjustments(const Adjustments& adjustments,
                                  float* pixels, size_t pixelCount);
@@ -507,6 +540,11 @@ private:
     std::unordered_map<CacheKey, ImageBufferPtr, CacheKeyHash> cache_;
     std::list<CacheKey> lru_;
     size_t cacheBytes_ = 0;
+    // Diagnostic counters (see cacheStats()). They are updated inside the
+    // cacheMutex_ critical section, so atomic is only needed to let the stats
+    // snapshot read them without taking the lock on the UI thread.
+    std::atomic<uint64_t> cacheHits_{0};
+    std::atomic<uint64_t> cacheMisses_{0};
     mutable std::mutex cacheMutex_;
 
     // Incremental preview render-state cache. Guarded by renderStateMutex_;

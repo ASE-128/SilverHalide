@@ -19,6 +19,18 @@
 
 namespace lrc {
 
+/**
+ * @brief Process-wide backend selection requested by the user / application.
+ *
+ * Auto keeps the legacy behaviour: probe the GPU backend when it was compiled
+ * in and use it if the device probe succeeds, otherwise fall back to CPU.
+ * ForceCpu skips the GPU probe entirely (device creation is never attempted),
+ * which is the escape hatch for machines where the GPU path is slower or
+ * unstable. The preference is process-global because the pipeline call sites
+ * share one backend instance.
+ */
+enum class PixelBackendPreference { Auto, ForceCpu };
+
 #if defined(LRC_ENABLE_D3D)
 class D3D11SpatialFilterBackend;
 #endif
@@ -81,11 +93,35 @@ std::shared_ptr<const SpatialFilterBackend> cpuSpatialFilterBackend();
 /**
  * @brief Process-wide backend used by the pipeline's blur call sites.
  *
- * Lazily created on first use (thread-safe). The probe runs once; after that
- * the returned backend is stable for the process lifetime.
+ * Lazily created on first use (thread-safe) and stable until the preference
+ * changes: setPixelBackendPreference() rebuilds it so the switch applies
+ * without restarting the application.
  *
  * @return Never null.
  */
 std::shared_ptr<const SpatialFilterBackend> pipelineSpatialFilterBackend();
+
+/**
+ * @brief Selects the backend used by all subsequent pipeline renders.
+ *
+ * Rebuilds the process-wide instance immediately (probing only when the new
+ * preference is Auto). Call it before rendering starts, or at any time from a
+ * UI thread -- concurrent render calls keep a shared reference to the previous
+ * backend, so the swap cannot invalidate an in-flight blur.
+ *
+ * @note Thread-safe. ForceCpu never touches the D3D11 device path.
+ */
+void setPixelBackendPreference(PixelBackendPreference preference) noexcept;
+
+/// @return The currently requested preference.
+PixelBackendPreference pixelBackendPreference() noexcept;
+
+/**
+ * @brief Stable short name of the backend the pipeline is actually using.
+ *
+ * Forces the lazy probe on first call. Guaranteed to be a static string
+ * ("cpu" or "d3d11"), so the pointer stays valid for the process lifetime.
+ */
+const char* activeSpatialBackendName() noexcept;
 
 }  // namespace lrc

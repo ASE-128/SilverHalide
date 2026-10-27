@@ -17,6 +17,8 @@
 
 #include "engine/SpatialFilterD3D11.h"
 
+#include "engine/GaussianBlur.h"
+
 #include <windows.h>
 
 #include <d3d11.h>
@@ -24,6 +26,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -62,8 +65,17 @@ cbuffer gParams : register(b0) {
     uint  gPad0;
     uint  gPad1;
     uint  gPad2;
-    float gKernel[64]; // exact-kernel weights, indexed [0 .. 2*gRadius]
+    // D3DCompiler packs cbuffer arrays with a 16-byte stride per element (a
+    // 64-element float array reports a 1056-byte cbuffer, see the note on
+    // Params below), so the weights are declared as float4[16] to keep the
+    // CPU-side 64-float array byte-compatible: weight k lives in
+    // gKernel[k / 4][k % 4].
+    float4 gKernel[16]; // exact-kernel weights, indexed [0 .. 2*gRadius]
 };
+
+// Weight lookup for the exact-kernel branch: k is the flat index into the
+// 64-weight array, remapped onto the float4-strided cbuffer layout.
+float gWeight(uint k) { return gKernel[k >> 2][k & 3u]; }
 
 [numthreads(256, 1, 1)]
 void BlurH(uint3 dtid : SV_DispatchThreadID) {
@@ -76,7 +88,7 @@ void BlurH(uint3 dtid : SV_DispatchThreadID) {
     if (gMode == 0u) {
         for (int i = -r; i <= r; ++i) {
             int sx = clamp(int(x) + i, 0, int(gW) - 1);
-            acc += gIn[uint(sx) + y * gW] * gKernel[uint(i + r)];
+            acc += gIn[uint(sx) + y * gW] * gWeight(uint(i + r));
         }
     } else {
         for (int i = -r; i <= r; ++i) {
@@ -99,7 +111,7 @@ void BlurV(uint3 dtid : SV_DispatchThreadID) {
     if (gMode == 0u) {
         for (int i = -r; i <= r; ++i) {
             int sy = clamp(int(y) + i, 0, int(gH) - 1);
-            acc += gIn[uint(sy) * gW + x] * gKernel[uint(i + r)];
+            acc += gIn[uint(sy) * gW + x] * gWeight(uint(i + r));
         }
     } else {
         for (int i = -r; i <= r; ++i) {
@@ -113,6 +125,12 @@ void BlurV(uint3 dtid : SV_DispatchThreadID) {
 )HLSL";
 
 // Constant-buffer layout must match the HLSL cbuffer above byte-for-byte.
+// Keep `kernel` as a flat 64-float array: it is 16-byte aligned and exactly
+// 256 bytes, which is what an HLSL `float4[16]` occupies. Do NOT declare the
+// HLSL side as `float gKernel[64]`: D3DCompiler gives every cbuffer array
+// element a 16-byte slot, so a 64-float declaration reflects as a 1056-byte
+// cbuffer and silently reads the wrong weights (this used to make the
+// startup probe fail on every GPU, forcing a permanent CPU fallback).
 struct alignas(16) Params {
     uint32_t w = 0;
     uint32_t h = 0;
@@ -328,6 +346,47 @@ struct D3D11SpatialFilterBackend::Impl {
 
     // D3D11 immediate context is not thread-safe; serialize every blur().
     mutable std::mutex mtx;
+
+    // Set once the device is unusable (driver reset / TDR / a dispatch that
+    // raised an access violation). blur() then permanently uses the CPU
+    // fallback instead of issuing more calls into a broken device.
+    std::atomic<bool> dead{false};
+
+    // Runs the H/V ping-pong and the readback. Written with POD locals only so
+    // the SEH guard compiles (C2712 forbids __try when the function holds
+    // objects that need unwinding). Returns false on any exception or HRESULT
+    // failure; the caller degrades to CPU.
+    bool executeGpu(const float* src, size_t n, const Params& params,
+                    int boxPasses, float* dst) {
+        __try {
+            const uint64_t totalGroups = (static_cast<uint64_t>(n) + 255u) / 256u;
+            const uint32_t numGroupsX =
+                static_cast<uint32_t>(std::min<uint64_t>(totalGroups, 65535u));
+            const uint32_t numGroupsY =
+                static_cast<uint32_t>((totalGroups + 65534u) / 65535u);
+            ID3D11DeviceContext* dctx = ctx.Get();
+            // Upload source into bufA; ping-pong: A -> B -> A -> ... final in A.
+            dctx->UpdateSubresource(bufA.Get(), 0, nullptr, src, 0, 0);
+            for (int pass = 0; pass < boxPasses; ++pass) {
+                runPass(shaderH.Get(), srvA.Get(), uavB.Get(), params, numGroupsX,
+                        numGroupsY);
+                runPass(shaderV.Get(), srvB.Get(), uavA.Get(), params, numGroupsX,
+                        numGroupsY);
+            }
+            // Synchronous readback: staging Map forces completion of every
+            // queued command, so `dst` is fully written before returning.
+            dctx->CopyResource(staging.Get(), bufA.Get());
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (FAILED(dctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+                return false;
+            }
+            std::memcpy(dst, mapped.pData, n * sizeof(float));
+            dctx->Unmap(staging.Get(), 0);
+            return device->GetDeviceRemovedReason() == S_OK;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
 };
 
 D3D11SpatialFilterBackend::~D3D11SpatialFilterBackend() = default;
@@ -436,6 +495,8 @@ void D3D11SpatialFilterBackend::blur(const float* src, int w, int h, float sigma
         boxPasses = 3;
     }
 
+    // Dispatch geometry: flattened 1D over w*h threads; 2D grid rows of
+    // kThreadsPerRow threads keep the dispatch within D3D11 group limits.
     const size_t bytes = n * sizeof(float);
     if (!impl_->ensureBuffers(bytes)) {
         // Allocation failure: degrade deterministically to a zeroed output
@@ -444,33 +505,16 @@ void D3D11SpatialFilterBackend::blur(const float* src, int w, int h, float sigma
         return;
     }
 
-    // Dispatch geometry: flattened 1D over w*h threads; 2D grid rows of
-    // kThreadsPerRow threads keep the dispatch within D3D11 group limits.
-    const uint64_t totalGroups = (static_cast<uint64_t>(n) + 255u) / 256u;
-    const uint32_t numGroupsX =
-        static_cast<uint32_t>(std::min<uint64_t>(totalGroups, 65535u));
-    const uint32_t numGroupsY =
-        static_cast<uint32_t>((totalGroups + 65534u) / 65535u);
-
-    ID3D11DeviceContext* ctx = impl_->ctx.Get();
-    // Upload source into bufA; ping-pong: A -> B -> A -> ... final in A.
-    ctx->UpdateSubresource(impl_->bufA.Get(), 0, nullptr, src, 0, 0);
-    for (int pass = 0; pass < boxPasses; ++pass) {
-        impl_->runPass(impl_->shaderH.Get(), impl_->srvA.Get(),
-                       impl_->uavB.Get(), params, numGroupsX, numGroupsY);
-        impl_->runPass(impl_->shaderV.Get(), impl_->srvB.Get(),
-                       impl_->uavA.Get(), params, numGroupsX, numGroupsY);
-    }
-
-    // Synchronous readback: staging Map forces completion of every queued
-    // command, so `out` is fully written before blur() returns.
-    ctx->CopyResource(impl_->staging.Get(), impl_->bufA.Get());
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (SUCCEEDED(ctx->Map(impl_->staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-        std::memcpy(out.data(), mapped.pData, n * sizeof(float));
-        ctx->Unmap(impl_->staging.Get(), 0);
-    } else {
-        std::fill(out.begin(), out.end(), 0.0f);
+    // A device that already failed (driver reset / TDR) is never touched again:
+    // the CPU bridge produces the identical result set.
+    if (impl_->dead.load(std::memory_order_relaxed) ||
+        !impl_->executeGpu(src, n, params, boxPasses, out.data())) {
+        if (!impl_->dead.exchange(true, std::memory_order_relaxed)) {
+            // Diagnostics only; the fallback below is the observable behaviour.
+            OutputDebugStringA("lrc: D3D11 spatial backend unavailable, "
+                               "falling back to CPU\n");
+        }
+        detail::gaussianBlur(src, w, h, sigma, out);
     }
 }
 

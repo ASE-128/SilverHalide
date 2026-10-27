@@ -318,6 +318,9 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     // bundled NAFNet model when Pipeline::globalAiEngine() reports it ready.
     // When the model is missing, enabled has no effect (manual NR sliders
     // above remain authoritative) — so the control is always visible.
+    // Compiled only when AI is enabled: a no-AI build must not offer a
+    // control whose only effect is an ONNX inference.
+#if LRC_ENABLE_AI
     auto* aiNrLabel = new QLabel(tr("AI 降噪"), this);
     aiNrLabel->setProperty("role", "subTitle");
     detail->addWidget(aiNrLabel);
@@ -379,6 +382,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                     warnIfAiDenoiseModelMissing();
                 scheduleDebounce();
             });
+#endif  // LRC_ENABLE_AI (AI denoise controls)
 
     // Colour section (HSL per channel).
     PanelSection* color =
@@ -732,6 +736,9 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     // clicking creates a new Mask with type=AiMask and the chosen target,
     // immediately rasterized by Pipeline::applyLocalAdjustments via the
     // bundled BiRefNet/u²Net model. No interactive drawing step is needed.
+    // The prompt controls below belong to the same ONNX-backed path, so both
+    // blocks vanish in a no-AI build.
+#if LRC_ENABLE_AI
     auto* aiMaskRow = new QHBoxLayout;
     aiMaskRow->setSpacing(6);
     maskAiSubjectBtn_ = new QPushButton(tr("AI 主体"), this);
@@ -789,6 +796,7 @@ DevelopPanel::DevelopPanel(QWidget* parent)
                 if (currentMaskIndex() >= 0)
                     emit maskPromptClearRequested(currentMaskIndex());
             });
+#endif  // LRC_ENABLE_AI (AI mask + prompt controls)
 
     // Mask list + delete.
     auto* maskComboRow = new QHBoxLayout;
@@ -1956,7 +1964,11 @@ void DevelopPanel::updateMaskSectionVisibility() {
     maskSoftnessRow_->setVisible(showBrush);
     maskColorRow_->setVisible(showColor);
     subRangeRow_->setVisible(showSubRange);
+#if LRC_ENABLE_AI
     maskPromptRow_->setVisible(showPrompt);
+#else
+    Q_UNUSED(showPrompt);
+#endif
     maskDeleteBtn_->setEnabled(has);
 }
 
