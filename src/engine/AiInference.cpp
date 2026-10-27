@@ -190,6 +190,11 @@ struct AiInferenceEngine::SessionHolder {
     std::unique_ptr<Ort::Session> session;
 #endif
     BuiltinKind builtin = BuiltinKind::None;
+    // Ort::Session::Run is not thread-safe. Exactly one session is kept per
+    // model (not one per thread) because model weights are hundreds of MB; a
+    // per-thread copy would multiply the resident set by the worker count.
+    // Concurrent callers of the same model are therefore serialised here.
+    std::mutex runMutex;
 };
 
 struct AiInferenceEngine::Impl {
@@ -200,12 +205,13 @@ struct AiInferenceEngine::Impl {
     AiInferenceEngine::ExecutionProvider preferred =
         AiInferenceEngine::ExecutionProvider::Cpu;
 
-    // Thread-id -> (modelId -> SessionHolder).  Each thread owns its own
-    // Ort::Session because a single session isn't safe for concurrent Run.
-    using PerModelSessions = std::unordered_map<std::string, SessionHolder>;
-    using ThreadSessions = std::unordered_map<std::thread::id, PerModelSessions>;
-    ThreadSessions sessions;
-    std::mutex sessionsMutex;  // guards `sessions` (not per-session Run calls)
+    // Model id -> lazily created SessionHolder (one per model, see runMutex).
+    // unique_ptr keeps the holder address stable across map rehashes and
+    // avoids requiring SessionHolder to be movable (std::mutex).
+    using ModelSessions = std::unordered_map<std::string,
+                                             std::unique_ptr<SessionHolder>>;
+    ModelSessions sessions;
+    std::mutex sessionsMutex;  // guards `sessions` (not the per-model run locks)
 
 #if LRC_ENABLE_AI
     // The ONNX Runtime env is a process-wide singleton; Ort::Env isn't
@@ -244,22 +250,25 @@ bool AiInferenceEngine::loadModel(const ModelInfo& info) {
     }
 
     // Decide if this is a builtin, real-ONNX file, or nothing loadable.
-    // We only upsert into `models_` after the load succeeds so callers can
-    // rely on !hasModel(x) after a failed loadModel(x).
+    // Registration is deliberately cheap: no Ort::Session is created here.
+    // Startup registers every bundled model, and eagerly materialising a
+    // 440 MB denoiser + 214 MB segmentation session would add ~650 MB of
+    // resident weights before the user touches any AI feature. The session is
+    // created on the first run() for that model instead (getOrCreateSession),
+    // so registration failures are limited to "file missing" and a corrupt
+    // graph surfaces as an inference error on first use.
     const BuiltinKind bk = builtinKindForPath(info.onnxPath);
 
     if (bk != BuiltinKind::None) {
         // --- Builtin path: register only, nothing external to load ---------
         std::unique_lock lock(mutex_);
         impl_->models[info.id] = info;
-        std::unique_lock<std::mutex> sl(impl_->sessionsMutex);
-        SessionHolder h;
-        h.builtin = bk;
-        impl_->sessions[std::this_thread::get_id()][info.id] = std::move(h);
         return true;
     }
 
-    // --- Real-ONNX path: pre-warm a session for the calling thread ----------
+    // --- Real-ONNX path: validate the file and register only ----------------
+    // Deferring Ort::Session creation to the first run() keeps idle memory at
+    // the no-AI baseline; the cost is a one-time load on first inference.
 #if LRC_ENABLE_AI
     if (!impl_->env) {
         setLastError(lastError_, "ONNX Runtime env not initialised", errMutex_);
@@ -271,28 +280,11 @@ bool AiInferenceEngine::loadModel(const ModelInfo& info) {
         setLastError(lastError_, oss.str(), errMutex_);
         return false;
     }
-    try {
-        Ort::SessionOptions opts = makeSessionOptions(
-            impl_->preferred == ExecutionProvider::DirectML);
-
-        const auto wide = info.onnxPath.wstring();
-        auto session = std::make_unique<Ort::Session>(
-            *impl_->env, wide.c_str(), opts);
-
-        SessionHolder h;
-        h.session = std::move(session);
-        // Now that everything external succeeded, commit to the registry.
-        {
-            std::unique_lock lock(mutex_);
-            impl_->models[info.id] = info;
-        }
-        std::unique_lock<std::mutex> sl(impl_->sessionsMutex);
-        impl_->sessions[std::this_thread::get_id()][info.id] = std::move(h);
-        return true;
-    } catch (const Ort::Exception& e) {
-        setLastError(lastError_, std::string("ONNX load error: ") + e.what(), errMutex_);
-        return false;
+    {
+        std::unique_lock lock(mutex_);
+        impl_->models[info.id] = info;
     }
+    return true;
 #else
     setLastError(lastError_,
              "LRC_ENABLE_AI=0: real ONNX models unavailable. "
@@ -341,6 +333,7 @@ AiInferenceEngine::SessionHolder* AiInferenceEngine::getOrCreateSession(
     // session (session load is slow and run()/runImage() want the shared lock
     // free for concurrent readers).
     std::optional<ModelInfo> infoOpt;
+    bool useDirectML = false;
     {
         std::shared_lock rlock(mutex_);
         auto it = impl_->models.find(modelId);
@@ -349,26 +342,29 @@ AiInferenceEngine::SessionHolder* AiInferenceEngine::getOrCreateSession(
             return nullptr;
         }
         infoOpt = it->second;
+        useDirectML = impl_->preferred == ExecutionProvider::DirectML;
     }
     const ModelInfo& info = *infoOpt;
 
-    // Get-or-create a session for this thread.
-    const auto tid = std::this_thread::get_id();
-    std::unique_lock<std::mutex> sl(impl_->sessionsMutex);
-    auto& perModel = impl_->sessions[tid];
-    auto hIt = perModel.find(modelId);
-    if (hIt != perModel.end())
-        return &hIt->second;
+    // Fast path: the model already has a live session.
+    {
+        std::lock_guard<std::mutex> sl(impl_->sessionsMutex);
+        auto it = impl_->sessions.find(modelId);
+        if (it != impl_->sessions.end())
+            return it->second.get();
+    }
 
-    // First call on this thread — lazy-init.  For builtin models this is
-    // cheap; for real ONNX models this means the first `run` pays the
-    // session-load cost (a warn-worthy but functional path).
+    // First inference for this model — lazy-init. Builtin models are cheap;
+    // real ONNX models pay the session-load cost once, on the thread that
+    // actually runs inference (the previous per-thread cache multiplied the
+    // resident weight set by the number of worker threads).
     const BuiltinKind bk = builtinKindForPath(info.onnxPath);
     if (bk != BuiltinKind::None) {
-        SessionHolder h;
-        h.builtin = bk;
-        auto res = perModel.emplace(modelId, std::move(h));
-        return &res.first->second;
+        auto h = std::make_unique<SessionHolder>();
+        h->builtin = bk;
+        std::lock_guard<std::mutex> sl(impl_->sessionsMutex);
+        auto res = impl_->sessions.emplace(modelId, std::move(h));
+        return res.first->second.get();
     }
 #if LRC_ENABLE_AI
     if (!impl_->env || !std::filesystem::exists(info.onnxPath)) {
@@ -376,14 +372,16 @@ AiInferenceEngine::SessionHolder* AiInferenceEngine::getOrCreateSession(
         return nullptr;
     }
     try {
-        Ort::SessionOptions opts = makeSessionOptions(
-            impl_->preferred == ExecutionProvider::DirectML);
+        Ort::SessionOptions opts = makeSessionOptions(useDirectML);
         const auto wide = info.onnxPath.wstring();
         auto s = std::make_unique<Ort::Session>(*impl_->env, wide.c_str(), opts);
-        SessionHolder h;
-        h.session = std::move(s);
-        auto res = perModel.emplace(modelId, std::move(h));
-        return &res.first->second;
+        auto h = std::make_unique<SessionHolder>();
+        h->session = std::move(s);
+        // Double-checked insert: if another thread finished first, discard the
+        // duplicate session (and its weights) instead of keeping both.
+        std::lock_guard<std::mutex> sl(impl_->sessionsMutex);
+        auto res = impl_->sessions.emplace(modelId, std::move(h));
+        return res.first->second.get();
     } catch (const Ort::Exception& e) {
         setLastError(lastError_, std::string("ONNX lazy-load: ") + e.what(), errMutex_);
         return nullptr;
@@ -435,6 +433,9 @@ std::vector<float> AiInferenceEngine::run(const std::string& modelId,
 
     // 4. Real ONNX Run --------------------------------------------------------
 #if LRC_ENABLE_AI
+    // One session is shared by every thread, so Run() must be serialised per
+    // model (Ort::Session is not thread-safe).
+    std::lock_guard<std::mutex> runLock(holder->runMutex);
     try {
         Ort::Session& sess = *holder->session;
 
@@ -695,6 +696,8 @@ SamMaskResult AiInferenceEngine::runSamPoint(const std::string& encoderId,
         return result;
     }
 #if LRC_ENABLE_AI
+    // Shared per-model session: serialise this decoder Run (see runMutex).
+    std::lock_guard<std::mutex> runLock(holder->runMutex);
     try {
         Ort::Session& sess = *holder->session;
         Ort::AllocatorWithDefaultOptions alloc;

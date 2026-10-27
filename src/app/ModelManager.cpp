@@ -84,6 +84,62 @@ bool shaIsVerifiable(const std::string& sha) {
     return upper.find("TBD") == std::string::npos &&
            upper.find("PLACEHOLDER") == std::string::npos;
 }
+
+// ---------------------------------------------------------------------------
+// Verification stamps
+// ---------------------------------------------------------------------------
+// isModelReady() compares the manifest SHA256 against the whole file. The
+// bundled model set is ~656 MB (NAFNet weights alone are 442 MB), so hashing
+// it on every launch costs a full read of the install directory. A stamp
+// records the file identity (path + size + mtime) together with the hash that
+// was verified once; when the identity still matches, the earlier result is
+// trusted and the file is not re-read. Stamps live under the per-user cache
+// root because $INSTDIR is read-only for non-elevated users.
+std::filesystem::path verificationStampPath(const ModelManifestEntry& e) {
+    std::string safe;
+    safe.reserve(e.id.size());
+    for (char c : e.id) {
+        const auto uc = static_cast<unsigned char>(c);
+        safe.push_back(std::isalnum(uc) ? c : '_');
+    }
+    if (safe.empty())
+        safe = "model";
+    return ModelManager::cacheRoot() / ".verified" / (safe + ".stamp");
+}
+
+// Identity string of the file as it exists right now; empty on I/O error.
+std::string fileIdentity(const std::filesystem::path& p) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(p, ec);
+    if (ec)
+        return {};
+    const auto mtime = std::filesystem::last_write_time(p, ec);
+    if (ec)
+        return {};
+    std::ostringstream oss;
+    oss << p.string() << '|' << size << '|'
+        << static_cast<long long>(mtime.time_since_epoch().count()) << '|';
+    return oss.str();
+}
+
+bool stampMatches(const std::filesystem::path& stamp, const std::string& expected) {
+    std::ifstream in(stamp, std::ios::binary);
+    if (!in)
+        return false;
+    std::string got;
+    std::getline(in, got);
+    return got == expected;
+}
+
+void writeStamp(const std::filesystem::path& stamp, const std::string& content) {
+    // Best effort: a read-only or missing cache directory must not turn a
+    // verified model into a failure — the next launch simply re-hashes.
+    std::error_code ec;
+    std::filesystem::create_directories(stamp.parent_path(), ec);
+    std::ofstream out(stamp, std::ios::binary | std::ios::trunc);
+    if (out)
+        out << content;
+}
 }  // namespace
 
 std::filesystem::path ModelManager::cacheRoot() {
@@ -623,8 +679,24 @@ bool ModelManager::isModelReady(const ModelManifestEntry& entry) const {
         const auto sz = std::filesystem::file_size(p, ec);
         return !ec && sz == entry.sizeBytes;
     }
+
+    // Fast path: the same file identity was verified in an earlier run, so
+    // skip re-reading hundreds of MB. A reinstall/upgrade changes the size or
+    // mtime and forces a real hash below.
+    const auto identity = fileIdentity(p);
+    if (!identity.empty()) {
+        const auto expected = identity + sha;
+        if (stampMatches(verificationStampPath(entry), expected))
+            return true;
+    }
+
     const auto actual = sha256File(p);
-    return actual == sha;
+    if (actual != sha)
+        return false;
+
+    if (!identity.empty())
+        writeStamp(verificationStampPath(entry), identity + sha);
+    return true;
 }
 
 std::string ModelManager::lastError() const {

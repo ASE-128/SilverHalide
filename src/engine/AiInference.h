@@ -75,8 +75,8 @@ struct SamMaskResult {
 
 /**
  * @brief Unified inference engine. One instance per process is sufficient:
- *        sessions are keyed by (path, thread-id) so Session::Run is never
- *        called concurrently on the same Ort::Session.
+ *        exactly one session is materialised per model and Run() calls are
+ *        serialised per model, so a shared session is never used concurrently.
  *
  * Typical usage:
  *   AiInferenceEngine engine;
@@ -95,11 +95,18 @@ public:
     AiInferenceEngine& operator=(const AiInferenceEngine&) = delete;
 
     /**
-     * @brief Load / register a model. For real ONNX models this pre-warms a
-     *        thread-local session on the calling thread (so the first run()
-     *        on that thread avoids lazy-init cost). Returns true on success.
-     *        Safe to call multiple times with the same id — subsequent calls
-     *        are no-ops and return true.
+     * @brief Register a model without materialising its ONNX session.
+     *
+     * Registration is cheap on purpose: startup calls this for every bundled
+     * model, and loading a multi-hundred-MB weight file eagerly would inflate
+     * idle memory with weights the user may never use. The Ort::Session is
+     * created on the first run()/runImage() for that model. A missing file or
+     * an unusable ONNX Runtime environment is reported here; a corrupt graph
+     * surfaces as an inference error on first use.
+     *
+     * @return true when the model file exists and was registered. Safe to call
+     *         multiple times with the same id — subsequent calls overwrite the
+     *         registered ModelInfo and keep any live session.
      */
     bool loadModel(const ModelInfo& info);
 
@@ -223,16 +230,17 @@ public:
     std::string lastError() const;
 
 private:
-    // Per-thread session handle. We use an opaque pointer so the ONNX headers
-    // are only pulled into the .cpp TU. Each thread gets its own Ort::Session
-    // because single-session Run() is not thread-safe (per ONNX docs).
+    // Per-model session handle. We use an opaque pointer so the ONNX headers
+    // are only pulled into the .cpp TU. Only one Ort::Session exists per model
+    // (weights can be hundreds of MB, so a per-thread copy would multiply the
+    // resident set); concurrent Run() calls on it are serialised by the
+    // holder's own mutex.
     struct SessionHolder;
 
-    // Acquires (creating if necessary) the thread-local session for `modelId`,
+    // Acquires (creating if necessary) the per-model session for `modelId`,
     // covering both the builtin fast-path and lazy real-ONNX session creation.
     // Returns nullptr and sets lastError on any failure (unloaded model,
-    // missing env/file, LRC_ENABLE_AI=0). Shared by run() and runSamPoint() so
-    // both paths reuse the same per-thread session cache.
+    // missing env/file, LRC_ENABLE_AI=0). Shared by run() and runSamPoint().
     SessionHolder* getOrCreateSession(const std::string& modelId);
 
     struct Impl;
