@@ -133,3 +133,6 @@ end;
 [UninstallDelete]
 ; Bundled Lensfun profile database (camera/lens calibrations).
 Type: filesandordirs; Name: "{app}\share"
+; Remove the per-user model cache, which may have been created by another
+; installer variant.
+Type: filesandordirs; Name: "{localappdata}\Silver Halide\models"

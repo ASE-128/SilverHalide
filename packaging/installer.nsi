@@ -172,15 +172,14 @@ Section "Uninstall"
   RMDir  "$INSTDIR\networkinformation"
   RMDir  "$INSTDIR\styles"
   RMDir  "$INSTDIR\tls"
-  ; AI models — bundled ONNX files shipped with the installer. (Per-user
-  ; downloaded copies in %LOCALAPPDATA%/Silver Halide/models/ are NOT removed
-  ; — those may still be wanted if the user reinstalls.)
+  ; AI models — bundled ONNX files and the per-user model cache.
   Delete "$INSTDIR\models\manifest.json"
   Delete "$INSTDIR\models\nafnet-denoise.onnx"
   Delete "$INSTDIR\models\nafnet_denoise.data"
   Delete "$INSTDIR\models\rmbg2-subject.onnx"
   Delete "$INSTDIR\models\test_add_2x2.onnx"
   RMDir  "$INSTDIR\models"
+  RMDir /r "$LOCALAPPDATA\Silver Halide\models"
   RMDir  "$INSTDIR"
 
   DeleteRegKey HKLM "${APP_UNINST_KEY}"

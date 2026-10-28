@@ -201,9 +201,8 @@ begin
 end;
 
 [UninstallDelete]
-; Remove bundled read-only assets on uninstall. There are no models in this
-; variant; the per-user cache (%LOCALAPPDATA%\Silver Halide\models\) is still
-; intentionally NOT deleted — downloaded models survive an uninstall so a
-; re-install doesn't re-download.
+; Remove the per-user model cache, including models downloaded by another
+; installer variant.
+Type: filesandordirs; Name: "{localappdata}\Silver Halide\models"
 ; Bundled Lensfun profile database (camera/lens calibrations).
 Type: filesandordirs; Name: "{app}\share"
