@@ -9,6 +9,7 @@
 #include <QColor>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QFormLayout>
 #include <QEvent>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -243,6 +244,103 @@ DevelopPanel::DevelopPanel(QWidget* parent)
     makeBasicRow("去朦胧", -100.0, 100.0, 0, &lrc::Adjustments::dehaze, VizDetail);
     makeBasicRow("鲜艳度", -100.0, 100.0, 0, &lrc::Adjustments::vibrance);
     makeBasicRow("饱和度", -100.0, 100.0, 0, &lrc::Adjustments::saturation);
+
+    PanelSection* crop = addSection(QStringLiteral("crop"), tr("裁剪"));
+    auto* cropForm = new QFormLayout;
+    cropForm->setContentsMargins(0, 2, 0, 2);
+    cropAspectCombo_ = new QComboBox(this);
+    cropAspectCombo_->addItem(tr("自由比例"), 0.0);
+    cropAspectCombo_->addItem(QStringLiteral("1:1"), 1.0);
+    cropAspectCombo_->addItem(QStringLiteral("4:3"), 4.0 / 3.0);
+    cropAspectCombo_->addItem(QStringLiteral("3:2"), 3.0 / 2.0);
+    cropAspectCombo_->addItem(QStringLiteral("16:9"), 16.0 / 9.0);
+    cropForm->addRow(tr("比例"), cropAspectCombo_);
+    auto makeCropSpin = [this, cropForm](const QString& label,
+                                        QDoubleSpinBox*& spin,
+                                        double minimum, double maximum,
+                                        int decimals, double step) {
+        spin = new QDoubleSpinBox(this);
+        spin->setRange(minimum, maximum);
+        spin->setDecimals(decimals);
+        spin->setSingleStep(step);
+        spin->setKeyboardTracking(false);
+        cropForm->addRow(label, spin);
+    };
+    makeCropSpin(tr("左"), cropLeftSpin_, 0.0, 0.999, 3, 0.01);
+    makeCropSpin(tr("上"), cropTopSpin_, 0.0, 0.999, 3, 0.01);
+    makeCropSpin(tr("右"), cropRightSpin_, 0.001, 1.0, 3, 0.01);
+    makeCropSpin(tr("下"), cropBottomSpin_, 0.001, 1.0, 3, 0.01);
+    makeCropSpin(tr("拉直角度"), straightenSpin_, -45.0, 45.0, 1, 0.1);
+    crop->addLayout(cropForm);
+    auto* resetCrop = new QPushButton(tr("重置裁剪"), this);
+    resetCrop->setProperty("secondary", true);
+    crop->addWidget(resetCrop);
+    auto cropValueChanged = [this](double) {
+        if (suppressSignals_)
+            return;
+        current_.cropRect = {
+            static_cast<float>(cropLeftSpin_->value()),
+            static_cast<float>(cropTopSpin_->value()),
+            static_cast<float>(cropRightSpin_->value()),
+            static_cast<float>(cropBottomSpin_->value())};
+        current_.straightenAngle = straightenSpin_->value();
+        scheduleDebounce();
+    };
+    for (QDoubleSpinBox* spin : {cropLeftSpin_, cropTopSpin_, cropRightSpin_,
+                                 cropBottomSpin_, straightenSpin_}) {
+        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+                cropValueChanged);
+        connect(spin, &QDoubleSpinBox::editingFinished, this,
+                [this] { commitCropControls(); });
+    }
+    connect(cropAspectCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int index) {
+                if (suppressSignals_ || index <= 0 ||
+                    cropSourceWidth_ <= 0 || cropSourceHeight_ <= 0)
+                    return;
+                const double aspect =
+                    cropAspectCombo_->currentData().toDouble();
+                const double normalizedRatio =
+                    aspect * cropSourceHeight_ / cropSourceWidth_;
+                if (!std::isfinite(normalizedRatio) ||
+                    normalizedRatio <= 0.0)
+                    return;
+                const double centerX =
+                    (cropLeftSpin_->value() + cropRightSpin_->value()) * 0.5;
+                const double centerY =
+                    (cropTopSpin_->value() + cropBottomSpin_->value()) * 0.5;
+                double width = cropRightSpin_->value() -
+                               cropLeftSpin_->value();
+                double height = cropBottomSpin_->value() -
+                                cropTopSpin_->value();
+                if (width / height > normalizedRatio)
+                    width = height * normalizedRatio;
+                else
+                    height = width / normalizedRatio;
+                width = std::min(width, 1.0);
+                height = std::min(height, 1.0);
+                const double left =
+                    std::clamp(centerX - width * 0.5, 0.0, 1.0 - width);
+                const double top =
+                    std::clamp(centerY - height * 0.5, 0.0, 1.0 - height);
+                const QSignalBlocker b1(cropLeftSpin_);
+                const QSignalBlocker b2(cropTopSpin_);
+                const QSignalBlocker b3(cropRightSpin_);
+                const QSignalBlocker b4(cropBottomSpin_);
+                cropLeftSpin_->setValue(left);
+                cropTopSpin_->setValue(top);
+                cropRightSpin_->setValue(left + width);
+                cropBottomSpin_->setValue(top + height);
+                commitCropControls();
+            });
+    connect(resetCrop, &QPushButton::clicked, this, [this] {
+        current_.cropRect = {};
+        current_.straightenAngle = 0.0;
+        syncCropControls();
+        scheduleDebounce();
+        emit adjustmentsCommitted(
+            std::make_shared<const lrc::Adjustments>(current_));
+    });
 
     // Tone curve section.
     PanelSection* curve =
@@ -1986,16 +2084,20 @@ void DevelopPanel::clearMaskTool() {
 
 void DevelopPanel::setSectionMode(int mode) {
     const bool showEdit = mode == 0;
+    const bool showCrop = mode == 1;
     const bool showMask = mode == 2;
     const bool showMetadata = mode == 3;
     for (PanelSection* section : sections_) {
         const QString title = section->title();
         const bool visible = (showEdit && title != tr("蒙版") &&
-                              title != tr("元数据")) ||
+                              title != tr("元数据") &&
+                              title != tr("裁剪")) ||
+                             (showCrop && title == tr("裁剪")) ||
                              (showMask && title == tr("蒙版")) ||
                              (showMetadata && title == tr("元数据"));
         section->setVisible(visible);
     }
+    emit cropToolActivated(showCrop);
 }
 
 // --- colour-range mask --------------------------------------------------------
@@ -2968,6 +3070,21 @@ void DevelopPanel::setAdjustments(const lrc::Adjustments& adjustments) {
             syncHSLRow(ci, row);
     for (const auto& row : splitToneRows_)
         syncSplitToneRow(row);
+    if (!std::isfinite(current_.cropRect.left) ||
+        !std::isfinite(current_.cropRect.top) ||
+        !std::isfinite(current_.cropRect.right) ||
+        !std::isfinite(current_.cropRect.bottom) ||
+        current_.cropRect.left < 0.0f || current_.cropRect.top < 0.0f ||
+        current_.cropRect.right > 1.0f || current_.cropRect.bottom > 1.0f ||
+        current_.cropRect.right <= current_.cropRect.left ||
+        current_.cropRect.bottom <= current_.cropRect.top) {
+        current_.cropRect = {};
+    }
+    if (!std::isfinite(current_.straightenAngle))
+        current_.straightenAngle = 0.0;
+    current_.straightenAngle =
+        std::clamp(current_.straightenAngle, -45.0, 45.0);
+    syncCropControls();
     syncMaskSection();
     syncMaskSliders();
     syncColorTargetSection();
@@ -3022,6 +3139,71 @@ void DevelopPanel::setLensfunProfile(const QString& status, bool available,
     // initially-constructed label uses (see dark.qss, QLabel[role="hint"]).
     lensfunStatus_->setProperty("state", available ? "ok" : "muted");
     repolish(lensfunStatus_);
+}
+
+void DevelopPanel::setCropSourceSize(int width, int height) {
+    cropSourceWidth_ = std::max(0, width);
+    cropSourceHeight_ = std::max(0, height);
+    if (cropAspectCombo_)
+        cropAspectCombo_->setEnabled(cropSourceWidth_ > 0 &&
+                                     cropSourceHeight_ > 0);
+}
+
+void DevelopPanel::setCropRectFromViewport(const QRectF& normalizedRect,
+                                           bool committed) {
+    if (!normalizedRect.isValid() || normalizedRect.left() < 0.0 ||
+        normalizedRect.top() < 0.0 || normalizedRect.right() > 1.0 ||
+        normalizedRect.bottom() > 1.0)
+        return;
+    const lrc::CropRect crop{
+        static_cast<float>(normalizedRect.left()),
+        static_cast<float>(normalizedRect.top()),
+        static_cast<float>(normalizedRect.right()),
+        static_cast<float>(normalizedRect.bottom())};
+    if (current_.cropRect == crop) {
+        if (committed)
+            emit adjustmentsCommitted(
+                std::make_shared<const lrc::Adjustments>(current_));
+        return;
+    }
+    current_.cropRect = crop;
+    syncCropControls();
+    if (committed) {
+        emit adjustmentsCommitted(
+            std::make_shared<const lrc::Adjustments>(current_));
+    } else {
+        emit adjustmentsChangedCoarse(
+            std::make_shared<const lrc::Adjustments>(current_));
+    }
+}
+
+void DevelopPanel::syncCropControls() {
+    if (!cropLeftSpin_)
+        return;
+    const QSignalBlocker left(cropLeftSpin_);
+    const QSignalBlocker top(cropTopSpin_);
+    const QSignalBlocker right(cropRightSpin_);
+    const QSignalBlocker bottom(cropBottomSpin_);
+    const QSignalBlocker angle(straightenSpin_);
+    cropLeftSpin_->setValue(current_.cropRect.left);
+    cropTopSpin_->setValue(current_.cropRect.top);
+    cropRightSpin_->setValue(current_.cropRect.right);
+    cropBottomSpin_->setValue(current_.cropRect.bottom);
+    straightenSpin_->setValue(current_.straightenAngle);
+}
+
+void DevelopPanel::commitCropControls() {
+    if (suppressSignals_)
+        return;
+    current_.cropRect = {
+        static_cast<float>(cropLeftSpin_->value()),
+        static_cast<float>(cropTopSpin_->value()),
+        static_cast<float>(cropRightSpin_->value()),
+        static_cast<float>(cropBottomSpin_->value())};
+    current_.straightenAngle = straightenSpin_->value();
+    scheduleDebounce();
+    emit adjustmentsCommitted(
+        std::make_shared<const lrc::Adjustments>(current_));
 }
 
 void DevelopPanel::setSamplerChecked(bool active) {

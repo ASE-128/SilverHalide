@@ -417,9 +417,9 @@ signals:
      * @brief Content-aware crop suggestion from the last B-1 auto-develop run.
      *
      * The rectangle is normalized to [0,1] over the source image and drawn as a
-     * pure-guidance box by the viewport. It is never applied to pixels (the
-     * pipeline has no crop-rendering stage yet). hasCrop == false means "no crop
-     * recommended" and the rect values are undefined.
+     * pure-guidance box by the viewport. It is not automatically copied into
+     * the user's crop adjustments. hasCrop == false means "no crop recommended"
+     * and the rect values are undefined.
      *
      * @param hasCrop  Whether a crop box was suggested.
      * @param left     Normalized left edge in [0,1].

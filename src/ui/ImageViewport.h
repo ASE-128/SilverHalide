@@ -77,10 +77,12 @@ public:
 
     // B-1 content-aware crop guidance: draws a dashed rectangle over the preview
     // at the normalized [0,1] rect suggested by the last auto-develop run. It is
-    // pure guidance -- it never writes to the adjustment stack or alters pixels
-    // (the pipeline has no crop-rendering stage yet). Clear with clearAutoCropSuggestion.
+    // pure guidance -- it never writes to the adjustment stack or alters pixels.
+    // Clear with clearAutoCropSuggestion.
     void setAutoCropSuggestion(const QRectF& normalizedRect);
     void clearAutoCropSuggestion();
+    void setCropMode(bool active);
+    void setCropRect(const QRectF& normalizedRect);
 
     void setZoomMode(ZoomMode mode);
     ZoomMode zoomMode() const { return zoomMode_; }
@@ -241,6 +243,7 @@ signals:
     void spotToolActiveChanged(bool active);
     // The Before/After / reference split mode changed (toolbar sync).
     void compareModeChanged(CompareMode mode);
+    void cropRectEdited(const QRectF& normalizedRect, bool committed);
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
@@ -337,6 +340,9 @@ private:
     void deleteSpot(int index);
     void emitSpotRemovals();
     void paintSpotOverlay(QPainter& painter);
+    void paintCropOverlay(QPainter& painter);
+    int cropHitTest(const QPointF& widgetPos) const;
+    void updateCropGesture(const QPointF& widgetPos);
     // Rebuilds the cached inverted + high-contrast visualization image.
     void rebuildSpotViz();
     // Restores the cursor after a pan/drag release based on the active tool.
@@ -359,6 +365,12 @@ private:
     // B-1 content-aware crop guidance box (normalized [0,1]) and its enable flag.
     bool autoCropActive_ = false;
     QRectF autoCropNorm_;
+    bool cropMode_ = false;
+    bool cropDragging_ = false;
+    int cropDragMode_ = 0;
+    QRectF cropRect_{0.0, 0.0, 1.0, 1.0};
+    QRectF cropDragStartRect_;
+    QPointF cropDragStartNorm_;
     QSize nativeSize_;      // native full-res size of the current image
     QSize lastViewportResolution_;  // dedup for viewportResolutionChanged()
     bool fullResRequested_ = false;  // dedup for fullResRequested()

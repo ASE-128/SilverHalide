@@ -32,6 +32,8 @@ bool Adjustments::operator==(const Adjustments& other) const {
            lensfunFocalLengthMm == other.lensfunFocalLengthMm &&
            lensfunAperture == other.lensfunAperture &&
            lensfunCropFactor == other.lensfunCropFactor &&
+           cropRect == other.cropRect &&
+           straightenAngle == other.straightenAngle &&
            vignetteMidpoint == other.vignetteMidpoint &&
            vignetteRoundness == other.vignetteRoundness &&
            vignetteFeather == other.vignetteFeather &&
@@ -375,6 +377,11 @@ size_t Adjustments::hash() const noexcept {
     mixFloat(h, lensfunFocalLengthMm);
     mixFloat(h, lensfunAperture);
     mixFloat(h, lensfunCropFactor);
+    mixFloat(h, cropRect.left);
+    mixFloat(h, cropRect.top);
+    mixFloat(h, cropRect.right);
+    mixFloat(h, cropRect.bottom);
+    mixDouble(h, straightenAngle);
     mixDouble(h, vignetteMidpoint);
     mixDouble(h, vignetteRoundness);
     mixDouble(h, vignetteFeather);
@@ -527,10 +534,14 @@ size_t Adjustments::hashStageE() const noexcept {
     return h;
 }
 
-size_t Adjustments::hashStageF() noexcept {
-    // Stage F (sRGB output) carries no adjustment parameters; a fixed constant
-    // lets the incremental render treat it as an always-unchanged stage.
-    return 0x5F5F5F5Fu;
+size_t Adjustments::hashStageF() const noexcept {
+    size_t h = 0x5F5F5F5Fu;
+    mixFloat(h, cropRect.left);
+    mixFloat(h, cropRect.top);
+    mixFloat(h, cropRect.right);
+    mixFloat(h, cropRect.bottom);
+    mixDouble(h, straightenAngle);
+    return h;
 }
 
 } // namespace lrc

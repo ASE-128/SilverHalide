@@ -314,6 +314,7 @@ endif()
 set(LRC_ENGINE_SOURCES
   src/engine/ImageBuffer.cpp
   src/engine/Adjustments.cpp
+  src/engine/CropTransform.cpp
   src/engine/ColorManager.cpp
   src/engine/ImageFormats.cpp
   src/engine/RawDecoder.cpp
@@ -356,6 +357,7 @@ set(LRC_UTILS_SOURCES
   src/utils/Json.cpp
   src/utils/ProfileIO.cpp
   src/utils/PresetLibrary.cpp
+  src/utils/AdjustmentTransfer.cpp
   src/utils/Parallel.cpp
   src/utils/Sha256.cpp)
 
@@ -477,6 +479,7 @@ if(LRC_ENABLE_QT)
     src/ui/ExportDialog.cpp
     src/ui/HdrMergeDialog.cpp
     src/ui/ImageViewport.cpp
+    src/ui/GalleryGridWidget.cpp
     src/ui/DevelopPanel.cpp
     src/ui/HistogramWidget.cpp
     src/ui/FilmstripWidget.cpp

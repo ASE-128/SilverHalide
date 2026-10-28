@@ -79,6 +79,23 @@ Auto 与 ForceCpu **不是逐位一致**（浮点求和顺序不同：`pl.previe
 - 教训：**HLSL cbuffer 数组不得按 C 布局直觉声明**；任何 cbuffer 布局变更都应以
   `D3DReflect` 的字节偏移为准。
 
+## Lightroom 核心工作流补齐（2026-10-29，工作区未提交）
+
+按已获批的路线计划推进图库/裁剪/多图交付工作流；以下代码已落地，但尚未提交：
+
+- **非破坏性裁剪与拉直**：新增归一化裁剪范围与角度，保存于 ProfileIO v7；Pipeline 的增量预览 stage F、
+  全尺寸渲染及导出均应用变换。裁剪页提供自由/常用比例、边界/角度数值设置；视口支持拖动与边缘/角点
+  调整。裁剪过程中以未裁剪预览作为操作底图，避免坐标随实时渲染缩放漂移；鼠标释放时提交一次编辑/撤销步。
+- **图库网格与选片**：新增 `GalleryGridWidget`，与胶片栏共享懒加载缩略图，支持扩展多选及批量评分、旗标、
+  色标；可在网格中切换当前照片。
+- **多图设置同步与交付**：加入按类别复制/粘贴编辑设置（裁剪默认包含，蒙版与污点数据需用户显式勾选），
+  对图库所选照片批量导出，并为各虚拟副本生成不冲突的目标文件名。
+- **测试与验收状态**：GUI 构建成功；`build_gui/tests/lrc_tests.exe "[crop],[adjustments][sync]"` 通过
+  （5 cases / 29 assertions）；真实桌面操作验收通过：进入图库网格选择 RAW，再进入裁剪页拖动选区，
+  切回编辑页确认预览确实裁成 699×521；点“重置裁剪”后确认完整图恢复为 1222×918。
+  Qt smoke runner 在 offscreen 定向执行时仍未能于 30 秒内退出；本轮 UI 行为另以真实 Windows 窗口交互
+  完成验收。
+
 ## 现代 C++ 改造：IM-1 ~ IM-11 落地（2026-10-19 ~ 10-20，工作区未提交）
 
 按 [docs/spec/modern-cpp-adoption-audit.md](docs/spec/modern-cpp-adoption-audit.md) 的审计结论与验收清单实施（Agent Teams，两阶段 T0~T13 + U1~U5）。逐项 before/after、证据与遗留见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md)，基线数字与两份逐位 oracle 见 [docs/spec/modern-cpp-adoption-baseline.md](docs/spec/modern-cpp-adoption-baseline.md)。

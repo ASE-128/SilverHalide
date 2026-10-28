@@ -5,6 +5,8 @@ add_executable(lrc_tests
   TestMathUtils.cpp
   TestJson.cpp
   TestAdjustments.cpp
+  TestCropTransform.cpp
+  TestAdjustmentTransfer.cpp
   TestAutoAdjust.cpp
   TestImageBuffer.cpp
   TestColorManager.cpp
@@ -104,6 +106,7 @@ if(LRC_ENABLE_QT)
     ../src/ui/HistogramWidget.cpp
     ../src/ui/ImportWorker.cpp
     ../src/ui/ImageViewport.cpp
+    ../src/ui/GalleryGridWidget.cpp
     ../src/ui/Logging.cpp
     ../src/ui/PanelSection.cpp
     ../src/ui/PreviewWorker.cpp

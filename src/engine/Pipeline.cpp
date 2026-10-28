@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "engine/ColorManager.h"
+#include "engine/CropTransform.h"
 #include "engine/LensfunProfile.h"
 #include "engine/RenderScratch.h"
 #include "engine/SpatialFilter.h"
@@ -2776,7 +2777,7 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
         static_cast<uint64_t>(adjustments.hashStageC()),
         static_cast<uint64_t>(adjustments.hashStageD()),
         static_cast<uint64_t>(adjustments.hashStageE()),
-        static_cast<uint64_t>(Adjustments::hashStageF()),
+        static_cast<uint64_t>(adjustments.hashStageF()),
     };
 
     // --- 3. Cache identity (image + working resolution + content).
@@ -2894,17 +2895,25 @@ ImageBufferPtr Pipeline::renderPreview(const ImageBuffer& source,
     ImageBufferPtr stageEOut;
     for (int i = start; i <= 5; ++i) {
         if (i == 5) {
-            // Stage F: sRGB output. `chain` holds the stage-E output and
-            // toDisplaySRGB only reads it. Hand the adjusted linear F32 display
-            // buffer (the stage-F input) to the caller before the conversion so
-            // a linear-light histogram can be derived without a second pass.
-            if (linearDisplayOut && stageEOut)
-                *linearDisplayOut = stageEOut;  // ownership leaves the pool
-            ImageBufferPtr u8 = cm_->toDisplaySRGB(*chain);
+            // Stage F applies geometry before display conversion. The crop
+            // buffer is private so the retained stage-E snapshot stays read-only.
+            ImageBufferPtr cropped;
+            const ImageBuffer* finalLinear = chain.get();
+            if (hasCropTransform(adjustments.cropRect,
+                                 adjustments.straightenAngle)) {
+                cropped = applyCropAndStraighten(
+                    *chain, adjustments.cropRect,
+                    adjustments.straightenAngle);
+                finalLinear = cropped.get();
+            }
+            if (linearDisplayOut) {
+                *linearDisplayOut = cropped ? cropped : stageEOut;
+            }
+            ImageBufferPtr u8 = cm_->toDisplaySRGB(*finalLinear);
             renderState_.finalFrame = u8;
             renderState_.stageHashes[5] = stageHashes[5];
             chain.reset();
-            if (stageEOut && !linearDisplayOut) {
+            if (stageEOut && (!linearDisplayOut || cropped)) {
                 // Recycled only when it was not handed out: a caller holding
                 // the linear buffer must never see it rewritten by a later
                 // render.
@@ -3677,6 +3686,10 @@ ImageBufferPtr Pipeline::renderInternalLinear(const ImageBuffer& linear,
         // Spatial stages need the neighbourhood, so they run after the per-pixel
         // stack (and stay in linear light).
         applySpatialAdjustments(adjustments, dstFloats.data(), w, h);
+        if (hasCropTransform(adjustments.cropRect,
+                             adjustments.straightenAngle))
+            return applyCropAndStraighten(*f32, adjustments.cropRect,
+                                          adjustments.straightenAngle);
         return f32;
     }
 
@@ -3690,6 +3703,10 @@ ImageBufferPtr Pipeline::renderInternalLinear(const ImageBuffer& linear,
     // Spatial stages need the neighbourhood, so they run after the per-pixel
     // stack (and stay in linear light).
     applySpatialAdjustments(adjustments, data, w, h);
+    if (hasCropTransform(adjustments.cropRect,
+                         adjustments.straightenAngle))
+        return applyCropAndStraighten(*f32, adjustments.cropRect,
+                                      adjustments.straightenAngle);
     return f32;
 }
 

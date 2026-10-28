@@ -63,6 +63,9 @@ public:
     void setDcpProfileStatus(const QString& status);
     void setLensfunProfile(const QString& status, bool available,
                            bool enabled);
+    void setCropSourceSize(int width, int height);
+    void setCropRectFromViewport(const QRectF& normalizedRect,
+                                 bool committed);
     void resetAll();
 
     // The embedded histogram (kept in sync with the preview by MainWindow).
@@ -219,6 +222,7 @@ signals:
     // existing mask in the combo) and after any path that disarms it to None.
     // MainWindow mirrors it in its toolbar (the panel is the source).
     void maskToolActivated(lrc::MaskType tool);
+    void cropToolActivated(bool active);
     // The user switched the click-prompt (MobileSAM) point mode (1 = foreground,
     // 0 = background). MainWindow routes it to ImageViewport::setMaskPromptLabel.
     void maskPromptLabelChanged(int label);
@@ -443,6 +447,8 @@ private:
     void onSpotRadiusSpinChanged(double value);
     void onSpotVisualizeToggled(bool active);
     void syncSpotRadius(double radius);
+    void syncCropControls();
+    void commitCropControls();
     // --- Metadata ------------------------------------------------------------
     bool eventFilter(QObject* watched, QEvent* event) override;
     void rebuildKeywordChips();
@@ -456,6 +462,14 @@ private:
     std::vector<SplitToneRow> splitToneRows_;
     std::vector<MaskRow> maskRows_;
     std::vector<PanelSection*> sections_;
+    QComboBox* cropAspectCombo_ = nullptr;
+    QDoubleSpinBox* cropLeftSpin_ = nullptr;
+    QDoubleSpinBox* cropTopSpin_ = nullptr;
+    QDoubleSpinBox* cropRightSpin_ = nullptr;
+    QDoubleSpinBox* cropBottomSpin_ = nullptr;
+    QDoubleSpinBox* straightenSpin_ = nullptr;
+    int cropSourceWidth_ = 0;
+    int cropSourceHeight_ = 0;
     QTabBar* sectionTabs_ = nullptr;
     lrc::Adjustments current_;
     QTimer debounce_;

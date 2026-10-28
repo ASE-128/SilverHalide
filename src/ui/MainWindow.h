@@ -32,12 +32,14 @@
 #include "engine/Pipeline.h"  // lrc::HistogramBins for the histogramReady slot.
 #include "engine/RawDecoder.h"
 #include "engine/SoftProofing.h"  // lrc::SoftProofParams for the proof slots.
+#include "ui/GalleryGridWidget.h"
 #include "ui/FilmstripWidget.h"
 #include "ui/ImageViewport.h"
 // The slots below carry engine types (Adjustments, ImageBufferPtr, HistogramBins,
 // SoftProofParams): their metatypes must be declared before moc uses them.
 #include "ui/MetaTypes.h"
 #include "utils/PerfStats.h"
+#include "utils/AdjustmentTransfer.h"
 #include "utils/UndoStack.h"
 
 namespace lrc {
@@ -65,6 +67,7 @@ class QCloseEvent;
 class QLabel;
 class QLineEdit;
 class QScrollArea;
+class QStackedWidget;
 class QThread;
 class QTimer;
 
@@ -107,10 +110,17 @@ private slots:
     void onCatalogOptimizeFinished(bool ok, const QString& error);
     void showEditHistory();
     void exportImage();
+    void exportSelectedImages();
     void mergeHdr();
     void onSetRating(int imageId, int rating);
     void onSetFlag(int imageId, int flag);
     void onSetLabelColor(int imageId, int color);
+    void onGalleryBulkRating(const QVector<int>& imageIds, int rating);
+    void onGalleryBulkFlag(const QVector<int>& imageIds, int flag);
+    void onGalleryBulkLabelColor(const QVector<int>& imageIds, int color);
+    void setGalleryGridView(bool enabled);
+    void copyAdjustments();
+    void pasteAdjustments();
     void onCollectionToggle(int imageId, int collectionId, bool add);
     void onCollectionSelected(int collectionId);
     void onManageCollections();
@@ -361,6 +371,7 @@ private:
     // Cross-thread adjustment hand-off: every request below takes a shared,
     // immutable snapshot (see adjustmentsSnapshot()) so the queued event carries
     // a shared_ptr instead of a deep copy of the stack. The worker only reads it.
+    lrc::AdjustmentsPtr renderSnapshot(lrc::AdjustmentsPtr adjustments) const;
     void requestPreview(const QString& filePath, lrc::AdjustmentsPtr adjustments);
     void requestAdjust(lrc::AdjustmentsPtr adjustments);
     // Low-res (kCoarseMaxDim) re-render of the working image; mirrors
@@ -510,6 +521,8 @@ private:
     // --- widgets --------------------------------------------------------
     NavigatorWidget* navigator_ = nullptr;
     ImageViewport* viewport_ = nullptr;
+    GalleryGridWidget* galleryGrid_ = nullptr;
+    QStackedWidget* centerViewStack_ = nullptr;
     DevelopPanel* developPanel_ = nullptr;
     FilmstripWidget* filmstrip_ = nullptr;
     QScrollArea* developScroll_ = nullptr;  // scroll area wrapping developPanel_
@@ -557,6 +570,9 @@ private:
     int currentMaskIndex_ = -1;  // mask being edited by the viewport tool
     QString currentFilePath_;
     lrc::Adjustments currentAdjustments_;
+    std::optional<lrc::Adjustments> copiedAdjustments_;
+    lrc::AdjustmentCategory copiedAdjustmentCategories_ =
+        lrc::AdjustmentCategory::None;
     // Last snapshot published by adjustmentsSnapshot(); reused while the
     // working copy above still compares equal to it, so the queued dispatches of
     // one edit share a single deep copy instead of copying per request.
@@ -564,6 +580,7 @@ private:
     lrc::UndoStack<lrc::Adjustments> undoStack_;  // 50-step undo history
     bool maskStrokeActive_ = false;  // true while a mask stroke is being drawn
     bool gestureActive_ = false;     // a slider-drag gesture is in progress
+    bool cropModeActive_ = false;
     bool fullResActive_ = false;  // true while the 1:1 full-res view is live
     // Image id of the most recent final-preview frame applied to the viewport.
     // onPreviewReady resets the view only for the FIRST frame of a different

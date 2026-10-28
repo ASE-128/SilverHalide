@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -20,6 +21,7 @@
 #include <QApplication>
 #include <QButtonGroup>
 #include <QByteArray>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -46,6 +48,7 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QThread>
 #include <QTimer>
@@ -420,8 +423,13 @@ void MainWindow::buildUi() {
     filmstrip_->setFixedHeight(150);
     fl->addWidget(filmstrip_);
 
+    galleryGrid_ = new GalleryGridWidget(this);
+    centerViewStack_ = new QStackedWidget(this);
+    centerViewStack_->addWidget(viewport_);
+    centerViewStack_->addWidget(galleryGrid_);
+
     centerSplitter_ = new QSplitter(Qt::Vertical, this);
-    centerSplitter_->addWidget(viewport_);
+    centerSplitter_->addWidget(centerViewStack_);
     centerSplitter_->addWidget(filmstripContainer);
     centerSplitter_->setStretchFactor(0, 1);
     centerSplitter_->setStretchFactor(1, 0);
@@ -465,12 +473,49 @@ void MainWindow::buildUi() {
     // thread (writer-D contract: FilmstripWidget::thumbnailRequested(int)).
     connect(filmstrip_, &FilmstripWidget::thumbnailRequested, this,
             &MainWindow::onThumbnailRequested);
+    connect(galleryGrid_, &GalleryGridWidget::currentImageChanged, this,
+            [this](int imageId) {
+                if (imageId > 0 && imageId != currentImageId_)
+                    filmstrip_->selectImage(imageId);
+            });
+    connect(galleryGrid_, &GalleryGridWidget::thumbnailRequested, this,
+            &MainWindow::onThumbnailRequested);
+    connect(galleryGrid_, &GalleryGridWidget::bulkRatingRequested, this,
+            &MainWindow::onGalleryBulkRating);
+    connect(galleryGrid_, &GalleryGridWidget::bulkFlagRequested, this,
+            &MainWindow::onGalleryBulkFlag);
+    connect(galleryGrid_, &GalleryGridWidget::bulkLabelColorRequested, this,
+            &MainWindow::onGalleryBulkLabelColor);
     connect(developPanel_, &DevelopPanel::adjustmentsChanged, this,
             &MainWindow::onAdjustmentsChanged);
     connect(developPanel_, &DevelopPanel::adjustmentsChangedCoarse, this,
             &MainWindow::onAdjustmentsChangedCoarse);
     connect(developPanel_, &DevelopPanel::adjustmentsCommitted, this,
             &MainWindow::onAdjustmentsCommitted);
+    connect(developPanel_, &DevelopPanel::cropToolActivated, this,
+            [this](bool active) {
+                cropModeActive_ = active;
+                viewport_->setCropMode(active);
+                if (active) {
+                    developPanel_->clearMaskTool();
+                    viewport_->setMaskTool(lrc::MaskType::None);
+                    viewport_->setSpotToolActive(false);
+                    disarmSpotToolButton();
+                    viewport_->setSamplerActive(false);
+                    developPanel_->setSamplerChecked(false);
+                    viewport_->setPointColorSamplerActive(false);
+                    developPanel_->setColorTargetSamplerChecked(false);
+                    viewport_->setWhiteBalanceSamplerActive(false);
+                    viewport_->setColorRangeSamplerActive(false);
+                    developPanel_->setColorRangeSamplerChecked(false);
+                    viewport_->setLuminanceSamplerActive(false);
+                    developPanel_->setRangeSubSamplerChecked(false);
+                }
+                if (currentImageId_ >= 0)
+                    requestAdjust(adjustmentsSnapshot());
+            });
+    connect(viewport_, &ImageViewport::cropRectEdited, developPanel_,
+            &DevelopPanel::setCropRectFromViewport);
         connect(developPanel_, &DevelopPanel::maskWindowRequested, this,
             &MainWindow::openMaskWindow);
     // Slider-drag gesture begin/end (currently just a flag; future work will
@@ -677,6 +722,9 @@ void MainWindow::buildMenus() {
     fileMenu->addSeparator();
     fileMenu->addAction(tr("导出…"), this, &MainWindow::exportImage,
                         QKeySequence(Qt::CTRL | Qt::Key_E));
+    fileMenu->addAction(tr("导出所选照片…"), this,
+                        &MainWindow::exportSelectedImages,
+                        QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     fileMenu->addAction(tr("转换为 DNG…"), this, &MainWindow::convertToDng);
     fileMenu->addSeparator();
     fileMenu->addAction(tr("导入预设…"), QKeySequence(), this,
@@ -716,6 +764,12 @@ void MainWindow::buildMenus() {
                          QKeySequence(Qt::CTRL | Qt::Key_H));
     photoMenu->addAction(tr("全景合成…"), this, &MainWindow::mergePanorama);
     photoMenu->addAction(tr("创建虚拟副本"), this, &MainWindow::createVirtualCopy);
+    photoMenu->addAction(tr("复制编辑设置…"), this,
+                         &MainWindow::copyAdjustments,
+                         QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C));
+    photoMenu->addAction(tr("粘贴编辑设置"), this,
+                         &MainWindow::pasteAdjustments,
+                         QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_V));
     photoMenu->addAction(tr("参考视图…"), this, &MainWindow::toggleReferenceView);
     photoMenu->addAction(tr("编辑历史…"), this, &MainWindow::showEditHistory);
     photoMenu->addAction(tr("管理收藏夹…"), this,
@@ -724,6 +778,12 @@ void MainWindow::buildMenus() {
     photoMenu->addAction(tr("查找重复项…"), this, &MainWindow::onFindDuplicates);
 
     QMenu* viewMenu = menuBar()->addMenu(tr("视图"));
+    QAction* gridAction = viewMenu->addAction(tr("图库网格"));
+    gridAction->setCheckable(true);
+    gridAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
+    connect(gridAction, &QAction::toggled, this,
+            &MainWindow::setGalleryGridView);
+    viewMenu->addSeparator();
     viewMenu->addAction(tr("适合窗口"), this, [this]() {
         viewport_->setZoomMode(ImageViewport::ZoomMode::Fit);
     }, QKeySequence(Qt::CTRL | Qt::Key_0));
@@ -1188,6 +1248,14 @@ void MainWindow::startWorkers() {
                         .arg(fail)
                         .arg(message),
                     8000);
+                if (fail > 0) {
+                    QMessageBox::warning(
+                        this, tr("批量导出完成"),
+                        tr("成功 %1 个，失败 %2 个。\n%3")
+                            .arg(success)
+                            .arg(fail)
+                            .arg(message));
+                }
             });
     connect(previewWorker_, &PreviewWorker::autoAdjustReady, this,
             &MainWindow::onAutoAdjustReady);
@@ -1560,6 +1628,125 @@ void MainWindow::exportImage() {
         Q_ARG(ExportWatermark, wm));
 }
 
+void MainWindow::exportSelectedImages() {
+    QVector<int> imageIds = galleryGrid_->selectedImageIds();
+    if (imageIds.isEmpty() && currentImageId_ >= 0)
+        imageIds.append(currentImageId_);
+    if (imageIds.isEmpty()) {
+        QMessageBox::information(this, tr("批量导出"),
+                                 tr("请先在图库网格中选择照片。"));
+        return;
+    }
+
+    const auto firstRecord = catalog_->findImageById(imageIds.front());
+    if (!firstRecord) {
+        QMessageBox::warning(this, tr("批量导出"),
+                             tr("无法读取所选照片的目录记录。"));
+        return;
+    }
+    const QString firstPath = QString::fromStdString(firstRecord->filePath);
+    const QString suggested =
+        QFileInfo(firstPath).absolutePath() + QLatin1Char('/') +
+        ExportDialog::defaultFileName(
+            QFileInfo(firstPath).completeBaseName(), 0);
+    ExportDialog dlg(suggested, this);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+    const QString firstOutput = dlg.outputPath();
+    if (firstOutput.isEmpty())
+        return;
+
+    static const char* suffixes[] = {".jpg", ".png", ".tif", ".tif", ".dng"};
+    const int formatIndex = dlg.formatIndex();
+    const char* suffix =
+        formatIndex >= 0 && formatIndex < 5 ? suffixes[formatIndex] : ".jpg";
+    const std::filesystem::path outputDir =
+        toStdPath(QFileInfo(firstOutput).absolutePath());
+    const std::string renamePattern =
+        dlg.renameEnabled() ? dlg.renameTemplate().toStdString() : "{base}";
+    const std::string date = todayString();
+    QSet<QString> reservedPaths;
+    QList<ExportItem> items;
+
+    int itemIndex = 0;
+    for (int imageId : imageIds) {
+        if (imageId <= 0)
+            continue;
+        const auto record = catalog_->findImageById(imageId);
+        if (!record)
+            continue;
+        const QString filePath = QString::fromStdString(record->filePath);
+        const auto variants = catalog_->listVariants(imageId);
+        for (const lrc::EditVariant& variant : variants) {
+            lrc::AdjustmentsPtr stack;
+            if (imageId == currentImageId_ &&
+                variant.variantId == currentVariantId_) {
+                stack = adjustmentsSnapshot();
+            } else {
+                lrc::Adjustments value =
+                    catalog_
+                        ->loadAdjustments(
+                            imageId, static_cast<int>(variant.variantId))
+                        .value_or(lrc::Adjustments::defaults());
+                stack = std::make_shared<const lrc::Adjustments>(
+                    std::move(value));
+            }
+
+            std::string base =
+                QFileInfo(filePath).completeBaseName().toStdString();
+            if (variant.variantId != 0)
+                base += "_copy" + std::to_string(variant.variantId);
+            lrc::RenameTemplateArgs args;
+            args.tmpl = renamePattern;
+            args.base = base;
+            args.index = ++itemIndex;
+            args.indexWidth = 2;
+            args.date = date;
+            std::filesystem::path output =
+                lrc::uniqueRenamePath(outputDir, args, suffix);
+            QString outputKey = fromStdPath(output).toCaseFolded();
+            int collision = 2;
+            while (reservedPaths.contains(outputKey) ||
+                   std::filesystem::exists(output)) {
+                output = outputDir /
+                         (std::filesystem::path(output).stem().wstring() +
+                          L"_" + std::to_wstring(collision++) +
+                          std::filesystem::path(output).extension().wstring());
+                outputKey = fromStdPath(output).toCaseFolded();
+            }
+            reservedPaths.insert(outputKey);
+
+            ExportItem item;
+            item.imageId = imageId;
+            item.filePath = filePath;
+            item.adjustments = std::move(stack);
+            item.outPath = fromStdPath(output);
+            item.format = static_cast<ExportFormat>(formatIndex);
+            item.quality = dlg.jpegQuality();
+            item.maxDim = dlg.maxDim();
+            item.icc = dlg.iccIndex();
+            item.watermark = dlg.watermark();
+            items.push_back(std::move(item));
+        }
+    }
+    if (items.isEmpty()) {
+        QMessageBox::warning(this, tr("批量导出"),
+                             tr("没有可导出的照片或虚拟副本。"));
+        return;
+    }
+
+    const bool dispatched = QMetaObject::invokeMethod(
+        previewWorker_, "batchExport", Qt::QueuedConnection,
+        Q_ARG(QList<ExportItem>, items));
+    if (!dispatched) {
+        QMessageBox::warning(this, tr("批量导出"),
+                             tr("无法调度后台导出任务。"));
+        return;
+    }
+    statusBar()->showMessage(
+        tr("正在批量导出 %1 个文件（全尺寸渲染）…").arg(items.size()));
+}
+
 void MainWindow::onManageSnapshots() {
     if (currentImageId_ < 0) {
         QMessageBox::information(this, tr("快照"),
@@ -1654,6 +1841,9 @@ void MainWindow::loadImageState(int imageId, int variantId) {
         return;
     currentImageId_ = imageId;
     currentVariantId_ = variantId;
+    if (galleryGrid_ != nullptr && variantId == 0 &&
+        galleryGrid_->currentImageId() != imageId)
+        galleryGrid_->selectImage(imageId);
     currentFilePath_ = filePath;
     currentDcpProfilePath_.clear();
     developPanel_->setDcpProfiles({}, {});
@@ -1667,6 +1857,11 @@ void MainWindow::loadImageState(int imageId, int variantId) {
         catalog_->loadAdjustments(imageId, variantId)
             .value_or(lrc::Adjustments::defaults());
     developPanel_->setAdjustments(currentAdjustments_);
+    viewport_->setCropRect(QRectF(
+        QPointF(currentAdjustments_.cropRect.left,
+                currentAdjustments_.cropRect.top),
+        QPointF(currentAdjustments_.cropRect.right,
+                currentAdjustments_.cropRect.bottom)));
     // Fresh undo history per image: the loaded initial state is the stack
     // bottom so edits can always be undone back to it.
     undoStack_.clear();
@@ -2243,8 +2438,7 @@ void MainWindow::onAutoAdjustReady(const lrc::Adjustments& adjustments) {
 }
 
 // B-1 content-aware crop suggestion from the last auto-develop. Drawn as a
-// pure-guidance box over the current preview; never applied to the pixels (the
-// pipeline has no crop-rendering stage yet).
+// pure-guidance box over the current preview; never applied to the pixels.
 void MainWindow::onAutoCropSuggestionReady(bool hasCrop, float left, float top,
                                            float right, float bottom) {
     if (currentImageId_ < 0)
@@ -2272,6 +2466,9 @@ void MainWindow::commitAdjustments(const lrc::Adjustments& adjustments) {
         currentAdjustments_ = adjustments;
     undoStack_.push(adjustments);  // push() also discards the redo branch.
     developPanel_->setAdjustments(adjustments);
+    viewport_->setCropRect(QRectF(
+        QPointF(adjustments.cropRect.left, adjustments.cropRect.top),
+        QPointF(adjustments.cropRect.right, adjustments.cropRect.bottom)));
     syncSpotStateFromAdjustments();
     if (currentImageId_ < 0)
         return;
@@ -2293,6 +2490,9 @@ void MainWindow::applyAdjustmentState(const lrc::Adjustments& adjustments) {
     if (adjustments != currentAdjustments_)
         currentAdjustments_ = adjustments;
     developPanel_->setAdjustments(adjustments);
+    viewport_->setCropRect(QRectF(
+        QPointF(adjustments.cropRect.left, adjustments.cropRect.top),
+        QPointF(adjustments.cropRect.right, adjustments.cropRect.bottom)));
     syncSpotStateFromAdjustments();
     if (currentImageId_ < 0)
         return;
@@ -2873,11 +3073,25 @@ void MainWindow::adoptPublishedAdjustments(lrc::AdjustmentsPtr adjustments) {
     // queued dispatches of this edit instead of copying the stack again.
     if (*adjustments != currentAdjustments_)
         currentAdjustments_ = *adjustments;
+    viewport_->setCropRect(QRectF(
+        QPointF(adjustments->cropRect.left, adjustments->cropRect.top),
+        QPointF(adjustments->cropRect.right, adjustments->cropRect.bottom)));
     publishedAdjustments_ = std::move(adjustments);
+}
+
+lrc::AdjustmentsPtr MainWindow::renderSnapshot(
+    lrc::AdjustmentsPtr adjustments) const {
+    if (!cropModeActive_ || !adjustments)
+        return adjustments;
+    auto uncropped = std::make_shared<lrc::Adjustments>(*adjustments);
+    uncropped->cropRect = {};
+    uncropped->straightenAngle = 0.0;
+    return uncropped;
 }
 
 void MainWindow::requestPreview(const QString& filePath,
                                 lrc::AdjustmentsPtr adjustments) {
+    adjustments = renderSnapshot(std::move(adjustments));
     ++previewGeneration_;
     QMetaObject::invokeMethod(
         previewWorker_, "loadImage", Qt::QueuedConnection,
@@ -2887,6 +3101,7 @@ void MainWindow::requestPreview(const QString& filePath,
 }
 
 void MainWindow::requestAdjust(lrc::AdjustmentsPtr adjustments) {
+    adjustments = renderSnapshot(std::move(adjustments));
     ++previewGeneration_;
     QMetaObject::invokeMethod(
         previewWorker_, "adjustPreview", Qt::QueuedConnection,
@@ -2895,6 +3110,7 @@ void MainWindow::requestAdjust(lrc::AdjustmentsPtr adjustments) {
 }
 
 void MainWindow::requestAdjustCoarse(lrc::AdjustmentsPtr adjustments) {
+    adjustments = renderSnapshot(std::move(adjustments));
     ++previewGeneration_;
     QMetaObject::invokeMethod(
         previewWorker_, "adjustPreviewCoarse", Qt::QueuedConnection,
@@ -2917,7 +3133,8 @@ void MainWindow::requestFullRes() {
         previewWorker_, "loadFullRes", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(QString, currentFilePath_),
         Q_ARG(qint64, previewGeneration_),
-        Q_ARG(lrc::AdjustmentsPtr, adjustmentsSnapshot()));
+        Q_ARG(lrc::AdjustmentsPtr,
+              renderSnapshot(adjustmentsSnapshot())));
 }
 
 void MainWindow::clearFullRes() {
@@ -2930,10 +3147,12 @@ void MainWindow::requestAdjustFullRes() {
     QMetaObject::invokeMethod(
         previewWorker_, "adjustFullRes", Qt::QueuedConnection,
         Q_ARG(qint64, currentImageId_), Q_ARG(qint64, previewGeneration_),
-        Q_ARG(lrc::AdjustmentsPtr, adjustmentsSnapshot()));
+        Q_ARG(lrc::AdjustmentsPtr,
+              renderSnapshot(adjustmentsSnapshot())));
 }
 
 void MainWindow::requestAdjustFullResCoarse(lrc::AdjustmentsPtr adjustments) {
+    adjustments = renderSnapshot(std::move(adjustments));
     ++previewGeneration_;
     QMetaObject::invokeMethod(
         previewWorker_, "adjustFullResCoarse", Qt::QueuedConnection,
@@ -2953,6 +3172,7 @@ void MainWindow::onImageMeta(qint64 imageId, int w, int h) {
     if (imageId != currentImageId_)
         return;
     viewport_->setNativeImageSize(QSize(w, h));
+    developPanel_->setCropSourceSize(w, h);
 }
 
 void MainWindow::onFullResReady(qint64 imageId,
@@ -3124,8 +3344,10 @@ void MainWindow::onThumbReadyImage(int imageId, const QImage& thumb) {
     // synchronous disk decode on the main thread.
     if (records_.contains(imageId))
         records_[imageId].thumbnailPath.clear();
-    if (!thumb.isNull())
+    if (!thumb.isNull()) {
         filmstrip_->setThumbnail(imageId, thumb);
+        galleryGrid_->setThumbnail(imageId, thumb);
+    }
 }
 
 void MainWindow::onThumbReady(int imageId, const QString& thumbnailPath) {
@@ -3139,6 +3361,7 @@ void MainWindow::onThumbReady(int imageId, const QString& thumbnailPath) {
             if (records_.contains(imageId))
                 records_[imageId].thumbnailPath.clear();
             filmstrip_->setThumbnail(imageId, thumb);
+            galleryGrid_->setThumbnail(imageId, thumb);
             return;
         }
     }
@@ -3146,8 +3369,10 @@ void MainWindow::onThumbReady(int imageId, const QString& thumbnailPath) {
     if (records_.contains(imageId))
         records_[imageId].thumbnailPath = thumbnailPath.toStdString();
     QImage thumb(thumbnailPath);
-    if (!thumb.isNull())
+    if (!thumb.isNull()) {
         filmstrip_->setThumbnail(imageId, thumb);
+        galleryGrid_->setThumbnail(imageId, thumb);
+    }
 }
 
 void MainWindow::onThumbnailRequested(int imageId) {
@@ -3334,6 +3559,7 @@ void MainWindow::onSetRating(int imageId, int rating) {
         }
     }
     filmstrip_->setRating(imageId, rating);
+    galleryGrid_->setRating(imageId, rating);
     // Update the stats footer without a full filmstrip rebuild.
     int rated = 0;
     for (const auto& rec : records_)
@@ -3355,6 +3581,7 @@ void MainWindow::onSetFlag(int imageId, int flag) {
         }
     }
     filmstrip_->setFlag(imageId, flag);
+    galleryGrid_->setFlag(imageId, flag);
     const char* name = flag == lrc::ImageFlag::FlagPicked
                            ? QT_TR_NOOP("已选取")
                            : (flag == lrc::ImageFlag::FlagRejected
@@ -3375,6 +3602,7 @@ void MainWindow::onSetLabelColor(int imageId, int color) {
         }
     }
     filmstrip_->setLabelColor(imageId, color);
+    galleryGrid_->setLabelColor(imageId, color);
     // A label change only updates this tile; no full filmstrip rebuild. 0 = 清除
     // (clear), 1..7 = colour labels.
     static const char* kLabelNames[8] = {
@@ -3384,6 +3612,146 @@ void MainWindow::onSetLabelColor(int imageId, int color) {
     const int ci = (color >= 0 && color <= 7) ? color : 0;
     statusBar()->showMessage(
         tr("色标: %1").arg(tr(kLabelNames[ci])), 2000);
+}
+
+void MainWindow::onGalleryBulkRating(const QVector<int>& imageIds, int rating) {
+    int updated = 0;
+    for (int id : imageIds) {
+        const auto before = records_.value(id).rating;
+        onSetRating(id, rating);
+        if (records_.contains(id) && records_.value(id).rating == rating &&
+            before != rating)
+            ++updated;
+    }
+    statusBar()->showMessage(
+        tr("批量评分完成：%1 张照片已更新").arg(updated), 3000);
+}
+
+void MainWindow::onGalleryBulkFlag(const QVector<int>& imageIds, int flag) {
+    int updated = 0;
+    for (int id : imageIds) {
+        const int before = records_.value(id).flag;
+        onSetFlag(id, flag);
+        if (records_.contains(id) && records_.value(id).flag == flag &&
+            before != flag)
+            ++updated;
+    }
+    statusBar()->showMessage(
+        tr("批量旗标完成：%1 张照片已更新").arg(updated), 3000);
+}
+
+void MainWindow::onGalleryBulkLabelColor(const QVector<int>& imageIds,
+                                         int color) {
+    int updated = 0;
+    for (int id : imageIds) {
+        const int before = records_.value(id).labelColor;
+        onSetLabelColor(id, color);
+        if (records_.contains(id) && records_.value(id).labelColor == color &&
+            before != color)
+            ++updated;
+    }
+    statusBar()->showMessage(
+        tr("批量色标完成：%1 张照片已更新").arg(updated), 3000);
+}
+
+void MainWindow::setGalleryGridView(bool enabled) {
+    centerViewStack_->setCurrentWidget(
+        enabled ? static_cast<QWidget*>(galleryGrid_)
+                : static_cast<QWidget*>(viewport_));
+    if (enabled && currentImageId_ >= 0)
+        galleryGrid_->selectImage(currentImageId_);
+    statusBar()->showMessage(enabled ? tr("图库网格") : tr("修改视图"), 1500);
+}
+
+void MainWindow::copyAdjustments() {
+    if (currentImageId_ < 0) {
+        QMessageBox::information(this, tr("复制编辑设置"),
+                                 tr("请先选择一张照片。"));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("选择要复制的编辑设置"));
+    auto* layout = new QVBoxLayout(&dlg);
+    struct CategoryOption {
+        const char* label;
+        lrc::AdjustmentCategory category;
+        bool checked;
+    };
+    const CategoryOption options[] = {
+        {"基本", lrc::AdjustmentCategory::Basic, true},
+        {"白平衡", lrc::AdjustmentCategory::WhiteBalance, true},
+        {"色调曲线", lrc::AdjustmentCategory::ToneCurve, true},
+        {"颜色", lrc::AdjustmentCategory::Color, true},
+        {"细节", lrc::AdjustmentCategory::Detail, true},
+        {"效果", lrc::AdjustmentCategory::Effects, true},
+        {"镜头校正", lrc::AdjustmentCategory::LensCorrections, true},
+        {"裁剪与拉直", lrc::AdjustmentCategory::Crop, true},
+        {"蒙版（包含几何与局部调整）", lrc::AdjustmentCategory::Masks, false},
+        {"污点修复", lrc::AdjustmentCategory::SpotRemoval, false},
+        {"AI 降噪", lrc::AdjustmentCategory::AiDenoise, false},
+    };
+    std::vector<std::pair<QCheckBox*, lrc::AdjustmentCategory>> checkboxes;
+    checkboxes.reserve(std::size(options));
+    for (const CategoryOption& option : options) {
+        auto* checkbox = new QCheckBox(tr(option.label), &dlg);
+        checkbox->setChecked(option.checked);
+        layout->addWidget(checkbox);
+        checkboxes.emplace_back(checkbox, option.category);
+    }
+    auto* buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                             &dlg);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    lrc::AdjustmentCategory selected = lrc::AdjustmentCategory::None;
+    for (const auto& [checkbox, category] : checkboxes) {
+        if (checkbox->isChecked())
+            selected |= category;
+    }
+    if (selected == lrc::AdjustmentCategory::None) {
+        QMessageBox::information(this, tr("复制编辑设置"),
+                                 tr("至少选择一个设置类别。"));
+        return;
+    }
+    flushPendingSave();
+    copiedAdjustments_ = currentAdjustments_;
+    copiedAdjustmentCategories_ = selected;
+    statusBar()->showMessage(tr("编辑设置已复制"), 2500);
+}
+
+void MainWindow::pasteAdjustments() {
+    if (!copiedAdjustments_) {
+        QMessageBox::information(this, tr("粘贴编辑设置"),
+                                 tr("请先复制一张照片的编辑设置。"));
+        return;
+    }
+    QVector<int> targets = galleryGrid_->selectedImageIds();
+    if (targets.isEmpty() && currentImageId_ >= 0)
+        targets.append(currentImageId_);
+    int updated = 0;
+    int failed = 0;
+    for (int id : targets) {
+        if (id <= 0 || id == currentImageId_)
+            continue;
+        lrc::Adjustments target =
+            catalog_->loadAdjustments(id).value_or(lrc::Adjustments::defaults());
+        lrc::copyAdjustmentCategories(*copiedAdjustments_, target,
+                                      copiedAdjustmentCategories_);
+        if (catalog_->saveAdjustments(id, target))
+            ++updated;
+        else
+            ++failed;
+    }
+    statusBar()->showMessage(
+        tr("粘贴编辑设置：成功 %1，失败 %2（每张照片各自记录编辑历史）")
+            .arg(updated)
+            .arg(failed),
+        6000);
 }
 
 void MainWindow::onCollectionToggle(int imageId, int collectionId, bool add) {
@@ -3618,6 +3986,17 @@ void MainWindow::refreshFilmstrip() {
         }
     }
     filmstrip_->setImages(entries_);
+    QVector<GalleryGridWidget::Entry> gridEntries;
+    gridEntries.reserve(records_.size());
+    for (const FilmstripWidget::Entry& entry : entries_) {
+        if (entry.variantId == 0) {
+            gridEntries.append({entry.imageId, entry.filePath, entry.rating,
+                                entry.flag, entry.labelColor, entry.thumbnail});
+        }
+    }
+    galleryGrid_->setImages(gridEntries);
+    if (currentImageId_ >= 0 && records_.contains(currentImageId_))
+        galleryGrid_->selectImage(currentImageId_);
     // P1 backfill: the B-2 pregrade marker is persisted to the catalog, so on
     // every rebuild -- including a cold start -- the filmstrip badge must be
     // re-read from the DB rather than relying solely on the import-time live

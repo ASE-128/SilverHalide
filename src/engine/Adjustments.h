@@ -500,6 +500,21 @@ struct ColorTarget {
     }
 };
 
+/**
+ * @brief Non-destructive crop bounds in normalized source-image coordinates.
+ *
+ * Bounds must be finite and satisfy 0 <= left < right <= 1 and
+ * 0 <= top < bottom <= 1. The default retains the full image.
+ */
+struct CropRect {
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 1.0f;
+    float bottom = 1.0f;
+
+    bool operator==(const CropRect&) const = default;
+};
+
 struct Adjustments {
     // --- develop panel parameters (LR-like ranges) -----------------------
     double exposure = 0.0;    // stops, -5..+5
@@ -546,6 +561,11 @@ struct Adjustments {
     float lensfunFocalLengthMm = 0.0f;
     float lensfunAperture = 0.0f;
     float lensfunCropFactor = 1.0f;
+
+    // Non-destructive crop in normalized coordinates of the decoded image.
+    // Straighten is in degrees; positive values rotate the image clockwise.
+    CropRect cropRect;
+    double straightenAngle = 0.0;
 
     // --- effects: post-crop vignette shape (LR "effects" panel) ----------
     double vignetteMidpoint = 50.0;   // 0..100    distance where the falloff is centred
@@ -618,13 +638,13 @@ struct Adjustments {
     //   D: HSL / global saturation / split toning / point colour
     //   E: spatial (texture/clarity/sharpening/NR/distortion/grain/vignette/
     //      masks/spot removals)
-    //   F: sRGB output -- no adjustment parameters, returns a constant.
+    //   F: crop/straighten and sRGB output.
     size_t hashStageA() const noexcept;
     size_t hashStageB() const noexcept;
     size_t hashStageC() const noexcept;
     size_t hashStageD() const noexcept;
     size_t hashStageE() const noexcept;
-    static size_t hashStageF() noexcept;
+    size_t hashStageF() const noexcept;
 
     /** @brief Default-constructed stack (all sliders neutral).
      *

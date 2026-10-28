@@ -67,7 +67,7 @@ bool writeFileAtomic(const std::filesystem::path& path,
 
 json::Value ProfileIO::toJson(const Adjustments& a) {
     json::Value root = json::Value::object();
-    root["version"] = 6;
+    root["version"] = 7;
     root["exposure"] = a.exposure;
     root["contrast"] = a.contrast;
     root["highlights"] = a.highlights;
@@ -100,6 +100,11 @@ json::Value ProfileIO::toJson(const Adjustments& a) {
     root["lensfunFocalLengthMm"] = a.lensfunFocalLengthMm;
     root["lensfunAperture"] = a.lensfunAperture;
     root["lensfunCropFactor"] = a.lensfunCropFactor;
+    root["cropLeft"] = a.cropRect.left;
+    root["cropTop"] = a.cropRect.top;
+    root["cropRight"] = a.cropRect.right;
+    root["cropBottom"] = a.cropRect.bottom;
+    root["straightenAngle"] = a.straightenAngle;
     root["vignetteMidpoint"] = a.vignetteMidpoint;
     root["vignetteRoundness"] = a.vignetteRoundness;
     root["vignetteFeather"] = a.vignetteFeather;
@@ -339,6 +344,17 @@ Adjustments ProfileIO::fromJson(const json::Value& v) {
         v["lensfunAperture"].asNumber(a.lensfunAperture));
     a.lensfunCropFactor = static_cast<float>(
         v["lensfunCropFactor"].asNumber(a.lensfunCropFactor));
+    a.cropRect.left =
+        static_cast<float>(v["cropLeft"].asNumber(a.cropRect.left));
+    a.cropRect.top =
+        static_cast<float>(v["cropTop"].asNumber(a.cropRect.top));
+    a.cropRect.right =
+        static_cast<float>(v["cropRight"].asNumber(a.cropRect.right));
+    a.cropRect.bottom =
+        static_cast<float>(v["cropBottom"].asNumber(a.cropRect.bottom));
+    a.straightenAngle =
+        std::clamp(v["straightenAngle"].asNumber(a.straightenAngle), -45.0,
+                   45.0);
     a.vignetteMidpoint = v["vignetteMidpoint"].asNumber(a.vignetteMidpoint);
     a.vignetteRoundness = v["vignetteRoundness"].asNumber(a.vignetteRoundness);
     a.vignetteFeather = v["vignetteFeather"].asNumber(a.vignetteFeather);

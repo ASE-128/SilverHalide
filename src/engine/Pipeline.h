@@ -343,11 +343,11 @@ public:
     /**
      * @brief A normalized crop rectangle (values in [0,1], left<right, top<bottom).
      *
-     * It is a *suggestion* only: the pipeline currently has no crop-rendering
-     * stage, so callers that apply an auto-develop result write exposure /
-     * contrast / white-balance to the parameter stack and treat the crop box
-     * as UI guidance. Kept separate from Adjustments on purpose so this
-     * suggestion does not perturb the parameter-stack hash / serialization.
+     * It is a *suggestion* only: auto-develop does not write it into
+     * Adjustments. The viewport treats it as UI guidance; the user can enter
+     * crop mode and adjust a separate non-destructive crop stack. Kept
+     * separate from Adjustments so this suggestion does not perturb the
+     * parameter-stack hash / serialization.
      */
     struct CropRect {
         float left = 0.0f;

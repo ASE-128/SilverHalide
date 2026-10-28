@@ -6,6 +6,7 @@
 #include <utility>
 
 #include <QKeyEvent>
+#include <QLineF>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QTimer>
@@ -207,6 +208,28 @@ void ImageViewport::clearAutoCropSuggestion() {
         autoCropActive_ = false;
         update();
     }
+}
+
+void ImageViewport::setCropMode(bool active) {
+    if (cropMode_ == active)
+        return;
+    cropMode_ = active;
+    cropDragging_ = false;
+    applyToolCursor();
+    update();
+}
+
+void ImageViewport::setCropRect(const QRectF& normalizedRect) {
+    if (!normalizedRect.isValid())
+        return;
+    const double left = std::clamp(normalizedRect.left(), 0.0, 1.0);
+    const double top = std::clamp(normalizedRect.top(), 0.0, 1.0);
+    const double right = std::clamp(normalizedRect.right(), 0.0, 1.0);
+    const double bottom = std::clamp(normalizedRect.bottom(), 0.0, 1.0);
+    if (right <= left || bottom <= top)
+        return;
+    cropRect_ = QRectF(QPointF(left, top), QPointF(right, bottom));
+    update();
 }
 
 void ImageViewport::setSamplerActive(bool active) {
@@ -953,6 +976,8 @@ void ImageViewport::paintEvent(QPaintEvent*) {
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(QRectF(tl, br));
     }
+    if (cropMode_)
+        paintCropOverlay(painter);
 
     // Spot circles + cursor ring when the spot tool is armed.
     if (spotToolActive_)
@@ -1064,6 +1089,130 @@ void ImageViewport::paintEvent(QPaintEvent*) {
     }
 }
 
+void ImageViewport::paintCropOverlay(QPainter& painter) {
+    const QRectF target = targetRect();
+    const QRectF crop =
+        QRectF(normToWidget(cropRect_.topLeft()),
+               normToWidget(cropRect_.bottomRight()))
+            .normalized();
+    const QColor shade(0, 0, 0, 145);
+    painter.fillRect(QRectF(target.left(), target.top(), target.width(),
+                            std::max(0.0, crop.top() - target.top())),
+                     shade);
+    painter.fillRect(QRectF(target.left(), crop.bottom(), target.width(),
+                            std::max(0.0, target.bottom() - crop.bottom())),
+                     shade);
+    painter.fillRect(QRectF(target.left(), crop.top(),
+                            std::max(0.0, crop.left() - target.left()),
+                            crop.height()),
+                     shade);
+    painter.fillRect(QRectF(crop.right(), crop.top(),
+                            std::max(0.0, target.right() - crop.right()),
+                            crop.height()),
+                     shade);
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(255, 255, 255, 240), 1.5));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRect(crop);
+    for (int i = 1; i < 3; ++i) {
+        const qreal x = crop.left() + crop.width() * i / 3.0;
+        const qreal y = crop.top() + crop.height() * i / 3.0;
+        painter.setPen(QPen(QColor(255, 255, 255, 100), 1.0, Qt::DashLine));
+        painter.drawLine(QPointF(x, crop.top()), QPointF(x, crop.bottom()));
+        painter.drawLine(QPointF(crop.left(), y), QPointF(crop.right(), y));
+    }
+    painter.setPen(QPen(QColor(20, 20, 20, 220), 1.0));
+    painter.setBrush(QColor(255, 255, 255, 235));
+    constexpr qreal kHandle = 8.0;
+    const QPointF points[] = {
+        crop.topLeft(), crop.topRight(), crop.bottomLeft(), crop.bottomRight(),
+        QPointF(crop.center().x(), crop.top()),
+        QPointF(crop.center().x(), crop.bottom()),
+        QPointF(crop.left(), crop.center().y()),
+        QPointF(crop.right(), crop.center().y())};
+    for (const QPointF& point : points)
+        painter.drawRect(QRectF(point.x() - kHandle / 2.0,
+                                point.y() - kHandle / 2.0, kHandle, kHandle));
+    painter.restore();
+}
+
+int ImageViewport::cropHitTest(const QPointF& widgetPos) const {
+    const QRectF crop =
+        QRectF(normToWidget(cropRect_.topLeft()),
+               normToWidget(cropRect_.bottomRight()))
+            .normalized();
+    constexpr qreal kHitRadius = 11.0;
+    const QPointF handles[] = {
+        crop.topLeft(), crop.topRight(), crop.bottomLeft(), crop.bottomRight(),
+        QPointF(crop.center().x(), crop.top()),
+        QPointF(crop.center().x(), crop.bottom()),
+        QPointF(crop.left(), crop.center().y()),
+        QPointF(crop.right(), crop.center().y())};
+    for (int i = 0; i < 8; ++i) {
+        if (QLineF(widgetPos, handles[i]).length() <= kHitRadius)
+            return i + 2;
+    }
+    return crop.contains(widgetPos) ? 1 : 0;
+}
+
+void ImageViewport::updateCropGesture(const QPointF& widgetPos) {
+    const QPointF point = widgetToNorm(widgetPos);
+    const double dx = point.x() - cropDragStartNorm_.x();
+    const double dy = point.y() - cropDragStartNorm_.y();
+    double left = cropDragStartRect_.left();
+    double top = cropDragStartRect_.top();
+    double right = cropDragStartRect_.right();
+    double bottom = cropDragStartRect_.bottom();
+    constexpr double kMinExtent = 0.005;
+
+    switch (cropDragMode_) {
+    case 0:
+        left = std::min(point.x(), cropDragStartNorm_.x());
+        top = std::min(point.y(), cropDragStartNorm_.y());
+        right = std::max(point.x(), cropDragStartNorm_.x());
+        bottom = std::max(point.y(), cropDragStartNorm_.y());
+        break;
+    case 1: {
+        const double width = right - left;
+        const double height = bottom - top;
+        left = std::clamp(left + dx, 0.0, 1.0 - width);
+        top = std::clamp(top + dy, 0.0, 1.0 - height);
+        right = left + width;
+        bottom = top + height;
+        break;
+    }
+    case 2: left = std::min(right - kMinExtent, left + dx); break;
+    case 3: right = std::max(left + kMinExtent, right + dx); break;
+    case 4: top = std::min(bottom - kMinExtent, top + dy); break;
+    case 5: bottom = std::max(top + kMinExtent, bottom + dy); break;
+    case 6:
+        left = std::min(right - kMinExtent, left + dx);
+        top = std::min(bottom - kMinExtent, top + dy);
+        break;
+    case 7:
+        right = std::max(left + kMinExtent, right + dx);
+        top = std::min(bottom - kMinExtent, top + dy);
+        break;
+    case 8:
+        left = std::min(right - kMinExtent, left + dx);
+        bottom = std::max(top + kMinExtent, bottom + dy);
+        break;
+    case 9:
+        right = std::max(left + kMinExtent, right + dx);
+        bottom = std::max(top + kMinExtent, bottom + dy);
+        break;
+    default: return;
+    }
+    left = std::clamp(left, 0.0, 1.0 - kMinExtent);
+    top = std::clamp(top, 0.0, 1.0 - kMinExtent);
+    right = std::clamp(right, left + kMinExtent, 1.0);
+    bottom = std::clamp(bottom, top + kMinExtent, 1.0);
+    setCropRect(QRectF(QPointF(left, top), QPointF(right, bottom)));
+    emit cropRectEdited(cropRect_, false);
+}
+
 void ImageViewport::resizeEvent(QResizeEvent*) {
     // Report the new logical render resolution so the preview worker can re-render
     // the Fit view at exactly this size.
@@ -1162,6 +1311,21 @@ void ImageViewport::mousePressEvent(QMouseEvent* event) {
         QWidget::mousePressEvent(event);
         return;
     }
+    if (event->button() == Qt::LeftButton && cropMode_ &&
+        !image_.isNull()) {
+        cropDragMode_ = cropHitTest(event->pos());
+        const bool fullImage =
+            cropRect_.left() <= 0.001 && cropRect_.top() <= 0.001 &&
+            cropRect_.right() >= 0.999 && cropRect_.bottom() >= 0.999;
+        if (cropDragMode_ == 0 || (fullImage && cropDragMode_ == 1))
+            cropDragMode_ = 0;
+        cropDragStartRect_ = cropRect_;
+        cropDragStartNorm_ = widgetToNorm(event->pos());
+        cropDragging_ = true;
+        setCursor(Qt::ClosedHandCursor);
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton) {
         if (spotToolActive_) {
             beginSpotGesture(event->pos(),
@@ -1250,6 +1414,11 @@ void ImageViewport::mouseMoveEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
+    if (cropDragging_) {
+        updateCropGesture(event->pos());
+        event->accept();
+        return;
+    }
     // Dragging a spot's target or source circle.
     if (draggingSpot_ >= 0) {
         moveSpotGesture(event->pos());
@@ -1307,6 +1476,15 @@ void ImageViewport::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
         if (dividerDragging_) {
             dividerDragging_ = false;
+            applyToolCursor();
+            event->accept();
+            return;
+        }
+        if (cropDragging_) {
+            updateCropGesture(event->pos());
+            cropDragging_ = false;
+            if (cropRect_ != cropDragStartRect_)
+                emit cropRectEdited(cropRect_, true);
             applyToolCursor();
             event->accept();
             return;
@@ -1731,11 +1909,11 @@ void ImageViewport::rebuildSpotViz() {
 
 void ImageViewport::applyToolCursor() {
     if (spacePan_ || dragging_ || dividerDragging_ || draggingSpot_ >= 0 ||
-        maskDragging_)
+        maskDragging_ || cropDragging_)
         return;  // a drag is in progress; keep its cursor
     if (spotToolActive_ || samplerActive_ || whiteBalanceActive_ ||
         pointColorActive_ || colorRangeActive_ || luminanceActive_ ||
-        maskTool_ != lrc::MaskType::None) {
+        maskTool_ != lrc::MaskType::None || cropMode_) {
         setCursor(Qt::CrossCursor);
     } else {
         setCursor(Qt::ArrowCursor);

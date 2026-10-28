@@ -49,6 +49,7 @@
 #include "ui/DevelopPanel.h"
 #include "ui/DuplicateResultsDialog.h"
 #include "ui/ExportDialog.h"
+#include "ui/GalleryGridWidget.h"
 #include "ui/ImageViewport.h"
 #include "ui/ImportDialog.h"
 #include "ui/ImportWorker.h"
@@ -256,6 +257,60 @@ private:
     std::unique_ptr<CatalogDatabase> db_;
     qint64 imageId_ = 0;
 };
+
+class GalleryGridWidgetTest : public QObject {
+    Q_OBJECT
+private slots:
+    void selectionAndThumbnailFlow();
+    void cropGestureCommitsOnce();
+};
+
+void GalleryGridWidgetTest::selectionAndThumbnailFlow() {
+    GalleryGridWidget grid;
+    grid.resize(640, 420);
+    QVector<GalleryGridWidget::Entry> entries;
+    entries.append({11, QStringLiteral("C:/photos/first.jpg"), 3, 1, 2, {}});
+    entries.append({12, QStringLiteral("C:/photos/second.jpg"), 0, 0, 0, {}});
+    grid.setImages(entries);
+    QCOMPARE(grid.count(), 2);
+
+    grid.selectImage(12);
+    QCOMPARE(grid.currentImageId(), 12);
+    QCOMPARE(grid.selectedImageIds(), QVector<int>{12});
+    grid.selectImage(11);
+    QCOMPARE(grid.currentImageId(), 11);
+    QCOMPARE(grid.selectedImageIds().size(), 2);
+
+    QImage thumb(32, 24, QImage::Format_RGB32);
+    thumb.fill(Qt::red);
+    grid.setThumbnail(12, thumb);
+    QVERIFY(!thumb.isNull());
+}
+
+void GalleryGridWidgetTest::cropGestureCommitsOnce() {
+    ImageViewport viewport;
+    viewport.resize(640, 420);
+    QImage image(400, 300, QImage::Format_RGB32);
+    image.fill(Qt::gray);
+    viewport.setImage(image);
+    viewport.setCropMode(true);
+    viewport.show();
+    QCoreApplication::processEvents();
+
+    QSignalSpy edited(&viewport, &ImageViewport::cropRectEdited);
+    QTest::mousePress(&viewport, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(150, 100));
+    QTest::mouseMove(&viewport, QPoint(450, 300));
+    QTest::mouseRelease(&viewport, Qt::LeftButton, Qt::NoModifier,
+                        QPoint(450, 300));
+
+    QCOMPARE(edited.count(), 2);
+    QVERIFY(!edited.at(0).at(1).toBool());
+    QVERIFY(edited.at(1).at(1).toBool());
+    const QRectF crop = edited.at(1).at(0).toRectF();
+    QVERIFY(crop.left() > 0.0 && crop.top() > 0.0);
+    QVERIFY(crop.right() < 1.0 && crop.bottom() < 1.0);
+}
 
 void DialogSmokeTest::initTestCase() {
     std::error_code ec;
@@ -1712,6 +1767,10 @@ int main(int argc, char** argv) {
     int status = 0;
     {
         DialogSmokeTest t(root / "smoke");
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        GalleryGridWidgetTest t;
         status |= QTest::qExec(&t, argc, argv);
     }
     {
