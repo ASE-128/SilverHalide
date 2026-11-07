@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 项目状态是动态更新的，以下文件按优先级递减作为真实来源：
 
-- [STATUS.md](STATUS.md) — 当前各批次落地状态、验证数字、工作区未提交改动清单
+- [STATUS.md](STATUS.md) — 当前各批次落地状态、验证数字与遗留项（含提交哈希与核对日期）
 - [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md) — 竞品对齐优化规格（任务入口）
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 稳定架构约束（管线、线程模型、缓存）
 - [docs/DEVELOPMENT_EXPERIENCE.md](docs/DEVELOPMENT_EXPERIENCE.md) — 迁移/构建踩坑记录（GBK、/EHsc、CRT 路径等）
@@ -140,7 +140,7 @@ UI 通过 `QMetaObject::invokeMethod(..., Qt::QueuedConnection)` 下发请求。
 - **现代 C++ 改造（IM-1 ~ IM-11）**：管线 stage 去深拷贝（B-2 1920 refine 同机 A/B −17%~−33%）、`ImageBuffer` span 视图、`parallelFor` 内联快路径、`Json::Value` variant 化、`string_view` 化、`Mask` variant 化、lcms RAII、`jthread`、`noexcept`/`[[nodiscard]]` 补齐；两份逐位 oracle 守护输出不变。详见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md)。
 - **标准预览 v2 / preview pipeline 复用优化、四阶段加速报告**已完成并归档。
 
-当前进行中的任务规格入口仍为 [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md)，但 P1/P2/P3/T 已按 spec 验收；P-A 真机锚点、P-B 端到端实机验证为后续待验项。实际落地状态以 [STATUS.md](STATUS.md) 为准。
+任务规格入口（历史）仍为 [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md)，P1/P2/P3/T 已按 spec 实现并验收；P-A 真机锚点、P-B 端到端实机验证为后续待验项。实际落地状态以 [STATUS.md](STATUS.md) 为准。
 
 ## 关键文档
 

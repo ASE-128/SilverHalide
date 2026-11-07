@@ -4,7 +4,7 @@
 > Silver Halide（`lightroom-clone-cpp`）。它是 CLAUDE.md（构建/架构/编码约定）的**经验补充**——
 > 重点关注「踩过的坑」与「如何高效工作」，而非重复架构说明。
 >
-> 迁移配套文件：`docs/archive/MIGRATION.md`（目标环境重建步骤）、`docs/spec/competitive-optimization-implementation-spec.md`（当前进行中的竞品优化任务）。
+> 迁移配套文件：`docs/archive/MIGRATION.md`（目标环境重建步骤）、`docs/spec/competitive-optimization-implementation-spec.md`（竞品优化任务规格，P1/P2/P3/T 已实现并验收）。
 
 ## 1. 项目快照（当前状态）
 
@@ -16,7 +16,7 @@
 | 测试基线 | headless + GUI 双端 **272 用例 / 274373 断言**全绿（AUDIT-2026-08-14 验收）；PHASE_1 降噪后为 **277 用例 / 274420 断言** |
 | 架构 | 三层：`engine/`（纯 C++ 无 Qt）+ `catalog/`（纯 C++）+ `ui/`（Qt6 Widgets），`utils/` 共享 |
 | 调整顺序 | 曝光 → 对比度 → 高光 → 阴影 → 白/黑 → 色调曲线 → 白平衡 → 去朦胧 → 鲜艳度 → HSL → 色调分离 → 点颜色 → 空间阶段（纹理/清晰度/锐化/畸变/颗粒/晕影/蒙版局部）→ sRGB |
-| 进行中工作 | **竞品对齐优化规格待实施**（详见 `docs/spec/competitive-optimization-implementation-spec.md`）；性能 M1-M5 为历史实施记录，部分量化验收仍需单独复核 |
+| 进行中工作 | 竞品对齐优化规格 P1/P2/P3/T **已实现并验收**（提交记录见 `STATUS.md`）；性能 M1-M5 为历史实施记录，部分量化验收仍需单独复核 |
 
 测试断言计数有两个口径：272 是 AUDIT 验收基线，277 是 PHASE_1 降噪（5 新用例）之后的数。写 STATUS.md 时以实际跑出的为准。
 

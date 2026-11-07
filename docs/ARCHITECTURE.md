@@ -1,6 +1,6 @@
 # 架构文档
 
-> 当前任务状态入口：[竞品对齐优化实施规格](spec/competitive-optimization-implementation-spec.md)。该规格目前处于待实施状态；本文件描述稳定架构约束，不代表其中的 P1/P2/P3/T 功能已经完成。
+> 当前任务状态入口：[竞品对齐优化实施规格](spec/competitive-optimization-implementation-spec.md)。该规格的 P1/P2/P3/T 已实现并验收（提交记录与遗留以 [STATUS.md](../STATUS.md) 为准）；本文件描述稳定架构约束，不逐项复述功能完成度。
 
 ## 1. 分层与依赖规则
 

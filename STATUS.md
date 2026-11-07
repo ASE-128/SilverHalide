@@ -13,10 +13,19 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
-## 性能兑现：D3D11 默认开启与可感知化（2026-10-26，工作区未提交）
+## 当前仓库快照（核对日期 2026-11-04，headless 复验更新于 2026-11-07）
+
+- 分支 `main`，HEAD `20bdf27`（2026-10-29），无 stash；本地与 `SilverHalide/main` 无分叉。工作区当时干净；截至 2026-11-07 有 6 个文档修改 + 1 个计划归档重命名处于未提交状态（属文档状态修正，无代码改动）。
+- 下文各章节标题里的“工作区未提交”均为**写作当时**的状态标记；对应代码现已提交，章节内已逐条补注提交哈希与日期。历史验收数字保持原样，不跨章节合并。
+- **2026-11-07 headless 复验（已完成）**：重跑 `_fix_msvc_deps.ps1` 并重新 configure 后再次修复前缀，`Pipeline.cpp.obj` 由 `#deps 0` 恢复为 `#deps 15 (VALID)`（`CropTransform` 4、`TestCompetitiveP1` 51、`CatalogDatabase` 9 抽样一致）；`ninja -t clean` 后全量重建 **303 步成功**，`ctest` **1/1 Passed**，`lrc_tests.exe` **524 test cases / 979,265 assertions 全通过**（0 失败）。该树现已覆盖 2026-10-29 之后的引擎改动。
+- 数字口径：**524 / 979,265 为 2026-11-07 实测**；**519 / 979,236 为 2026-10-26 的记录**（见下文 D3D 章节），两者并存不合并。增量 **+5 例 / +29 断言**，对应 Lightroom 工作流的定向测试（与 `235b20c` 章节记录一致）。
+- 长期注意事项（未变）：每次 **configure 之后** `rules.ninja` 的 `msvc_deps_prefix` 会被重新覆盖成 mojibake，必须再跑一次 `build_headless\_fix_msvc_deps.ps1 -BuildDir build_headless`；既有 `.obj` 仍是 `#deps 0`，首次修复后需一次全量重建才生效。
+- 仍需跟进的项：无 AI 安装包 exe 在 `dist/` 中缺失；现代 C++ 改造遗留见下文；性能 M1-M5 真机锚点仍待验。`docs/plans/` 当前无未归档计划。
+
+## 性能兑现：D3D11 默认开启与可感知化（2026-10-26，已提交 a2aae03，2026-10-27）
 
 按 [.claude/artifacts/spec/next-product-direction/spec.md](.claude/artifacts/spec/next-product-direction/spec.md)
-（T1~T10）实施，未提交、未推送。
+（T1~T10）实施；已随 `a2aae03`（2026-10-27）提交并推送。
 
 ### 1. 关键修复：D3D11 后端此前从未真正生效
 
@@ -79,9 +88,9 @@ Auto 与 ForceCpu **不是逐位一致**（浮点求和顺序不同：`pl.previe
 - 教训：**HLSL cbuffer 数组不得按 C 布局直觉声明**；任何 cbuffer 布局变更都应以
   `D3DReflect` 的字节偏移为准。
 
-## Lightroom 核心工作流补齐（2026-10-29，工作区未提交）
+## Lightroom 核心工作流补齐（2026-10-29，已提交 235b20c，2026-10-29）
 
-按已获批的路线计划推进图库/裁剪/多图交付工作流；以下代码已落地，但尚未提交：
+按已获批的路线计划推进图库/裁剪/多图交付工作流；以下代码已落地，并随 `235b20c`（2026-10-29）提交：
 
 - **非破坏性裁剪与拉直**：新增归一化裁剪范围与角度，保存于 ProfileIO v7；Pipeline 的增量预览 stage F、
   全尺寸渲染及导出均应用变换。裁剪页提供自由/常用比例、边界/角度数值设置；视口支持拖动与边缘/角点
@@ -96,7 +105,7 @@ Auto 与 ForceCpu **不是逐位一致**（浮点求和顺序不同：`pl.previe
   Qt smoke runner 在 offscreen 定向执行时仍未能于 30 秒内退出；本轮 UI 行为另以真实 Windows 窗口交互
   完成验收。
 
-## 现代 C++ 改造：IM-1 ~ IM-11 落地（2026-10-19 ~ 10-20，工作区未提交）
+## 现代 C++ 改造：IM-1 ~ IM-11 落地（2026-10-19 ~ 10-20，已提交 9792b42，2026-10-20）
 
 按 [docs/spec/modern-cpp-adoption-audit.md](docs/spec/modern-cpp-adoption-audit.md) 的审计结论与验收清单实施（Agent Teams，两阶段 T0~T13 + U1~U5）。逐项 before/after、证据与遗留见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md)，基线数字与两份逐位 oracle 见 [docs/spec/modern-cpp-adoption-baseline.md](docs/spec/modern-cpp-adoption-baseline.md)。
 
@@ -131,7 +140,7 @@ Auto 与 ForceCpu **不是逐位一致**（浮点求和顺序不同：`pl.previe
 - AI Prompt 点击不回流是变体化前的既有行为，本轮未顺手修（避免改变可观察行为）。
 - `LRC_ENABLE_SIMD=ON` 仍非逐位一致（既有 P2-2 取舍）；默认 OFF 逐位一致。
 
-## 蒙版显示修复：AI 真实权重、几何引导填充、颜色范围默认叠加（2026-10-01 ~ 10-02，工作区未提交）
+## 蒙版显示修复：AI 真实权重、几何引导填充、颜色范围默认叠加（2026-10-01 ~ 10-02，已提交 bbea65d，2026-10-05）
 
 ### 1. AI 蒙版叠加是假的：整幅恒定 50%
 
@@ -220,11 +229,12 @@ Auto 与 ForceCpu **不是逐位一致**（浮点求和顺序不同：`pl.previe
 
 ### 6. 状态与遗留
 
-代码已落地并自测通过，**工作区未提交**。
+代码已落地并自测通过，随 `bbea65d`（2026-10-05）提交；文档记录见 `1d6a624`（2026-10-05）。
 
 遗留（本次未改）：
-- **裁剪页空白**：`DevelopPanel::setSectionMode` 只处理 mode 0/2/3，`mode==1`（裁剪）时所有分区都被
-  隐藏，而仓库里没有裁剪分区，于是该标签页点进去是空的。
+- **裁剪页空白**（历史遗留，已失效）：`DevelopPanel::setSectionMode` 只处理 mode 0/2/3，`mode==1`（裁剪）时所有分区都被
+  隐藏，而仓库里没有裁剪分区，于是该标签页点进去是空的。（2026-11-04 核实：已由 `235b20c` 的非破坏性裁剪实现覆盖——
+  `setSectionMode` 已处理 `mode==1` 并显示“裁剪”分区，裁剪页控件与视口编辑均已接线。）
 - **蒙版工具激活时高亮不同步**：工具栏与面板的按钮组都只有 4 个几何工具按钮，AI 蒙版没有对应按钮，
   于是 `maskToolActivated(AiMask)` 无法镜像，界面会停留在上一个几何工具的高亮状态。
 
@@ -236,7 +246,7 @@ Auto 与 ForceCpu **不是逐位一致**（浮点求和顺序不同：`pl.previe
   整幅色块"。
 - 无头套件的偶发崩溃**已定位并修复**，见下一节；此前记录为"无法复现"的失败与此同源。
 
-## 修复线程池完成态的 use-after-free（2026-10-05，工作区未提交）
+## 修复线程池完成态的 use-after-free（2026-10-05，已提交 751965d，2026-10-05）
 
 ### 1. 现象
 
@@ -361,7 +371,7 @@ tasks_.emplace_back([st, &n, &g, &fn] { /* Guard{st} … */ });
   全量报告：`main()` 把同一份 `argc/argv` 传给全部 13 次 `QTest::qExec`，每个类都会重新截断
   同一个文件，最终只剩最后一个类。
 
-## 1a 热路径验收工具化：埋点 + worker 级计时 + 运行手册（2026-09-28，工作区未提交）
+## 1a 热路径验收工具化：埋点 + worker 级计时 + 运行手册（2026-09-28，已提交 b180470，2026-09-28）
 
 - **埋点**：`src/ui` 新增 `[PERF1A]` 计时日志。t0 = `MainWindow::requestFullRes()` 请求下发，t7 =
   `MainWindow::onFullResReady()` 帧呈现（端到端判定口径）；worker 侧 `PreviewWorker::loadFullRes()`
@@ -380,7 +390,7 @@ tasks_.emplace_back([st, &n, &g, &fn] { /* Guard{st} … */ });
 - **状态**：代码与文档已落地并自测通过；**B-1 锚点仍为真机待验**——本次数字只覆盖 PreviewWorker
   管道且夹具为 256×192 合成图，不构成 50MP 锚点判定。
 
-## 元类型重复声明 + 软打样三项遗留 + profile 字节可复现（2026-09-26，工作区未提交）
+## 元类型重复声明 + 软打样三项遗留 + profile 字节可复现（2026-09-26，已提交 e67ead8，2026-09-27）
 
 ### 1. `ImportMode` 元类型重复声明（C2766 隐患，已清除）
 
@@ -448,7 +458,7 @@ tasks_.emplace_back([st, &n, &g, &fn] { /* Guard{st} … */ });
 **验证（Release，本机）**：GUI 全量构建通过；`lrc_qt_tests.exe` **11 个测试类全绿**；headless 全量
 **480 用例 / 878886 断言全部通过**。
 
-## R-08：JPEG 嵌入 ICC 丢 SOS 标记（缺陷修复，2026-09-26，工作区未提交）
+## R-08：JPEG 嵌入 ICC 丢 SOS 标记（缺陷修复，2026-09-26，已提交 e67ead8，2026-09-27）
 
 `TestRawDecoder.cpp:556`（embedded ICC JPEG 用例）长期 flaky 的根因**不是阈值**，而是写入端产出
 了**结构非法的 JPEG**；顺带修掉同一函数里第二处互操作缺陷。
@@ -493,7 +503,7 @@ tasks_.emplace_back([st, &n, &g, &fn] { /* Guard{st} … */ });
 878717 断言，唯一失败即本次修复的 R-08 JPEG 用例）；GUI 全量构建通过；`lrc_qt_tests.exe`
 **10 个测试类全绿**（新增 `IccJpegDecodabilityTest`，且 `qt.gui.icc` 警告消失）。
 
-## UI 层接线修复 + 两个孤儿模块接入（2026-09-26，工作区未提交）
+## UI 层接线修复 + 两个孤儿模块接入（2026-09-26，已提交 e67ead8，2026-09-27）
 
 对 `src/ui` 做了一次「信号声明 ↔ emit ↔ connect」三方对账与对话框入口追踪，修复下列接线缺陷；
 **未删除任何既有功能**，两个此前完全不可达的模块（软打样、查重）改为补入口接入。
@@ -537,7 +547,7 @@ tasks_.emplace_back([st, &n, &g, &fn] { /* Guard{st} … */ });
 唯一失败为既有 flaky `TestRawDecoder.cpp:556`（R-08 embedded-ICC：两次运行 Δ=0.0073 / 0.0121，
 均低于阈值 0.02），与本次改动路径无关——**该缺陷已在上一小节定位并修复**。
 
-## P-C：移除 Lightroom 兼容（2026-09-26，工作区未提交）
+## P-C：移除 Lightroom 兼容（2026-09-26，已提交 ea06e77，2026-09-26）
 
 按 [ADR-0001](docs/adr/0001-drop-lightroom-compat.md) 与
 [docs/spec/optimization/04-drop-lr-compat.md](docs/spec/optimization/04-drop-lr-compat.md)
@@ -558,7 +568,7 @@ tasks_.emplace_back([st, &n, &g, &fn] { /* Guard{st} … */ });
 **验证**：headless 全量构建 + ctest 全绿（469 用例 / 878718 断言，一次预存 flaky 独立重跑后通过）；
 GUI 全量构建通过（`SilverHalide.exe`、`lrc_qt_tests.exe` 均生成），`run_qt_tests.bat` 退出码 0。
 
-## 导入静默失败 / 视图跳变 / AI 模型无提示 三连修（2026-09-25，工作区未提交）
+## 导入静默失败 / 视图跳变 / AI 模型无提示 三连修（2026-09-25，已提交 f5d89d4，2026-09-25）
 
 用户报障三例非致命运行时问题，定位结论：均为**逻辑性错误 + 失败路径静默**，无结构性病灶，未重构。
 修复 + 回归测试全部落地，`lrc_qt_tests.exe` 全绿，GUI 全量构建通过。
@@ -595,7 +605,7 @@ GUI 全量构建通过（`SilverHalide.exe`、`lrc_qt_tests.exe` 均生成），
   等 6 个 UI 源并链接 `Qt6::Concurrent`。仓库根新增 `run_qt_tests.bat`
   （本机 System32 缺 UCRT 转发 DLL，测试 exe 需 vcvars + Qt bin 环境，脚本已封装）。
 
-## P-A 性能极致 · 引擎层 headless 量化验收（2026-09-25，工作区未提交）
+## P-A 性能极致 · 引擎层 headless 量化验收（2026-09-25，已提交 04b0183，2026-09-25）
 
 **本轮内容**：P-A（M1 1:1 零等待 / M2 编辑手感 / M3 内存极致 / M4 大目录）原有底层能力已基本落地
 （1:1 磁盘直读、coarse-then-refine、全尺寸单缓冲+回落、worker 线程直方图、256MB LRU），缺的
@@ -614,9 +624,9 @@ GUI 全量构建通过（`SilverHalide.exe`、`lrc_qt_tests.exe` 均生成），
 - **真机待验**：B-1 热≤175ms/冷≤1500ms、B-2 松手→精帧≤80ms、B-3 主线程≤16ms/帧、D-1 单图峰值≤1.2GB —— 均需独立 GPU + 真实 50MP RAW，待 GPU 环境实测。
 - **验证**：headless 全量 **482 用例转绿**（含新增 4 条 PA 用例）；仅有已知 TestRawDecoder R-08 embedded-ICC 运行间非确定（单独跑 `[raw][io]` 全过）。
 
-## P3 竞品对齐优化·体验打磨（2026-09-21，工作区未提交）
+## P3 竞品对齐优化·体验打磨（2026-09-21，已提交 394cfab，2026-09-22）
 
-竞品规格 [competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md) 第 4 节 P3 四项全部落地并 headless 验收；P1/P2/P3/T 已全部实现，spec 内对应验收标准已勾选。四项代码均在工作区，未 commit（按用户要求先不提交/推送）。
+竞品规格 [competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md) 第 4 节 P3 四项全部落地并 headless 验收；P1/P2/P3/T 已全部实现，spec 内对应验收标准已勾选。四项代码已随 `394cfab`（2026-09-22）提交。
 
 - **P3-1 直方图线性化**：`Pipeline::computeHistogramFromLinear()`（全遍历无抽样；F32/U16 经 sRGB OETF LUT 编码，U8 直接回退）+ `renderPreview` 可选 `linearDisplayOut` 交出调整后线性 F32 显示缓冲；`PreviewWorker` 新增 `histogramReady` 信号在 **worker 线程** 统计（主线程零开销）；`HistogramWidget` 8bit 回退去掉 4M 抽样。`TestHistogram.cpp` 8 用例 / 3090 断言，含 4096×2048 大图全遍历（旧抽样只计一半）。
 - **P3-2 事件驱动文件夹监视**：`FolderMonitor` 新增 `ReadDirectoryChangesW`（异步 OVERLAPPED）事件线程 + 合并唤醒，差异/去抖复用 `poll()`（两路径语义一致）；`MainWindow` 优先事件驱动、失败回退 2s QTimer 轮询。`TestFolderWatcher.cpp` 7 用例（轮询回退 + 秒级事件驱动）。**本次修复两处健壮性 bug**：事件线程异常退出时 wake 一次以恢复轮询回退；D3D11 blur 负尺寸先检查再 resize。
@@ -635,20 +645,20 @@ GUI 全量构建通过（`SilverHalide.exe`、`lrc_qt_tests.exe` 均生成），
 - **R-08 预存失败修复**：测试用纯绿断言 G 通道（sRGB/AdobeRGB 红原色相同、绿原色才不同），区分 embedded ICC 应用，全量转绿后并入提交。
 - Commit `0ac13bb` + `4520933` 已推送 `SilverHalide/main`。
 
-## 当前任务状态（2026-09-12）
+## 当前任务状态（2026-09-12，历史快照）
 
-- **当前进行中的任务**：[竞品对齐优化实施规格](docs/spec/competitive-optimization-implementation-spec.md) +
+- **当时进行中的任务**：[竞品对齐优化实施规格](docs/spec/competitive-optimization-implementation-spec.md) +
   [代码业务可用性审查](docs/archive/code-business-risk-review-2026-09-06.md)（R-01 ~ R-16）+
-  [P-C Lightroom 兼容移除](docs/spec/optimization/04-drop-lr-compat.md)（本批次已落地，待构建验证）。
+  [P-C Lightroom 兼容移除](docs/spec/optimization/04-drop-lr-compat.md)（已提交 `ea06e77`，2026-09-26）。
 - **总体状态**：竞品规格 P1/P2/P3/T 均已实现（spec 内对应验收标准已勾选，含 2026-09-19 起的 P1-3 端到端与 Qt 真实导出验收、P3-4 GPU 后端）；**P-C（Lightroom 兼容移除）已按 ADR-0001 落地代码、测试与文档**。GPU 真机量化（P1-1 DirectML ≥2x、P3-4 提速）与部分 P1 数值矩阵断言待补（见 spec 各批次验收标准注释）。风险审查项已逐条修复，详见下。
-- **风险审查修复进展（工作区未提交）**：R-01（DCP 注入解码/渲染）~ R-16 均已在引擎/目录/UI 层落地并登记回归测试；R-10（标准预览缓存色彩版本）、R-11（内存导入保持 ICC）、R-16（删除清理外部缓存）为最近一批，2026-09-12 验证通过。
+- **风险审查修复进展（已提交 b78e9bd，2026-09-12）**：R-01（DCP 注入解码/渲染）~ R-16 均已在引擎/目录/UI 层落地并登记回归测试；R-10（标准预览缓存色彩版本）、R-11（内存导入保持 ICC）、R-16（删除清理外部缓存）为最近一批，2026-09-12 验证通过。
 - **验证（2026-09-12，headless）**：当前构建树 `cmake --build build_headless -j` 通过；`ctest --test-dir build_headless` 全绿，**444 用例 / 752,709 断言** 全部通过。期间修复一处 JPEG APP2 ICC 段长度 off-by-2 的写入错误（`ImageIO::jpegIccMarkers`），否则内嵌 ICC 无法被 `extractIccFromJpeg` 恢复，会同时影响 R-08/R-10 路径。
 - **P1-3 批量重命名（2026-09-19 端到端已验收）**：`src/utils/RenameTemplate.h` 实现模板渲染（`{date}/{index[:W]}/{base}`）与冲突唯一路径；导入端 `ImportDialog` 加重命名复选+模板+新文件名预览，`ImportWorker::importPaths` 按选择顺序+源文件修改日期在 Stage1 重命名（`renameMutex_` 串行化查重，失败回退）；导出端 `ExportDialog` 加批量重命名复选+模板+母版/副本预览，启用时 `MainWindow` 走 `PreviewWorker::batchExport` 为母版+所有虚拟副本按模板重命名输出。headless 端到端集成用例（批处理后文件名唯一、DB `file_path` 镜像一致）+ Qt `batchExport` 真实导出断言已验收；GUI 手动验收未做。
-- **DCP 相机配置文件（工作区未提交，风险项 R-01 已修复）**：DevelopPanel 相机配置文件选择框选择后，DCP 的 ColorMatrix1/2 与 ProfileToneCurve 在解码阶段注入并进入渲染管线（R-01），不再只是读取文件、未应用到色彩计算。
-- **Lensfun（工作区未提交）**：已声明 `lensfun:x64-windows`、接入 Qt-free 查询 adapter 和 RAW 镜头元数据；UI 仅声明几何畸变支持（移除未实际处理的暗角/色差承诺，R-05）；vcpkg 安装仍受历史中断影响，数据库查询验证待完成。
+- **DCP 相机配置文件（已提交 b78e9bd，2026-09-12；风险项 R-01 已修复）**：DevelopPanel 相机配置文件选择框选择后，DCP 的 ColorMatrix1/2 与 ProfileToneCurve 在解码阶段注入并进入渲染管线（R-01），不再只是读取文件、未应用到色彩计算。
+- **Lensfun（已提交 0ac2f54，2026-09-05）**：已声明 `lensfun:x64-windows`、接入 Qt-free 查询 adapter 和 RAW 镜头元数据；UI 仅声明几何畸变支持（移除未实际处理的暗角/色差承诺，R-05）；vcpkg 安装仍受历史中断影响，数据库查询验证待完成。
 - **历史性能资料**：M1-M5 实施规格和四阶段加速报告位于 `docs/archive/`，仅作回溯依据，不作为当前进行中任务清单。
 
-## Catalog 持久化层重构与无模型打包（2026-09-14，工作区未提交）
+## Catalog 持久化层重构与无模型打包（2026-09-14，已提交 cb3aea9，2026-09-14）
 
 本轮对 `src/catalog` 持久化层做了整体升级，并完成 UI「目录即库」装配与无模型安装包。涉及的新增/修改类如下。
 
@@ -1142,7 +1152,7 @@ cmake --build build_gui --config Release
   其余支柱节点见 [00-ROADMAP 索引](docs/spec/optimization/00-ROADMAP.md)。P-A 量化锚点：B-1 热 50MP 1:1 ≤175ms、
   B-2 松手→精帧 ≤80ms、B-3 主线程 ≤16ms/帧、D-1 峰值 ≤1.2GB、D-2 切图回落 ≤400MB；真机锚点待 GPU 环境实测。
 
-- **P-B（离线 AI）实施落地（2026-09-25，工作区未提交）**：spec 见
+- **P-B（离线 AI）实施落地（2026-09-25，已提交 df5e828，2026-09-25）**：spec 见
   [docs/spec/optimization/02-PB-offline-ai.md](docs/spec/optimization/02-PB-offline-ai.md)，
   Milestone 节点见
   [pillars/02-pb/](docs/spec/optimization/pillars/02-pb/)（M1 自动出片 / M2 批量预分级）。
@@ -1156,7 +1166,9 @@ cmake --build build_gui --config Release
   `[autodevelop]` 9 例、`[pregrade]` 7 例、catalog 预分级读回全绿。UI：ImportWorker 导入完成后再后台串行对每张图
   解码标准预览跑预分级 → `setPregrade` 落库 + `pregradeReady` 信号 → Filmstrip 打「AI」角标（有主体青色/无灰）；
   DevelopPanel「自动」按钮沿用既有路径，merge 了 `autoDevelop` 的 contrast 建议进参数堆栈（可撤销/进历史）。
-  裁剪字段因管线当前无实际 crop 渲染，按计划偏差仅作建议值（不扩散重构）。GUI 构建链接通过。
+  裁剪字段因管线当前无实际 crop 渲染，按计划偏差仅作建议值（不扩散重构）。（2026-11-04 核实：该说法已失效——
+  `235b20c` 已实现非破坏性裁剪，`Adjustments::cropRect/straightenAngle` 在预览 stage F、全尺寸 `renderInternalLinear`
+  与导出路径（`renderLinearFull` / `renderFullDisplay`）均参与渲染。）GUI 构建链接通过。
 
 - **竞品对齐优化**：当前任务文件为
   [docs/spec/competitive-optimization-implementation-spec.md](docs/spec/competitive-optimization-implementation-spec.md)。

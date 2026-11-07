@@ -12,13 +12,13 @@
 
 ## 当前任务状态
 
-**当前进行中的任务**：执行本规格 [competitive-optimization-implementation-spec.md](competitive-optimization-implementation-spec.md) 中定义的竞品对齐优化。
+**历史任务**：执行本规格 [competitive-optimization-implementation-spec.md](competitive-optimization-implementation-spec.md) 中定义的竞品对齐优化。
 
-**状态核对日期**：2026-09-05。
+**状态核对日期**：2026-09-05（历史快照）；提交状态复核于 2026-11-04。
 
-**总体状态**：待实施。P1、P2、P3 和 T 的正式实施批次尚未按本规格启动，不能将表格中的“可测 ✅”解释为已完成；该标记仅表示已有明确的验证方法。现有代码中的 AI 天空蒙版、编辑历史、SIMD 条件编译等属于可复用基础或相邻能力，仍需按本规格补齐实现范围、验收用例和性能证据。
+**总体状态**：P1/P2/P3/T 已实现并验收，已提交（批次提交见 `0ac2f54`、`029b028`、`394cfab`、`e67ead8`、`ea06e77`）。原文“待实施”为 2026-09-05 的历史快照，保留于下方各批次进展记录。仍待补：P1-1 DirectML ≥2x 耗时、P3-4 GPU 提速等真机量化，以及部分 GUI 手动验收。
 
-**P1-3 批量重命名进展（2026-09-05，工作区未提交，状态：代码已落地但未验收）**：
+**P1-3 批量重命名进展（2026-09-05，已提交 0ac2f54；当时状态：代码已落地但未验收）**：
 
 - 模板引擎：`src/utils/RenameTemplate.h` 已实现 `renderRenameTemplate`（`{date}`/`{index[:W]}`/`{base}`，大小写不敏感，未知 token 原样保留）与 `uniqueRenamePath`（冲突自动 `-N` 后缀），Qt-free。
 
@@ -30,7 +30,7 @@
 
 - 未完成项（未验收）：导入端 `CatalogDatabase::updateImagePath` 的批量路径同步在 ImportWorker 内通过重命名后落盘路径直接生效，但缺少端到端「批量重命名后目录内文件名唯一、DB `file_path` 同步更新、取消不改文件」集成用例；导出端虚拟副本批量导出尚未做真实导出断言（只验证编译与路径生成）。需按 §2 验收标准补齐。
 
-**P1-3 端到端集成测试补齐（2026-09-19，工作区未提交，状态：headless 层已验收）**：
+**P1-3 端到端集成测试补齐（2026-09-19，已提交 029b028；当时状态：headless 层已验收）**：
 
 - `TestCompetitiveP1.cpp` 新增两个 `[p1][rename][catalog]` 集成用例，在 headless catalog 层逐字复刻 `ImportWorker` Stage-1 重命名流程（落盘后按选择顺序渲染模板 → `uniqueRenamePath` 去重 → 磁盘 rename → 以最终路径入库）：
   - **批处理契约**：3 个已落盘文件 + 预占第 1 序号的渲染目标，强制走 `-2` 冲突分支；断言批处理后目录内文件名唯一、DB `file_path` 与磁盘改名后路径镜像一致（`findImageByPath` 命回原 id）。
@@ -38,7 +38,7 @@
 - headless `[p1]` 重跑通过：15 用例 / 115 断言（原 13/87）。
 - 仍待验收（属于 GUI/真实导出，见 T-3 范畴）：导出端虚拟副本 `batchExport` 真实导出断言、导入/导出对话框 UI smoke；P1-1「CPU vs DirectML 逐通道容差 + ≥2x 耗时」需 GPU 实测。
 
-**P1 GUI/真实导出验收（2026-09-19，工作区未提交，状态：Qt 层已验收）**：
+**P1 GUI/真实导出验收（2026-09-19，已提交 029b028；当时状态：Qt 层已验收）**：
 
 - 新增 Qt 测试目标 `tests/lrc_qt_tests`（仅 `LRC_ENABLE_QT` 时构建，Qt6::Test/Widgets + AUTOMOC，链接 `src/ui/PreviewWorker.cpp` 与 `ExportDialog/ImportDialog/SnapshotDialog`），归一化到 `tests/CMakeLists.txt`：
   - **batchExport 真实导出断言**：写临时 JPEG → 构造 PreviewWorker（worker 线程，同 MainWindow::startWorkers）→ 一次 batchExport 三个 ExportItem（JPEG/PNG/TIFF16，各独立输出路径）→ 断言 `batchExportFinished(success=N, fail=0)` 且每个落盘文件魔数正确（JPEG FFD8FF / PNG 89504E47… / TIFF II*\x2A）。offscreen 运行 3/3 通过。

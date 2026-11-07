@@ -16,12 +16,12 @@
 每次开始工作前，先从实时状态判断任务是否仍在进行；不要仅凭历史里程碑文档推断当前状态：
 
 1. 执行 `git status --short --branch` 和 `git log -n 10 --date=iso --format="%h %ad %s"`，记录当前分支、未提交文件和最近提交。
-2. 检查 `docs/plans/` 中未归档的计划；其中标记为 completed 的计划不应当重新执行。
+2. 检查 `docs/plans/` 中未归档的计划（当前无未归档计划，目录为空或不存在即视为无）；其中标记为 completed 的计划不应当重新执行。
 3. 将 `docs/archive/` 视为历史证据，不把其中的 PHASE、M 里程碑或旧测试数字直接当作当前任务。
 4. 若 Git、构建/测试结果和文档冲突，以可复现的 Git 状态与实测结果为准，并在回复中明确冲突和日期。
 5. 在报告任务状态时区分 `已提交`、`工作区未提交`、`代码已落地但未验收`、`待实施`，不要把“有代码框架”写成“已完成”。
 
-当前核对快照（2026-10-20）：分支为 `main`，最近提交为 `1d6a624`；工作区有一大批**未提交**的「现代 C++ 改造（IM-1 ~ IM-11）」改动（29 个源码/测试文件 + 文档，另 `src/engine/Pipeline.cpp.orig` 的删除），验收数字与遗留见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md)。`packaging/installer.iss` 存在与本轮无关的预先改动。无其它已知进行中的任务；性能 M1-M5 的真机锚点仍待验。开始新任务前必须重新执行上述检查，不能把本快照当作永久状态。
+当前核对快照（2026-11-04）：分支为 `main`，最近提交为 `20bdf27`（2026-10-29，`fix(packaging): remove model cache on uninstall`）；工作区干净（0 已暂存 / 0 未暂存 / 0 未跟踪），无 stash；本地与 `SilverHalide/main` 无分叉。此前记录的现代 C++ 改造（IM-1 ~ IM-11，`9792b42` 2026-10-20）、D3D11 与性能诊断（`a2aae03` 2026-10-27）、AI 模型懒加载（`7664d2c` 2026-10-27）、Lightroom 工作流（`235b20c` 2026-10-29）均已提交；验收数字与遗留见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md) 与 [STATUS.md](STATUS.md)。`docs/plans/` 当前无未归档计划（lensfun 计划已归档到 `docs/archive/`）。仍待跟进：`dist/` 中无 AI 安装包 exe 缺失、性能 M1-M5 的真机锚点仍待验。headless 已于 2026-11-07 复验完成：修复 deps 前缀后全量 clean 重建 303 步成功，`ctest` 1/1 Passed，`lrc_tests.exe` 524 test cases / 979,265 assertions 全通过（0 失败，覆盖 2026-10-29 之后的引擎改动；519 / 979,236 为 2026-10-26 的历史记录，两者不合并）。注意每次 configure 后仍需重跑 `_fix_msvc_deps.ps1`。开始新任务前必须重新执行上述检查，不能把本快照当作永久状态。
 
 状态参考： [STATUS.md](STATUS.md)、[docs/archive/perf-m1-m5-implementation-spec.md](docs/archive/perf-m1-m5-implementation-spec.md)、[docs/archive/Speedup_Four_Stages_Report.md](docs/archive/Speedup_Four_Stages_Report.md)、[docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md](docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md)。
 
