@@ -26,7 +26,10 @@
 // the include made that fallback unreachable and left AI masks weightless.
 #include "engine/AiMaskGenerator.h"
 
-#ifdef LRC_ENABLE_AI
+// NOTE: LRC_ENABLE_AI is always defined by CMake (=1 or =0), so this must be
+// `#if`, not `#ifdef`: with a plain #ifdef the AI headers stayed included in a
+// no-AI build and the guard below never compiled anything out.
+#if LRC_ENABLE_AI
 #  include "engine/AiDenoiseProcessor.h"
 #  include "engine/AiInference.h"
 #endif
@@ -1428,7 +1431,7 @@ void applySpatialAdjustmentsScaled(const Adjustments& a, float* p, int w, int h,
     // sessions are per-thread, so concurrent preview + export renders are
     // safe.
     if (a.aiDenoise.hasEffect()) {
-#ifdef LRC_ENABLE_AI
+#if LRC_ENABLE_AI
         auto* engine = Pipeline::globalAiEngine();
         if (engine && engine->hasModel("nafnet-denoise")) {
             // Wrap p into a fresh F32 buffer (single memcpy; the inference

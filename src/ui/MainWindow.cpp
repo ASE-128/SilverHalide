@@ -622,6 +622,9 @@ void MainWindow::buildUi() {
     // An AI feature was used while its model is not downloaded: surface an
     // actionable status-bar message (the panel deliberately does not open the
     // model manager itself — the status bar tells the user where it lives).
+    // AI-only: with LRC_ENABLE_AI=0 the panel has no emitter for this signal,
+    // so the connection (and its "模型管理" copy) is compiled out.
+#if LRC_ENABLE_AI
     connect(developPanel_, &DevelopPanel::aiModelUnavailable, this,
             [this](const QString& feature, const QString& modelId,
                    bool usedHeuristicFallback) {
@@ -635,6 +638,7 @@ void MainWindow::buildUi() {
                               .arg(feature, modelId),
                     8000);
             });
+#endif  // LRC_ENABLE_AI (AI model unavailable status message)
     connect(developPanel_, &DevelopPanel::maskBrushSizeChanged, viewport_,
             &ImageViewport::setMaskBrushSize);
     // Brush softness follows the panel slider; also re-sent on tool arm / mask

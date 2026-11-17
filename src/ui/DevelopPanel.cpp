@@ -65,6 +65,10 @@ const char* kColorNames[8] = {
 // engine Pipeline::setGlobalAiEngine() publishes at startup; when they return
 // false the call site must emit DevelopPanel::aiModelUnavailable so the user
 // sees an actionable message instead of a silent no-op.
+// Every caller of these probes lives in an AI-only block (see the
+// #if LRC_ENABLE_AI regions below), so the whole helper group is compiled only
+// for AI builds. LRC_ENABLE_AI is always defined by CMake, hence `#if`.
+#if LRC_ENABLE_AI
 bool aiModelReady(const char* id) {
     const auto* engine = lrc::Pipeline::globalAiEngine();
     return engine && id && id[0] != '\0' && engine->hasModel(id);
@@ -102,6 +106,7 @@ QString aiFeatureName(lrc::AiMaskTarget target) {
     }
     return {};
 }
+#endif  // LRC_ENABLE_AI (model availability probes + feature names)
 
 // Creates a labelled slider+spin row and returns the container widget.
 QWidget* makeSliderRow(QWidget* parent, QSlider*& slider,
@@ -1684,6 +1689,10 @@ void DevelopPanel::activateMaskTool(lrc::MaskType tool) {
     emit maskToolActivated(tool);
 }
 
+// AI-only entry points: the buttons that call these are themselves inside
+// #if LRC_ENABLE_AI blocks, so a no-AI build needs neither the code nor its
+// user-facing strings.
+#if LRC_ENABLE_AI
 void DevelopPanel::addAiMask(lrc::AiMaskTarget target) {
     // One-shot AI mask creation (no interactive drawing step). The mask's
     // weight is rasterized inside Pipeline::applyLocalAdjustments via
@@ -1739,6 +1748,7 @@ void DevelopPanel::warnIfAiDenoiseModelMissing() {
     emit aiModelUnavailable(tr("AI 降噪"), QString::fromLatin1(kNafnetId),
                             false);
 }
+#endif  // LRC_ENABLE_AI (AI mask creation + denoise availability warning)
 
 void DevelopPanel::selectMaskTool(lrc::MaskType tool) {
     if (tool == lrc::MaskType::None) {

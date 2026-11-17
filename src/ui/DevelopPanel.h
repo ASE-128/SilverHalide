@@ -361,6 +361,7 @@ private:
     void onMaskFeatherChanged(int value);
     void onMaskBrushSizeChanged(int value);
     void onMaskSoftnessChanged(int value);
+#if LRC_ENABLE_AI
     // Appends a new Mask with type=AiMask and the given target, selects it, and
     // notifies the preview. No drawing step -- segmentation runs inside
     // Pipeline::applyLocalAdjustments when the mask is rendered.
@@ -369,6 +370,7 @@ private:
     // called on the disabled->enabled transition of the AI-denoise control so
     // a missing model can never read as a silent no-op.
     void warnIfAiDenoiseModelMissing();
+#endif  // LRC_ENABLE_AI (AI-only slots behind the guarded buttons)
     void scheduleDebounce();
     void applyDebounce();
     void applyCoarseDebounce();
