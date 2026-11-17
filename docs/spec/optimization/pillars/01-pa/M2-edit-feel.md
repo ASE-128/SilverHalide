@@ -38,5 +38,5 @@
 
 **引擎层 headless 记录已落地**（`tests/TestPerfAnchors.cpp`，合成 8000×6000 F32 缓冲，Release 实测）：
 - 1920 精帧渲染（`renderPreview` target 1920×1440，默认调整 + 代表性主滑块，3 次取稳态）：**min ≈99ms / avg ≈100ms**（本机沙箱）。
-- 结论：此为引擎渲染段基线，**非**锚点判定。B-2 ≤80ms 的松手→精帧口径还需叠加 UI 触发/调度与真机算力，须**真机（含独立 GPU）**验收，当前标 **真机待验**。
-- B-3 主线程 ≤16ms/帧为 UI/主线程帧预算审计，headless 无界面对话框可测，仅保留审计点（PreviewWorker 已保证 histogram/渲染在 worker 线程），标 **真机待验**。
+- 结论：此为引擎渲染段基线，**非**锚点判定。B-2 ≤80ms 的松手→精帧口径还需叠加 UI 触发/调度与真机算力，须**真机（含独立 GPU）**验收；当前状态以 [STATUS.md 的「性能锚点实测状态」统一表](../../../../../STATUS.md) 为准。
+- B-3 主线程 ≤16ms/帧为 UI/主线程帧预算审计，headless 无界面对话框可测，仅保留审计点（PreviewWorker 已保证 histogram/渲染在 worker 线程）；当前状态以 [STATUS.md 的「性能锚点实测状态」统一表](../../../../../STATUS.md) 为准。

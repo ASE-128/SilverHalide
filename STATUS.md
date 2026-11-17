@@ -13,14 +13,32 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
-## 当前仓库快照（核对日期 2026-11-04，headless 复验更新于 2026-11-07）
+## 当前仓库快照（核对日期 2026-11-17；headless 复验更新于 2026-11-17）
 
-- 分支 `main`，HEAD `20bdf27`（2026-10-29），无 stash；本地与 `SilverHalide/main` 无分叉。工作区当时干净；截至 2026-11-07 有 6 个文档修改 + 1 个计划归档重命名处于未提交状态（属文档状态修正，无代码改动）。
+- 分支 `main`，本地领先 `SilverHalide/main` 1 个提交（本次核对 HEAD 为 `c37028f`，2026-11-07），无 stash。本次变更在该提交之上落地 no-AI 构建修复（AI 条件编译 `#ifdef` → `#if`）与文档收口；最终 HEAD 以 `git log -n 1` 为准。
 - 下文各章节标题里的“工作区未提交”均为**写作当时**的状态标记；对应代码现已提交，章节内已逐条补注提交哈希与日期。历史验收数字保持原样，不跨章节合并。
 - **2026-11-07 headless 复验（已完成）**：重跑 `_fix_msvc_deps.ps1` 并重新 configure 后再次修复前缀，`Pipeline.cpp.obj` 由 `#deps 0` 恢复为 `#deps 15 (VALID)`（`CropTransform` 4、`TestCompetitiveP1` 51、`CatalogDatabase` 9 抽样一致）；`ninja -t clean` 后全量重建 **303 步成功**，`ctest` **1/1 Passed**，`lrc_tests.exe` **524 test cases / 979,265 assertions 全通过**（0 失败）。该树现已覆盖 2026-10-29 之后的引擎改动。
-- 数字口径：**524 / 979,265 为 2026-11-07 实测**；**519 / 979,236 为 2026-10-26 的记录**（见下文 D3D 章节），两者并存不合并。增量 **+5 例 / +29 断言**，对应 Lightroom 工作流的定向测试（与 `235b20c` 章节记录一致）。
-- 长期注意事项（未变）：每次 **configure 之后** `rules.ninja` 的 `msvc_deps_prefix` 会被重新覆盖成 mojibake，必须再跑一次 `build_headless\_fix_msvc_deps.ps1 -BuildDir build_headless`；既有 `.obj` 仍是 `#deps 0`，首次修复后需一次全量重建才生效。
-- 仍需跟进的项：无 AI 安装包 exe 在 `dist/` 中缺失；现代 C++ 改造遗留见下文；性能 M1-M5 真机锚点仍待验。`docs/plans/` 当前无未归档计划。
+- **2026-11-17 headless 复验（已完成，本次实测）**：对 `build_headless`（`LRC_ENABLE_AI=OFF`）重跑 `_fix_msvc_deps.ps1 -BuildDir build_headless`，`Pipeline.cpp.obj` 显示 `#deps 14 (VALID)`；`ninja -t clean` 后全量重建 **304 步成功**，`ctest --test-dir build_headless --output-on-failure` **1/1 Passed**，`lrc_tests.exe -r compact` 报 **524 test cases / 979,265 assertions 全通过**（0 失败），与 2026-11-07 记录一致。该树覆盖本次 no-AI 构建修复。
+- 数字口径：**524 / 979,265 为 2026-11-07 实测、2026-11-17 复测一致**；**519 / 979,236 为 2026-10-26 的记录**（见下文 D3D 章节），两者并存不合并。增量 **+5 例 / +29 断言**，对应 Lightroom 工作流的定向测试（与 `235b20c` 章节记录一致）。
+- 长期注意事项（未变）：每次 **configure 之后** `rules.ninja` 的 `msvc_deps_prefix` 会被重新覆盖成 mojibake，必须再跑一次 `build_headless\_fix_msvc_deps.ps1 -BuildDir build_headless`；既有 `.obj` 仍是 `#deps 0`，首次修复后需一次全量重建才生效。另：`LRC_ENABLE_AI` 恒被 CMake 定义为 0/1，条件编译必须用 `#if`（见 `docs/DEVELOPMENT_EXPERIENCE.md` §11）。
+- 仍需跟进的项：现代 C++ 改造遗留见下文；真机锚点逐条状态见下表。`docs/plans/` 当前无未归档计划。`dist/` 两个安装包均在（AI 版约 980.9 MB、No-AI 版约 406.8 MB，各带 sha256），旧记录里“缺 AI 安装包”的遗留项已解决。
+
+## 性能锚点实测状态（唯一口径，核对 2026-11-17）
+
+> 本表是 B-1..D-3 锚点状态的唯一登记处。里程碑文档（`docs/spec/optimization/pillars/01-pa/M1~M3`）只引用本表，不再各自维护“真机待验”标记或数字，避免多处漂移。
+> 锚点定义见 [optimization-positioning-spec.md](docs/spec/optimization-positioning-spec.md)（热 1:1 ≤175ms / 冷 ≤1500ms、精帧 ≤80ms、主线程 ≤16ms/帧、峰值 ≤1.2GB、回落 ≤400MB）。
+
+| 锚点 | 目标 | 当前状态 | 证据 / 缺口 |
+|---|---|---|---|
+| B-1 热 1:1 | ≤175ms | 引擎段有记录，端到端真机待验 | engine 段 ~514ms / 623.7ms（合成 8000×6000，**非**锚点）；完整 worker 管道仅 256×192 小夹具（0~13ms）。缺真实 50MP RAW 的请求→出帧实测 |
+| B-1 冷 1:1 | ≤1500ms | 真机待验 | 同上；缺清空缓存 + 真实 50MP RAW 的首次进入计时 |
+| B-2 精帧 | ≤80ms | 引擎段有记录，端到端真机待验 | engine 段 min ~69.7ms / avg ~76.0ms（D3D 后端，合成 50MP），`TestPerfAnchors` 同机复测。缺“松手→1920 精帧”端到端口径 |
+| B-3 主线程帧预算 | ≤16ms/帧 | 真机待验 | 仅有审计点（PreviewWorker 保证渲染/histogram 在 worker 线程），缺真实拖动期间的每帧问询采样 |
+| D-1 峰值内存 | ≤1.2GB | 单图口径真机待验 | headless 累计 working-set ~1319MB 含多用例残留，非单图；`TestPerfAnchors` D-1 作用域提交后 76.04 MB。缺真实 50MP 编辑流程单图峰值 |
+| D-2 切图回落 | ≤400MB | 真机待验（回落可重复 ✓） | headless 回落 688.0 / 688.2MB 可重复（高于 400MB 目标），需真机确认口径与目标可达性 |
+| D-3 大目录滚动 | 1 万张不掉帧 | 未验 | 无可复用实测记录 |
+
+已完成的**真机 GPU 对比**见下文「性能兑现：D3D11 默认开启与可感知化」章节（B-2 GPU 70.67ms vs CPU 69.43ms、B-1 fullDisplay GPU 503.02ms vs CPU 508.73ms、D-2 作用域 76.04MB）。这些是同机 D3D 后端锚点，按上表口径仍不替代端到端判定。
 
 ## 性能兑现：D3D11 默认开启与可感知化（2026-10-26，已提交 a2aae03，2026-10-27）
 

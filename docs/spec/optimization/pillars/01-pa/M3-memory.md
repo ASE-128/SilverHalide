@@ -35,5 +35,5 @@
 
 **引擎层 headless 记录已落地**（`tests/TestPerfAnchors.cpp`，合成 8000×6000 F32 缓冲，Win32 `PagefileUsage` 私有提交采样，Release 实测）：
 - D-2 回落：持有 50MP F32 + 全尺寸 U8 期间私有提交较基线增长，作用域释放后回落**约 688MB**；两轮试验回落 **688.0MB/688.0MB**，**可重复** ✓。
-- D-1 峰值：测试进程累计 working-set 峰值约 **1319MB**（含此前用例残留的 50MP 缓冲，非单图口径）；真实 ≤1.2GB 单图峰值无法在 headless 无 UI 场景复现，须**真机**以真实 50MP RAW 编辑流程验收，当前标 **真机待验**。
+- D-1 峰值：测试进程累计 working-set 峰值约 **1319MB**（含此前用例残留的 50MP 缓冲，非单图口径）；真实 ≤1.2GB 单图峰值无法在 headless 无 UI 场景复现，须**真机**以真实 50MP RAW 编辑流程验收；当前状态以 [STATUS.md 的「性能锚点实测状态」统一表](../../../../../STATUS.md) 为准。
 - 已确认：`PreviewWorker::clearFullRes()` 释放 retained 全尺寸缓冲 + 重置 1:1 状态（engine 层单缓冲约束成立）。

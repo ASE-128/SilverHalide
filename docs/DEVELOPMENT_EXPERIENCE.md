@@ -211,3 +211,11 @@ Ninja 构建用 `-j4`。`-j8` 内存不足会批量失败（GUI 目标含 Qt 链
 4. CMake 升级或 MSVC 语言包变化后需复核；根治方向是让 cl 输出英文前缀（当前 `VSLANG=1033` 对其无效）或在 CMake 侧修正。
 
 **教训**：在本机，任何「改了头文件」的验证结论，只有在 clean 重建 + `#deps > 0` 自检之后才可信。
+
+## 11. `LRC_ENABLE_AI` 恒被定义：必须用 `#if`，不能用 `#ifdef`（2026-11-17 实测）
+
+CMake 在 `lrc_engine` 与 `lrc_lightroom` 上**始终**定义 `LRC_ENABLE_AI`，取值只有 `1`（启用）或 `0`（禁用，见 `CMakeLists.txt` 的 `target_compile_definitions`）。因此 `#ifdef LRC_ENABLE_AI` **恒为真**：在 `LRC_ENABLE_AI=OFF` 的构建里，AI 头文件与调用点仍会被编入，UI 的 AI 按钮/文案也不会被裁掉，只是运行时走 stub 并静默失效。
+
+**规则**：所有针对该宏的条件编译一律写 `#if LRC_ENABLE_AI` / `#else` / `#endif`。新增 AI 相关代码时，先确认它所在的 UI 按钮、信号、槽、辅助函数是否都落在同一组 `#if` 内，避免出现「按钮被裁掉但槽还在」或「槽被裁掉但 `connect` 还在」的悬空引用。
+
+**验证**：`LRC_ENABLE_AI=OFF` 的构建树（`build_headless`、`build_gui_noai`）必须能 clean 构建通过，并在真机确认 DevelopPanel 中 AI 蒙版与 AI 降噪控件确实不存在。仅凭 `AI=ON` 构建通过无法暴露这类问题。

@@ -5,7 +5,7 @@
 ## 1. 关键事实
 
 - 源码根目录 = 工作区根目录： [d:\Desktop\SilverHalide-src](.)
-- 活跃构建树位于工作区根： [build_gui](build_gui) 和 [build_headless](build_headless)
+- 活跃构建树位于工作区根： [build_gui](build_gui)（含 AI）与 [build_headless](build_headless)；`build_gui_noai`、`build_headless_ai` 是 AI 开关对照树，`build_mask`、`build_t1`…`build_t9` 是历史试验树，不要视作当前构建入口
 - 旧的 VS 产物树（曾位于源子目录 `lightroom-clone-cpp/build_gui`）是历史残留，已随源码上提清理，打包/调试/自动化不要再建此类旧树
 - Qt 安装路径： [qt/6.8.3/msvc2022_64](qt/6.8.3/msvc2022_64)
 - ONNX Runtime 预置目录： [onnxruntime/onnxruntime-win-x64-1.23.2](onnxruntime/onnxruntime-win-x64-1.23.2)
@@ -21,7 +21,7 @@
 4. 若 Git、构建/测试结果和文档冲突，以可复现的 Git 状态与实测结果为准，并在回复中明确冲突和日期。
 5. 在报告任务状态时区分 `已提交`、`工作区未提交`、`代码已落地但未验收`、`待实施`，不要把“有代码框架”写成“已完成”。
 
-当前核对快照（2026-11-04）：分支为 `main`，最近提交为 `20bdf27`（2026-10-29，`fix(packaging): remove model cache on uninstall`）；工作区干净（0 已暂存 / 0 未暂存 / 0 未跟踪），无 stash；本地与 `SilverHalide/main` 无分叉。此前记录的现代 C++ 改造（IM-1 ~ IM-11，`9792b42` 2026-10-20）、D3D11 与性能诊断（`a2aae03` 2026-10-27）、AI 模型懒加载（`7664d2c` 2026-10-27）、Lightroom 工作流（`235b20c` 2026-10-29）均已提交；验收数字与遗留见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md) 与 [STATUS.md](STATUS.md)。`docs/plans/` 当前无未归档计划（lensfun 计划已归档到 `docs/archive/`）。仍待跟进：`dist/` 中无 AI 安装包 exe 缺失、性能 M1-M5 的真机锚点仍待验。headless 已于 2026-11-07 复验完成：修复 deps 前缀后全量 clean 重建 303 步成功，`ctest` 1/1 Passed，`lrc_tests.exe` 524 test cases / 979,265 assertions 全通过（0 失败，覆盖 2026-10-29 之后的引擎改动；519 / 979,236 为 2026-10-26 的历史记录，两者不合并）。注意每次 configure 后仍需重跑 `_fix_msvc_deps.ps1`。开始新任务前必须重新执行上述检查，不能把本快照当作永久状态。
+当前核对快照（2026-11-17）：分支 `main`，本地领先 `SilverHalide/main` 1 个提交（核对时最新提交 `c37028f`，2026-11-07）；本次变更在该提交之上落地 no-AI 构建修复（AI 条件编译 `#ifdef` → `#if`，涉及 `src/engine/Pipeline.cpp`、`src/ui/DevelopPanel.cpp/.h`、`src/ui/MainWindow.cpp`）与文档收口（本文件、`README.md`、`STATUS.md`、三份 P-A 里程碑文档、`docs/DEVELOPMENT_EXPERIENCE.md` §11）；最终 HEAD 以 `git log -n 1` 为准。此前记录的现代 C++ 改造（IM-1 ~ IM-11，`9792b42`）、D3D11 与性能诊断（`a2aae03`）、AI 模型懒加载（`7664d2c`）、Lightroom 工作流（`235b20c`）均已提交，验收数字与遗留见 [docs/spec/modern-cpp-adoption-report.md](docs/spec/modern-cpp-adoption-report.md) 与 [STATUS.md](STATUS.md)。`docs/plans/` 当前无未归档计划（lensfun 计划已归档到 `docs/archive/`）。`dist/` 现有 `Silver Halide Setup 1.0.0.exe`（含 AI，约 980.9 MB）与 `Silver Halide Setup 1.0.0 (No AI).exe`（约 406.8 MB），旧记录里“缺 AI 安装包”的遗留项已解决。`build_headless`（`LRC_ENABLE_AI=OFF`）2026-11-17 本次实测：重跑 `_fix_msvc_deps.ps1` 后 `Pipeline.cpp.obj` 为 `#deps 14 (VALID)`，全量 clean 重建 304 步成功，`ctest` 1/1 Passed，524 test cases / 979,265 assertions 全通过（519 / 979,236 为 2026-10-26 的旧记录，两者不合并）。性能锚点的逐条真机状态见 [STATUS.md 的「性能锚点实测状态」唯一表](STATUS.md)，不再以“M1-M5 全部待验”概括。注意每次 configure 后仍需重跑 `_fix_msvc_deps.ps1`；`LRC_ENABLE_AI` 恒被定义为 0/1，必须用 `#if`（见 `docs/DEVELOPMENT_EXPERIENCE.md` §11）。开始新任务前必须重新执行上述检查，不能把本快照当作永久状态。
 
 状态参考： [STATUS.md](STATUS.md)、[docs/archive/perf-m1-m5-implementation-spec.md](docs/archive/perf-m1-m5-implementation-spec.md)、[docs/archive/Speedup_Four_Stages_Report.md](docs/archive/Speedup_Four_Stages_Report.md)、[docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md](docs/archive/AI_MODEL_DISTRIBUTION_STATUS_2026-08-31.md)。
 
@@ -31,16 +31,21 @@
 
 - GUI 全量构建：
   - [build_x64.bat](build_x64.bat)
-  - 等价手写： `cmake -S . -B build_gui -G Ninja -DCMAKE_PREFIX_PATH=qt/6.8.3/msvc2022_64 -DCMAKE_BUILD_TYPE=Release`
+  - 等价手写： `cmake -S . -B build_gui -G Ninja -DCMAKE_PREFIX_PATH=qt/6.8.3/msvc2022_64 -DCMAKE_BUILD_TYPE=Release -DLRC_ENABLE_AI=ON -DONNXRUNTIME_ROOT=<绝对路径>\onnxruntime\onnxruntime-win-x64-1.23.2`
   - 然后： `cmake --build build_gui -j`
+  - 漏传 `ONNXRUNTIME_ROOT` 时 CMake 只打印一行 STATUS，然后 `FORCE` 把 `LRC_ENABLE_AI` 改成 `OFF`，会静默得到无 AI 构建
 
 - Headless / 引擎测试构建：
   - `cmake -S . -B build_headless -G Ninja -DCMAKE_BUILD_TYPE=Release -DLRC_ENABLE_QT=OFF`
   - `cmake --build build_headless -j`
   - `ctest --test-dir build_headless --output-on-failure`
 
-- GUI 测试：
-  - 直接运行 `build_gui/tests/lrc_tests.exe`；不要把 GUI 测试当成稳定的 ctest 入口，仓库文档中已记录中文路径/进程管理在某些情况下会出现假卡死
+- 单测/分组测试（Catch2 标签，可执行文件在 build_headless\tests\ 下）：
+  - `.\build_headless\tests\lrc_tests.exe "[pipeline]"`、`"[incremental]"`、`"[performance][pa]"` 等标签可只跑相关用例；全量仍用 `ctest`
+
+- GUI / Qt 测试：
+  - `build_gui/tests/lrc_qt_tests.exe` 是 Qt 层测试（真实导出、对话框 smoke），用 [run_qt_tests.bat](run_qt_tests.bat) 跑，脚本已注入 vcvars 与 Qt bin 的 PATH
+  - `build_gui/tests/lrc_tests.exe` 是同一套 Catch2 单测；不要把测试当成稳定的 ctest 入口，仓库文档中已记录中文路径/进程管理在某些情况下会出现假卡死
   - 也可参考 [CLAUDE.md](CLAUDE.md) 或脚本 [run_app.ps1](run_app.ps1)
 
 - 运行应用：
@@ -71,11 +76,14 @@
 - CMake 版本：3.25+
 - 标准：C++20，关闭扩展语言
 - 生成器：默认使用 Ninja，尤其是当前工作区中所用的根构建树
-- 构建选项：
-  - `LRC_BUILD_TESTS=ON`
-  - `LRC_ENABLE_QT=ON`
-  - `LRC_ENABLE_AI=ON`（仅在 ONNX Runtime 可用时启用）
-  - `LRC_ENABLE_QT=OFF` 用于无头构建
+- 构建选项（均来自 CMakeLists.txt 的 `option()`）：
+  - `LRC_BUILD_TESTS=ON`（默认 ON）
+  - `LRC_ENABLE_QT=ON`（默认 ON；`OFF` 即无头构建）
+  - `LRC_ENABLE_AI=ON`（默认 ON，但找不到 ONNX Runtime 会被强制改 OFF；需 `-DONNXRUNTIME_ROOT=<解压根目录>` 或 vcpkg）
+  - `LRC_ENABLE_D3D=ON`（默认 ON；Windows 专有，其他平台强制 OFF，运行失败自动回退 CPU）
+  - `LRC_ENABLE_SIMD=OFF`（默认 OFF；开启需 AVX2，与标量路径逐位一致）
+  - `LRC_ENABLE_LENSFUN=ON`（默认 ON，镜头校正配置）
+  - `LRC_USE_OPENCV=OFF`（默认 OFF，重依赖）
   - `LRC_PROXY=https://ghfast.top/` 可用于国内镜像/代理场景
 - 本仓库对依赖的处理首选：已安装 package / vendored third_party / FetchContent；不要在不必要时改动依赖获取方式
 
@@ -98,7 +106,7 @@
 
 本仓库的注释需要同时满足“工程可读性”和“长期维护性”两个目标。所有新增或重写代码，必须遵循以下规则：
 
-### 7.1 目标与原则
+### 8.1 目标与原则
 
 - 注释用于说明“设计意图、边界条件、接口契约、性能/线程假设”，而不是重复代码本身。
 - 公开接口（header / public method）必须比实现细节更完整；调用方应能从注释里理解输入、输出、限制与失败语义。
@@ -106,8 +114,9 @@
 - 对复杂算法、奇怪边界、缓存键、线程安全、状态转换、性能热点，必须补充说明。
 - 历史阶段标记（如 `PHASE_X`、`M1/M2`、`Sx`）只能用于任务跟踪，不能混入长期 API 注释；长期维护的注释必须描述稳定的设计语义。
 
-### 7.2 统一风格
+### 8.2 统一风格
 
+- **硬性编码坑**：工程未设 `/utf-8`，MSVC 在 GBK(936) 代码页下读源码。`engine/`、`catalog/`、`utils/` 里中文注释行的行末必须是 ASCII 字符（`.`、`,`、`)` 等）；行末汉字或全角标点的 UTF-8 尾字节（0x81–0xBF）会被当成 GBK 前导字节与换行配对，吞掉换行并把下一行代码注释掉，报 `C2530` 之类费解错误。写完中文注释逐行自查（详见 [docs/DEVELOPMENT_EXPERIENCE.md](docs/DEVELOPMENT_EXPERIENCE.md) §8）。
 - 代码注释优先使用英文，文档说明优先使用中文。
 - 公开 API 与关键类型优先采用 Doxygen 风格：`/** ... */` + `@brief` + `@param` + `@return`。
 - 类注释必须解释职责、适用范围和关键约束。
@@ -118,7 +127,7 @@
   - 关键约束（threading / ownership / caches / side effects）
   - 必要时附加 `@note` / `@warning`
 
-### 7.3 注释模板（建议用法）
+### 8.3 注释模板（建议用法）
 
 ```cpp
 /**
@@ -138,7 +147,7 @@
  */
 ```
 
-### 7.4 必须注明的场景
+### 8.4 必须注明的场景
 
 以下情况必须额外补充注释：
 
@@ -150,14 +159,14 @@
 - 非显而易见的数学、色彩转换或像素处理逻辑
 - 边界条件、异常分支和失败回退
 
-### 7.5 禁止事项
+### 8.5 禁止事项
 
 - 不要用单行“无意义注释”覆盖明显代码，如 `// increment i`。
 - 不要把历史任务状态写进长期 API 注释。
 - 不要在第三方代码目录中按项目规范进行重写；第三方库注释是上游代码的一部分，不代表项目规范。
 - 不要写出“会过期但没人维护”的注释，避免伪装成设计说明。
 
-### 7.6 审查门禁
+### 8.6 审查门禁
 
 在提交或合并时，检查者应至少确认以下几点：
 
