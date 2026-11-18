@@ -15,7 +15,7 @@
 
 ## 当前仓库快照（核对日期 2026-11-18；headless 复验更新于 2026-11-17）
 
-- 分支 `main`，与 `SilverHalide/main` 完全同步（2026-11-18 推送后 `git rev-list --left-right` = `0 0`），HEAD `9ba7188`（2026-11-18），无 stash。`9ba7188` 在 `86df099`（no-AI 构建修复与文档收口）之上完成 2026-11-18 的文档与遗留收口 + 功能补强（预分级角标/智能筛选、蒙版高亮修复、B-2 预分级落库修复），并已补做 kimi-cu 真机端到端验收（验收中发现并修复了 B-2 预分级标记不落库的既有缺陷，详见「2026-11-18」章节）。
+- 分支 `main`。2026-11-18 完成文档与遗留收口 + 功能补强（预分级角标/智能筛选、蒙版高亮修复、B-2 预分级落库修复），并已补做 kimi-cu 真机端到端验收（验收中发现并修复了 B-2 预分级标记不落库的既有缺陷，详见「2026-11-18」章节）。具体提交以 `git log` 为准，不在此固定哈希。
 - 下文各章节标题里的“工作区未提交”均为**写作当时**的状态标记；对应代码现已提交，章节内已逐条补注提交哈希与日期。历史验收数字保持原样，不跨章节合并。
 - **2026-11-07 headless 复验（已完成）**：重跑 `_fix_msvc_deps.ps1` 并重新 configure 后再次修复前缀，`Pipeline.cpp.obj` 由 `#deps 0` 恢复为 `#deps 15 (VALID)`（`CropTransform` 4、`TestCompetitiveP1` 51、`CatalogDatabase` 9 抽样一致）；`ninja -t clean` 后全量重建 **303 步成功**，`ctest` **1/1 Passed**，`lrc_tests.exe` **524 test cases / 979,265 assertions 全通过**（0 失败）。该树现已覆盖 2026-10-29 之后的引擎改动。
 - **2026-11-17 headless 复验（已完成，本次实测）**：对 `build_headless`（`LRC_ENABLE_AI=OFF`）重跑 `_fix_msvc_deps.ps1 -BuildDir build_headless`，`Pipeline.cpp.obj` 显示 `#deps 14 (VALID)`；`ninja -t clean` 后全量重建 **304 步成功**，`ctest --test-dir build_headless --output-on-failure` **1/1 Passed**，`lrc_tests.exe -r compact` 报 **524 test cases / 979,265 assertions 全通过**（0 失败），与 2026-11-07 记录一致。该树覆盖本次 no-AI 构建修复。
