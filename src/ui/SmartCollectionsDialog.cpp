@@ -44,6 +44,9 @@ const struct { const char* id; const char* label; } kRuleFields[] = {
     {"folder_path", QT_TR_NOOP("文件夹")},
     {"title", QT_TR_NOOP("标题")},
     {"caption", QT_TR_NOOP("说明")},
+    {"pregrade_score", QT_TR_NOOP("预分级评分")},
+    {"pregrade_has_subject", QT_TR_NOOP("检测到主体")},
+    {"pregrade_auto", QT_TR_NOOP("建议自动")},
 };
 
 const char* const kOpsNumeric[] = {"==", "!=", "<",     "<=",
@@ -71,7 +74,16 @@ const char* const kBoolNames[] = {QT_TR_NOOP("是"), QT_TR_NOOP("否")};
 bool isNumericField(const QString& field) {
     return field == QStringLiteral("rating") ||
            field == QStringLiteral("flag") ||
-           field == QStringLiteral("label");
+           field == QStringLiteral("label") ||
+           field == QStringLiteral("pregrade_score");
+}
+
+// B-2 pregrade booleans share the yes/no editor (and the ==/!= ops) with the
+// existing "has_adjustments" field.
+bool isBoolField(const QString& field) {
+    return field == QStringLiteral("has_adjustments") ||
+           field == QStringLiteral("pregrade_has_subject") ||
+           field == QStringLiteral("pregrade_auto");
 }
 
 void fillOps(QComboBox* combo, const char* const* ops, int count) {
@@ -203,7 +215,7 @@ private:
                              o == QStringLiteral("between"));
         enumKind_ = 0;
 
-        if (f == QStringLiteral("has_adjustments") && !listOp) {
+        if (isBoolField(f) && !listOp) {
             enumKind_ = 4;
             if (enumCombo_->itemData(0).toString() != QStringLiteral("bool")) {
                 enumCombo_->clear();
@@ -254,7 +266,7 @@ private:
         // Refill the operator list for the current field kind.
         opCombo_->blockSignals(true);
         opCombo_->clear();
-        if (f == QStringLiteral("has_adjustments"))
+        if (isBoolField(f))
             fillOps(opCombo_, kOpsBool, 2);
         else if (f == QStringLiteral("keyword"))
             fillOps(opCombo_, kOpsKeyword, 5);

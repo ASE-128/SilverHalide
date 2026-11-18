@@ -529,9 +529,21 @@ void ImportWorker::importPathsImpl(const QStringList& paths, bool convertToDng,
         added = committedBatchRows;
     }
 
-    // The transaction is now either committed (final flush) or rolled back
-    // (abort path handled above). `added` reflects only the rows that actually
-    // landed on disk, so the UI count never lies about partial success.
+    // flushBatch() always reopens a fresh transaction after committing, so once
+    // the file loop ends that reopened transaction has no rows left but is still
+    // open on the connection. Close it before the pregrade pass: otherwise every
+    // setPregrade UPDATE below is absorbed into a transaction that is never
+    // committed, and CatalogDatabase::close() rolls it back, so the B-2 markers
+    // would vanish on the next start even though the UI already showed them
+    // during this session. commitTransaction() is a no-op when nothing is open,
+    // which also covers the all-files-failed path. The pregrade UPDATEs then run
+    // in autocommit mode, so they never hold a write lock across the (slow) AI
+    // inference for the next image. `added` reflects only the rows that
+    // actually landed on disk, so the UI count never lies about partial success.
+    if (!catalog_.commitTransaction()) {
+        emit importWarning(tr("导入收尾事务提交失败：%1")
+                               .arg(QString::fromStdString(catalog_.lastError())));
+    }
     emit finishedImport(added);
     if (conversionFailures.load() > 0)
         emit importWarning(tr("%1 个文件无法转换为 DNG，已按原 RAW 导入。%2")

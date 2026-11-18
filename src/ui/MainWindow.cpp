@@ -1034,22 +1034,23 @@ void MainWindow::onZoomModeChanged(ImageViewport::ZoomMode mode) {
 }
 
 void MainWindow::onMaskToolActivated(lrc::MaskType tool) {
-    // Mirror the develop panel's active mask tool onto the toolbar. None
-    // disarms every button: an exclusive group cannot reach the all-unchecked
-    // state on its own, so drop exclusivity, clear, then restore it. The
-    // blocker suppresses any signals this dance would otherwise emit.
+    // Mirror the develop panel's active mask tool onto the toolbar. Tools with
+    // no geometric button (None, AiMask) must clear every button: an exclusive
+    // group cannot reach the all-unchecked state on its own, so drop
+    // exclusivity, clear, then restore it. Without this, selecting an AI mask
+    // left the previously active geometric tool highlighted. The blocker
+    // suppresses any signals this dance would otherwise emit.
     const QSignalBlocker blocker(maskButtonGroup_);
-    if (tool == lrc::MaskType::None) {
+    if (QAbstractButton* button =
+            maskButtonGroup_->button(static_cast<int>(tool))) {
+        button->setChecked(true);
+    } else {
         maskButtonGroup_->setExclusive(false);
         const auto buttons = maskButtonGroup_->buttons();
-        for (QAbstractButton* button : buttons)
-            button->setChecked(false);
+        for (QAbstractButton* b : buttons)
+            b->setChecked(false);
         maskButtonGroup_->setExclusive(true);
-        return;
     }
-    if (QAbstractButton* button =
-            maskButtonGroup_->button(static_cast<int>(tool)))
-        button->setChecked(true);
     // A mask tool disarms the spot tool inside the viewport (setMaskTool sets
     // spotToolActive_ = false without emitting); mirror that on the toolbar.
     if (tool != lrc::MaskType::None)
@@ -3435,6 +3436,8 @@ void MainWindow::onPregradeReady(int imageId, bool hasSubject, int score,
     // it only tags the thumbnail, never touches the pixels or the RAW.
     if (filmstrip_)
         filmstrip_->setPregraded(imageId, hasSubject, score, suggestAuto);
+    if (galleryGrid_)
+        galleryGrid_->setPregraded(imageId, hasSubject, suggestAuto);
 }
 
 void MainWindow::onImportWarning(const QString& message) {
@@ -4013,9 +4016,16 @@ void MainWindow::refreshFilmstrip() {
             if (pregraded.contains(id))
                 continue;
             pregraded.insert(id);
-            if (const auto pg = catalog_->getPregrade(id))
+            if (const auto pg = catalog_->getPregrade(id)) {
                 filmstrip_->setPregraded(id, pg->hasSubject, pg->score,
                                          pg->suggestAuto);
+                // Same backfill for the gallery grid: a cold start must show
+                // the B-2 badge there too, not just during the importing
+                // session when pregradeReady fires.
+                if (galleryGrid_)
+                    galleryGrid_->setPregraded(id, pg->hasSubject,
+                                               pg->suggestAuto);
+            }
         }
     }
     navigator_->setStatistics(entries_.size(), rated);

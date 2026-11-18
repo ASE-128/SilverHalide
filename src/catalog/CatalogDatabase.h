@@ -128,16 +128,24 @@ struct SmartCollection {
  * whether the image carries non-default develop edits. Pure function, kept
  * free so it can be unit-tested without a database.
  *
+ * Pregrade fields (`pregrade_score`, `pregrade_has_subject`, `pregrade_auto`)
+ * are opt-in: callers that do not load pregrade markers may leave `pregrade`
+ * empty. An image without a pregrade record evaluates as score -1 (the same
+ * sentinel the database stores for "not yet pregraded") with both booleans
+ * false, so score rules can distinguish ungraded images via `score < 0`.
+ *
  * @param predicate  The parsed `{"match", "rules"}` rule document.
  * @param img        The image to test.
  * @param keywords   The image's keyword full paths (may be empty).
  * @param hasAdjustments Whether the image carries non-default develop edits.
+ * @param pregrade   Optional B-2 pregrade marker; empty means "not graded".
  * @return true when the predicate matches; an empty/invalid rule set never
  *         matches.
  */
 [[nodiscard]] bool evaluatePredicate(
     const json::Value& predicate, const ImageRecord& img,
-    const std::vector<std::string>& keywords, bool hasAdjustments);
+    const std::vector<std::string>& keywords, bool hasAdjustments,
+    std::optional<PregradeRecord> pregrade = std::nullopt);
 
 // Filters for listImages(). Default (all zeros/empty) returns every image.
 struct ImageFilter {

@@ -89,10 +89,14 @@ ARW ──RawDecoder──▶ 线性 ProPhoto RGB (U16, 相机矩阵手动应用
 - `RawMeta` 从 LibRaw 传递相机厂商/型号以及 `LensMake`/`Lens`，供 Qt-free
   `LensfunProfile` 查询器使用。
 - CMake/vcpkg 已声明 Lensfun；未安装时查询器保持安全空结果，现有 RAW 管线不变。
-- `DcpProfileReader` 已识别 Adobe 的 `IIRC` DCP TIFF 变体，并读取 profile 名称、
-  相机型号、ColorMatrix1/2 与 ProfileToneCurve 长度；已用
+- **DCP 相机配置已完整接入渲染管线**：`DcpProfileReader` 识别 Adobe 的 `IIRC` DCP TIFF
+  变体，读取 profile 名称、相机型号、ColorMatrix1/2（含双校准光源插值）、
+  ProfileHueSatMapData1/2（三线性插值）与 ProfileToneCurve；已用
   `resources/Camera/Canon EOS 1000D/Canon EOS 1000D Camera Faithful.dcp` 回归。
-  矩阵/曲线实际应用、HSV/look LUT 和 UI 选择仍待完成。
+  `DevelopPanel` 提供相机配置下拉框，`MainWindow` 选中后经 `PreviewWorker::setDcpProfile`
+  下发；`RawDecoder` 在解码阶段按白平衡色温在双校准光源间插值颜色矩阵并注入
+  libraw 管线，随后应用 hue/sat 映射与色调曲线（README 功能概览为准）。目前未实现的
+  是 DCP look table（look LUT），不对外承诺。
 
 ### 2.4 色彩管理
 
@@ -105,28 +109,39 @@ ARW ──RawDecoder──▶ 线性 ProPhoto RGB (U16, 相机矩阵手动应用
 
 ## 3. 目录与持久化
 
-- `.lrcat` 为 SQLite 单文件（WAL），表：
+- **目录即库**：默认库为 `<AppData>/ASE-128/Silver Halide/Default/` 目录，内含 SQLite 文件
+  `Default.shcat`（WAL）与外置预览目录 `previews.shcat/`。`Application::catalogDbFile()`
+  把目录解析为 `<dir>/<stem>.shcat`，`catalogPreviewDir()` 解析为 `<dir>/previews.shcat`；
+  旧版单文件 `.lrcat`/`.shcat` 仍可打开，并在打开时由版本化迁移把预览 BLOB 导出为文件。
+  主要表：
   - `images(id, file_path UNIQUE, import_date, rating, flag, label_color, thumbnail_path,
-    fullres_path, is_managed)` —— `is_managed` 标记受管库复制/移动导入
+    fullres_path, is_managed, file_size, file_mtime, pregrade_*)` —— `is_managed` 标记受管库
+    复制/移动导入；`file_size`/`file_mtime` 支撑外部修改检测；`pregrade_*` 为 P-B B-2
+    批量预分级标记（默认 `pregrade_score=-1` 表示未分级）
   - `edits(image_id PK, adjustment_json)` —— 参数堆叠的 JSON 序列化
   - `folders(id, path UNIQUE, parent_id)`、`collections(id, name, sort_order)` +
     `collection_images(collection_id, image_id, 复合主键)`（收藏夹，级联删除）
-  - `edit_history(image_id, ts, adjustment_json)` —— 每次提交的参数快照（撤销/恢复来源）
-  - `previews(image_id, kind, data BLOB, width, height, 复合主键)` —— **目录内嵌预览**
-    （320px 缩略图 + 1:1 JPEG），导入时预生成，默认调整下 1:1 直读
+  - `edit_history(image_id, ts, adjustment_json, kind)` —— 参数快照（撤销/恢复来源），
+    `kind` 区分手动快照与自动保留
+  - `previews(image_id, kind, path, width, height, 复合主键)` —— **外置预览文件**，
+    路径指向 `previews.shcat/<id 低 3 位 hex>/<id>_<kind>.shcat`；320px 缩略图 +
+    1:1 JPEG 在导入时预生成，默认调整下 1:1 直读
   - `settings(key, value)` —— 如 `library_root`
+  - `images_fts` / `images_vec` / `phash_seg` —— FTS5 全文检索、sqlite-vec 64 维 ANN
+    与 phash 分段粗筛索引（不可用时优雅降级）
 - 批量导入在 `BEGIN IMMEDIATE` 事务内逐条写入；`file_path` 唯一约束使重复导入幂等；
-  begin/commit/rollback 返回值均检查，杜绝事务悬挂。
+  begin/commit/rollback 返回值均检查，杜绝事务悬挂。迁移框架按 `PRAGMA user_version` +
+  `schema_migrations` 在事务内执行，失败整体回滚并关库。
 - **导入/导出批量重命名（P1-3）**：`utils/RenameTemplate.h` 提供 Qt-free 的
   `renderRenameTemplate`（`{date}`/`{index[:W]}`/`{base}`，大小写不敏感）与
   `uniqueRenamePath`（冲突自动 `-N` 后缀）。导入端在 `ImportWorker` Stage1 落盘后
   按选择顺序（1 起）+ 源文件修改日期渲染并重命名，`renameMutex_` 串行化查重+重命名
   保证同批唯一；导出端启用重命名时 `MainWindow` 走 `PreviewWorker::batchExport`，
   为母版+所有虚拟副本按模板在输出目录下生成唯一文件名。
-- 缩略图/1:1 缓存：优先目录内嵌 `previews` 表 BLOB，其次磁盘
-  `<AppData>/ASE-128/Silver Halide/cache/thumbnails/`（`QStandardPaths::AppDataLocation`，
-  即 `<APPDATA>/<organizationName>/<applicationName>`），文件名 = FNV-1a 稳定哈希；
-  写入走临时文件 + 原子改名，崩溃不留截断文件。
+- 缩略图/1:1 缓存：优先 `previews` 表 `path` 指向的外置预览文件（目录即库时为
+  `<library>/previews.shcat/`），其次磁盘
+  `<AppData>/ASE-128/Silver Halide/cache/thumbnails/`（`QStandardPaths::AppDataLocation`）；
+  文件名 = FNV-1a 稳定哈希，写入走临时文件 + 原子改名，崩溃不留截断文件。
 
 ## 4. 线程模型
 

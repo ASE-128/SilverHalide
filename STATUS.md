@@ -13,15 +13,53 @@
 > 由 `packaging/installer.iss` 用 `ISCC.exe` 编译出 `dist/Silver Halide Setup 1.0.0.exe`。
 > 见 `packaging/installer.iss` 头部注释。
 
-## 当前仓库快照（核对日期 2026-11-17；headless 复验更新于 2026-11-17）
+## 当前仓库快照（核对日期 2026-11-18；headless 复验更新于 2026-11-17）
 
-- 分支 `main`，本地领先 `SilverHalide/main` 1 个提交（本次核对 HEAD 为 `c37028f`，2026-11-07），无 stash。本次变更在该提交之上落地 no-AI 构建修复（AI 条件编译 `#ifdef` → `#if`）与文档收口；最终 HEAD 以 `git log -n 1` 为准。
+- 分支 `main`，与 `SilverHalide/main` 完全同步（2026-11-18 核对 `git rev-list --left-right` = `0 0`），HEAD `86df099`（2026-11-17），无 stash。`86df099` 在 `c37028f` 之上落地 no-AI 构建修复（AI 条件编译 `#ifdef` → `#if`）与文档收口；2026-11-18 继续做文档与遗留收口 + 功能补强（本次实施尚未提交），并已补做 kimi-cu 真机端到端验收（验收中发现并修复了 B-2 预分级标记不落库的既有缺陷，详见「2026-11-18」章节）。
 - 下文各章节标题里的“工作区未提交”均为**写作当时**的状态标记；对应代码现已提交，章节内已逐条补注提交哈希与日期。历史验收数字保持原样，不跨章节合并。
 - **2026-11-07 headless 复验（已完成）**：重跑 `_fix_msvc_deps.ps1` 并重新 configure 后再次修复前缀，`Pipeline.cpp.obj` 由 `#deps 0` 恢复为 `#deps 15 (VALID)`（`CropTransform` 4、`TestCompetitiveP1` 51、`CatalogDatabase` 9 抽样一致）；`ninja -t clean` 后全量重建 **303 步成功**，`ctest` **1/1 Passed**，`lrc_tests.exe` **524 test cases / 979,265 assertions 全通过**（0 失败）。该树现已覆盖 2026-10-29 之后的引擎改动。
 - **2026-11-17 headless 复验（已完成，本次实测）**：对 `build_headless`（`LRC_ENABLE_AI=OFF`）重跑 `_fix_msvc_deps.ps1 -BuildDir build_headless`，`Pipeline.cpp.obj` 显示 `#deps 14 (VALID)`；`ninja -t clean` 后全量重建 **304 步成功**，`ctest --test-dir build_headless --output-on-failure` **1/1 Passed**，`lrc_tests.exe -r compact` 报 **524 test cases / 979,265 assertions 全通过**（0 失败），与 2026-11-07 记录一致。该树覆盖本次 no-AI 构建修复。
 - 数字口径：**524 / 979,265 为 2026-11-07 实测、2026-11-17 复测一致**；**519 / 979,236 为 2026-10-26 的记录**（见下文 D3D 章节），两者并存不合并。增量 **+5 例 / +29 断言**，对应 Lightroom 工作流的定向测试（与 `235b20c` 章节记录一致）。
 - 长期注意事项（未变）：每次 **configure 之后** `rules.ninja` 的 `msvc_deps_prefix` 会被重新覆盖成 mojibake，必须再跑一次 `build_headless\_fix_msvc_deps.ps1 -BuildDir build_headless`；既有 `.obj` 仍是 `#deps 0`，首次修复后需一次全量重建才生效。另：`LRC_ENABLE_AI` 恒被 CMake 定义为 0/1，条件编译必须用 `#if`（见 `docs/DEVELOPMENT_EXPERIENCE.md` §11）。
 - 仍需跟进的项：现代 C++ 改造遗留见下文；真机锚点逐条状态见下表。`docs/plans/` 当前无未归档计划。`dist/` 两个安装包均在（AI 版约 980.9 MB、No-AI 版约 406.8 MB，各带 sha256），旧记录里“缺 AI 安装包”的遗留项已解决。
+
+## 2026-11-18 文档收口与功能补强（工作区未提交）
+
+按用户确认的方向实施四步，并已补做 **kimi-cu 真机交互验收**（验证口径 = headless `ctest` + Qt 自动化测试 + 真实 GUI 端到端；结论见下方「kimi-cu 真机验收」）：
+
+1. **文档与过时遗留收口**：`docs/ARCHITECTURE.md`、`STATUS.md`、`README.md` 更正 DCP 状态（矩阵/曲线/hue-sat/tone curve 已接入渲染管线）、目录即库、缓存路径、默认路径 `ASE-128/Silver Halide`、AI 功能概览；AI Prompt 点击回流遗留改为「已解决」。look table / LUT 仍未实现，未作承诺。
+2. **蒙版工具栏高亮修复**：`src/ui/MainWindow.cpp::onMaskToolActivated` 在 `None` / `AiMask` / 无 toolbar 按钮的工具上清空全部几何蒙版按钮高亮，保留 `disarmSpotToolButton()`。确认为真 bug 并修复。
+3. **图库网格预分级角标**：`GalleryGridWidget::Entry` 追加 `pregradeState` / `suggestAuto`（放在 `thumbnail` 之后以兼容既有聚合初始化），新增 `setPregraded()` 与 `AI` / `AI●` / `⚡` DisplayRole 角标；`MainWindow::onPregradeReady()` 与 `refreshFilmstrip()` 接线 gallery backfill。
+4. **智能收藏夹预分级筛选**：`evaluatePredicate` / `matchRule` 增加可选 `PregradeRecord` 参数（默认空，兼容既有 4 参数调用），支持 `pregrade_score`（数值，-1 = 未分级）、`pregrade_has_subject`、`pregrade_auto`（布尔）；`refreshSmartCollection()` 批量加载预分级标记（列缺失时优雅降级）；`SmartCollectionsDialog` 新增三字段。注意 `images` 表主键列是 `id`（非 `image_id`）。不重做 `df5e828` 已实现的 B-2 批量预分级主体。
+
+### 本轮验证（2026-11-18 实测）
+
+- **headless**（`build_headless`，`LRC_ENABLE_AI=OFF`）：重新 configure + `_fix_msvc_deps.ps1 -BuildDir build_headless` + `ninja -t clean` 后全量重建 **304 步成功**；`ctest --test-dir build_headless --output-on-failure` **1/1 Passed**；`lrc_tests.exe -r compact` **526 test cases / 979,289 assertions 全通过**（0 失败）。相对 524 / 979,265 基线新增 2 cases / 24 assertions（预分级谓词 + 智能收藏夹刷新）。
+- **GUI**（`build_gui`，`LRC_ENABLE_AI=ON`）：重新 configure + `_fix_msvc_deps.ps1 -BuildDir build_gui` + `ninja -t clean` 后全量重建 **369 步成功**，`SilverHalide.exe` 与 `tests/lrc_qt_tests.exe` 均链接成功。
+- **Qt 自动化测试**：本轮新增 `GalleryGridWidgetTest::pregradeBadgeUpdates()` 与 `SmartCollectionsDialogTest`（3 用例）均 **PASS**；`SmartCollectionsDialogTest` 输出 `Totals: 3 passed, 0 failed`。
+- **既有失败已修正（用户要求）**：`GalleryGridWidgetTest::cropGestureCommitsOnce()` 原先稳定失败——`edited.count()` 实测 **3**、期望 **2**。根因：该用例与 `ImageViewport::mouseReleaseEvent` 中额外的 `updateCropGesture()` 预览 emit 同由提交 `235b20c`（2026-10-29）引入，单次拖拽实际发出 2 个 `committed=false` 预览 + 1 个 `committed=true` 提交，而旧断言把信号总数硬编码为 2。按用户要求改为校验真实契约：**恰好一个 `committed=true` 提交**、所有 `committed=false` 预览先于提交、提交矩形为有效归一化框（并非放宽为「任意信号数即通过」）。修正后 `run_qt_tests.bat` 退出码 **0**，**18 个测试类全绿**。
+
+### kimi-cu 真机验收（2026-11-18 实测，全新临时库）
+
+按仓库标准路径「导入 → 逐张渲染 → 自动 → 导出 → 元数据」跑通，并覆盖本轮新增 UI 行为（截图为当前模型不可读，判据统一取 `get_app_state` 的 `ax` / `text` 输出与磁盘 / DB 实测）：
+
+- **导入**：文件→导入文件…，原生对话框文件名栏一次填入三张标准图（`_1090017.RW2` / `_DSC0112.ARW` / `_DSC0015-HDR.jpg`），`verification.status=matched`；确认页「已选择 3 个文件」，主窗口状态栏 **3 张图片 · 0 已评分**。
+- **逐张渲染**：JPEG `612×918`、ARW `612×918`、RW2 `1222×918`，RAW 与 JPEG 两条解码路径均有直方图数据。
+- **自动**：在 RW2 上点「自动」，基本滑杆由全 0 变为非零（色温 -14、色调 -10、曝光 +0.73、对比度 +26、阴影 +1、白色 +51 等），状态栏「编辑已保存」。
+- **导出**：默认 JPEG + 原始尺寸；落盘 `…\shcat_layout_test\Library\2026\2026-01-02\_1090017.jpg`，System.Drawing 实测 **4608×3464**、4,997,105 bytes，为原始分辨率而非预览尺寸。
+- **元数据**：写入关键字 `验收-AI预分级` 并回车，`verification.status=matched`；左侧「关键字列表」出现 `验收-AI预分级 (1)`。
+- **蒙版工具栏高亮**：线性渐变→「线性」checked=on；删除蒙版（None 路径）后线性/径向/画笔/颜色/污点全部 off；点「AI 主体」创建 AI 蒙版后几何按钮仍全灭（原 bug 场景通过）。
+- **图库网格角标（会话内）**：`  AI  ⚡ _DSC0015-HDR.jpg`、`  AI  ⚡ _DSC0112.ARW`、`  AI●  ⚡ _1090017.RW2`。
+- **智能收藏夹字段**：新建后字段下拉可见「预分级评分」「检测到主体」「建议自动」，选「建议自动」时值编辑器为「是/否」组合框。
+
+#### 验收中发现并修复的缺陷：B-2 预分级标记从不落库
+
+真机验收暴露出一个会话内看不出、冷启动必然失败的真实 bug：预分级角标只在本会话显示，DB 里 `pregrade_score` 永远为 `-1`，因此冷启动回填永远拿不到数据。
+
+- **根因**：`ImportWorker::flushBatch()` 每次 `COMMIT` 后立刻 `beginTransaction()` 重开一个空事务；导入文件循环结束后该事务一直开着，B-2 预分级 `setPregrade` 的所有 UPDATE 都落在这个**从未提交**的事务里，应用关闭时 `CatalogDatabase::close()` 对悬挂事务执行 `ROLLBACK`，标记随之丢弃。此为已提交的 B-2 代码（`df5e828` / `ImportWorker.cpp`，不在本批未提交改动中）的既有缺陷。
+- **修复**（`src/ui/ImportWorker.cpp`）：在 `emit finishedImport(added)` 前调用 `catalog_.commitTransaction()` 关闭遗留空事务（失败则 `emit importWarning`）；随后每条 `setPregrade` 走自动提交，既保证落盘，又避免在 AI 推理期间长时间持写锁。未重构事务流程。
+- **回归测试**（`tests/lrc_qt_tests.cpp::ImportWorkerTest::importAddsImageAndPreviews`）：导入后 `db.close()` → `db.open()` 再断言 `db.getPregrade(importedId).has_value()`，真正验证落盘而非读回同连接未提交状态。`run_qt_tests.bat` 退出码 **0**。
+- **端到端复验**：删除临时库后重启（空库自动重建）→ 重新导入三图；运行中 DB 即出现 `(1,14,1,1)`，稍后三行全部落库 `(14/1/1)(10/0/1)(34/0/1)`；关闭应用后复验仍为 `(14/10/34)`（WAL 已合并）；再次重启后图库网格冷启动回填显示 `AI ⚡`（jpg/arw）、`AI● ⚡`（rw2），与 DB 完全一致，回填闭环。
 
 ## 性能锚点实测状态（唯一口径，核对 2026-11-17）
 
@@ -155,7 +193,7 @@ Auto 与 ForceCpu **不是逐位一致**（浮点求和顺序不同：`pl.previe
 ### 遗留
 
 - panel → MainWindow 的最后一次 `Adjustments` 拷贝仍在（MainWindow 需保留可编辑副本；彻底消除需改 COW `shared_ptr`，约 100 个变更点）。
-- AI Prompt 点击不回流是变体化前的既有行为，本轮未顺手修（避免改变可观察行为）。
+- AI Prompt 点击不回流（历史遗留，已不存在）：`DevelopPanel::maskPromptLabelChanged` 已接至 `ImageViewport::setMaskPromptLabel`，`maskPromptClearRequested` 已接至 `MainWindow::onMaskPromptClearRequested`（2026-11-18 核实）。
 - `LRC_ENABLE_SIMD=ON` 仍非逐位一致（既有 P2-2 取舍）；默认 OFF 逐位一致。
 
 ## 蒙版显示修复：AI 真实权重、几何引导填充、颜色范围默认叠加（2026-10-01 ~ 10-02，已提交 bbea65d，2026-10-05）
@@ -253,8 +291,10 @@ Auto 与 ForceCpu **不是逐位一致**（浮点求和顺序不同：`pl.previe
 - **裁剪页空白**（历史遗留，已失效）：`DevelopPanel::setSectionMode` 只处理 mode 0/2/3，`mode==1`（裁剪）时所有分区都被
   隐藏，而仓库里没有裁剪分区，于是该标签页点进去是空的。（2026-11-04 核实：已由 `235b20c` 的非破坏性裁剪实现覆盖——
   `setSectionMode` 已处理 `mode==1` 并显示“裁剪”分区，裁剪页控件与视口编辑均已接线。）
-- **蒙版工具激活时高亮不同步**：工具栏与面板的按钮组都只有 4 个几何工具按钮，AI 蒙版没有对应按钮，
-  于是 `maskToolActivated(AiMask)` 无法镜像，界面会停留在上一个几何工具的高亮状态。
+- **蒙版工具激活时高亮不同步**（2026-11-18 已修复，见本文件顶部快照的实施记录）：工具栏与面板
+  的按钮组都只有 4 个几何工具按钮，AI 蒙版没有对应按钮，原先 `maskToolActivated(AiMask)`
+  无法镜像、界面停留在上一个几何工具的高亮状态；现改为 `AiMask` 到达 toolbar 时清空所有
+  几何按钮高亮。
 
 验证缺口：
 - 2026-10-02 那次确实没做成实机（MCP 审批被拒 + 应用弹"目录数据库只读"）；2026-10-05 已补做，见上。

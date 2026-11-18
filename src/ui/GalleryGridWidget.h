@@ -23,6 +23,13 @@ public:
         int flag = 0;
         int labelColor = 0;
         QImage thumbnail;
+        // B-2 pregrade marker: 0 = not pregraded, 1 = pregraded without a
+        // detected subject, 2 = pregraded with a subject. Mirrors the
+        // FilmstripWidget badge semantics; `suggestAuto` adds the amber dot.
+        // Appended after `thumbnail` so existing aggregate initializers in
+        // MainWindow / Qt tests keep mapping their six leading members.
+        int pregradeState = 0;
+        bool suggestAuto = false;
     };
 
     explicit GalleryGridWidget(QWidget* parent = nullptr);
@@ -32,6 +39,7 @@ public:
     void setRating(int imageId, int rating);
     void setFlag(int imageId, int flag);
     void setLabelColor(int imageId, int color);
+    void setPregraded(int imageId, bool hasSubject, bool suggestAuto);
     void selectImage(int imageId);
     [[nodiscard]] QVector<int> selectedImageIds() const;
     [[nodiscard]] int currentImageId() const;

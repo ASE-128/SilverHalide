@@ -23,6 +23,8 @@ constexpr int kFilePathRole = Qt::UserRole + 2;
 constexpr int kRatingRole = Qt::UserRole + 3;
 constexpr int kFlagRole = Qt::UserRole + 4;
 constexpr int kLabelColorRole = Qt::UserRole + 5;
+constexpr int kPregradeStateRole = Qt::UserRole + 6;
+constexpr int kSuggestAutoRole = Qt::UserRole + 7;
 } // namespace
 
 class GalleryGridModel final : public QAbstractListModel {
@@ -48,6 +50,16 @@ public:
                 badge += QStringLiteral("  ✓");
             else if (entry.flag == -1)
                 badge += QStringLiteral("  ×");
+            // B-2 pregrade: compact text badge alongside rating/flag so a
+            // subject hit and the auto-develop hint are visible while picking
+            // in the grid, matching the Filmstrip's "AI" tag semantics.
+            if (entry.pregradeState != 0) {
+                badge += entry.pregradeState == 2
+                             ? QStringLiteral("  AI●")
+                             : QStringLiteral("  AI");
+            }
+            if (entry.suggestAuto)
+                badge += QStringLiteral("  ⚡");
             return badge.isEmpty()
                        ? QFileInfo(entry.filePath).fileName()
                        : badge + QLatin1Char('\n') +
@@ -79,6 +91,10 @@ public:
             return entry.flag;
         case kLabelColorRole:
             return entry.labelColor;
+        case kPregradeStateRole:
+            return entry.pregradeState;
+        case kSuggestAutoRole:
+            return entry.suggestAuto;
         default:
             return {};
         }
@@ -115,6 +131,17 @@ public:
         return updateEntry(imageId, [color](GalleryGridWidget::Entry& entry) {
             entry.labelColor = color;
         }, {Qt::DisplayRole, kLabelColorRole});
+    }
+
+    bool setPregraded(int imageId, bool hasSubject, bool suggestAuto) {
+        return updateEntry(imageId,
+                           [hasSubject, suggestAuto](
+                               GalleryGridWidget::Entry& entry) {
+                               entry.pregradeState = hasSubject ? 2 : 1;
+                               entry.suggestAuto = suggestAuto;
+                           },
+                           {Qt::DisplayRole, kPregradeStateRole,
+                            kSuggestAutoRole});
     }
 
     template <class Update>
@@ -205,6 +232,11 @@ void GalleryGridWidget::setFlag(int imageId, int flag) {
 
 void GalleryGridWidget::setLabelColor(int imageId, int color) {
     model_->setLabelColor(imageId, color);
+}
+
+void GalleryGridWidget::setPregraded(int imageId, bool hasSubject,
+                                     bool suggestAuto) {
+    model_->setPregraded(imageId, hasSubject, suggestAuto);
 }
 
 void GalleryGridWidget::selectImage(int imageId) {

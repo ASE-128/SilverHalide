@@ -388,9 +388,12 @@ std::string fieldStringValue(const ImageRecord& img, const std::string& field) {
     return "";
 }
 
-// Evaluates one rule object against an image.
+// Evaluates one rule object against an image. `pregrade` is empty when the
+// caller did not load B-2 markers (or the image has not been pregraded yet);
+// its absence is folded into the same sentinel values stored by the catalog.
 bool matchRule(const json::Value& rule, const ImageRecord& img,
-               const std::vector<std::string>& keywords, bool hasAdjustments) {
+               const std::vector<std::string>& keywords, bool hasAdjustments,
+               const std::optional<PregradeRecord>& pregrade) {
     if (!rule.isObject())
         return false;
     const std::string field = rule["field"].asString();
@@ -410,6 +413,24 @@ bool matchRule(const json::Value& rule, const ImageRecord& img,
         const double lhs =
             static_cast<double>(field == "rating" ? img.rating : img.flag);
         return numericMatch(lhs, op, value);
+    }
+
+    // B-2 pregrade markers. Score -1 mirrors the database's "not graded"
+    // sentinel, letting rules such as `score < 0` select untouched images.
+    if (field == "pregrade_score") {
+        const double lhs = static_cast<double>(pregrade ? pregrade->score : -1);
+        return numericMatch(lhs, op, value);
+    }
+    if (field == "pregrade_has_subject" || field == "pregrade_auto") {
+        const bool lhs = field == "pregrade_has_subject"
+                             ? (pregrade && pregrade->hasSubject)
+                             : (pregrade && pregrade->suggestAuto);
+        const bool want = value.asBool(false);
+        if (op == "==")
+            return lhs == want;
+        if (op == "!=")
+            return lhs != want;
+        return false;
     }
 
     if (field == "label") {
@@ -433,7 +454,8 @@ bool matchRule(const json::Value& rule, const ImageRecord& img,
 
 bool evaluatePredicate(const json::Value& predicate, const ImageRecord& img,
                        const std::vector<std::string>& keywords,
-                       bool hasAdjustments) {
+                       bool hasAdjustments,
+                       std::optional<PregradeRecord> pregrade) {
     if (!predicate.isObject())
         return false;
     const std::string match = toLowerCopy(predicate["match"].asString());
@@ -446,7 +468,7 @@ bool evaluatePredicate(const json::Value& predicate, const ImageRecord& img,
         if (!rule.isObject())
             continue;
         ++total;
-        if (matchRule(rule, img, keywords, hasAdjustments))
+        if (matchRule(rule, img, keywords, hasAdjustments, pregrade))
             ++matched;
     }
     if (total == 0)
@@ -3362,12 +3384,36 @@ int CatalogDatabase::refreshSmartCollection(int64_t id) {
         }
     }
 
+    // Batch-load B-2 pregrade markers once for the whole scan. Missing columns
+    // (an un-migrated catalog) degrade gracefully: every image is then treated
+    // as ungraded instead of aborting the smart-collection refresh.
+    std::unordered_map<int64_t, PregradeRecord> pregradeById;
+    {
+        Stmt pg(db_,
+                "SELECT id, pregrade_has_subject, pregrade_score, "
+                "pregrade_auto FROM images;", &stmtCache_);
+        if (pg.ok()) {
+            while (pg.step() == SQLITE_ROW) {
+                PregradeRecord rec;
+                rec.hasSubject = sqlite3_column_int(pg.stmt, 1) != 0;
+                rec.score = sqlite3_column_int(pg.stmt, 2);
+                rec.suggestAuto = sqlite3_column_int(pg.stmt, 3) != 0;
+                pregradeById[sqlite3_column_int64(pg.stmt, 0)] = rec;
+            }
+        }
+    }
+
     std::vector<int64_t> matches;
     for (const auto& img : images) {
         auto it = imageKeywords.find(img.id);
         const std::vector<std::string> kws =
             it == imageKeywords.end() ? std::vector<std::string>{} : it->second;
-        if (evaluatePredicate(*pred, img, kws, hasNonDefaultEdits(img.id)))
+        std::optional<PregradeRecord> pregrade;
+        const auto pgit = pregradeById.find(img.id);
+        if (pgit != pregradeById.end())
+            pregrade = pgit->second;
+        if (evaluatePredicate(*pred, img, kws, hasNonDefaultEdits(img.id),
+                              pregrade))
             matches.push_back(img.id);
     }
 

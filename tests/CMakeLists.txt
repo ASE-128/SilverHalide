@@ -119,6 +119,7 @@ if(LRC_ENABLE_QT)
     # (照片 → 查找重复项…).
     ../src/ui/SoftProofingDialog.cpp
     ../src/ui/DuplicateResultsDialog.cpp
+    ../src/ui/SmartCollectionsDialog.cpp
     # ModelManager: manifest parsing, SHA256 gating and the ZIP extractor
     # are driven directly (no network) by ModelManagerTest.
     ../src/app/ModelManager.cpp)

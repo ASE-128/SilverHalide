@@ -10,8 +10,10 @@
 //
 // Unlike tests/lrc_tests (Qt-free Catch2), this uses the QtTest framework.
 
+#include <QAbstractItemModel>
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QLoggingCategory>
 #include <QColor>
 #include <QColorSpace>
@@ -21,6 +23,7 @@
 #include <QImage>
 #include <QImageReader>
 #include <QLineEdit>
+#include <QListView>
 #include <QListWidget>
 #include <QPushButton>
 #include <QSignalSpy>
@@ -56,6 +59,7 @@
 #include "ui/PresetDialog.h"
 #include "ui/PreviewWorker.h"
 #include "ui/SnapshotDialog.h"
+#include "ui/SmartCollectionsDialog.h"
 #include "ui/SoftProofingDialog.h"
 #include "ui/WheelGuard.h"
 
@@ -263,6 +267,7 @@ class GalleryGridWidgetTest : public QObject {
 private slots:
     void selectionAndThumbnailFlow();
     void cropGestureCommitsOnce();
+    void pregradeBadgeUpdates();
 };
 
 void GalleryGridWidgetTest::selectionAndThumbnailFlow() {
@@ -304,12 +309,61 @@ void GalleryGridWidgetTest::cropGestureCommitsOnce() {
     QTest::mouseRelease(&viewport, Qt::LeftButton, Qt::NoModifier,
                         QPoint(450, 300));
 
-    QCOMPARE(edited.count(), 2);
-    QVERIFY(!edited.at(0).at(1).toBool());
-    QVERIFY(edited.at(1).at(1).toBool());
-    const QRectF crop = edited.at(1).at(0).toRectF();
+    // A drag emits a `committed=false` preview on mouse move, another one from
+    // updateCropGesture() on release, then exactly one `committed=true` commit.
+    // Assert the commit contract -- one commit, all previews before it, valid
+    // normalized rect -- instead of a fixed total signal count, which is an
+    // implementation detail of the gesture and changed in 235b20c.
+    QVERIFY(edited.count() >= 2);
+    int previewCount = 0;
+    int commitCount = 0;
+    int commitIndex = -1;
+    for (int i = 0; i < edited.count(); ++i) {
+        if (edited.at(i).at(1).toBool()) {
+            ++commitCount;
+            commitIndex = i;
+        } else {
+            QVERIFY2(commitIndex < 0, "crop preview emitted after commit");
+            ++previewCount;
+        }
+    }
+    QCOMPARE(commitCount, 1);
+    QVERIFY(previewCount >= 1);
+    const QRectF crop = edited.at(commitIndex).at(0).toRectF();
     QVERIFY(crop.left() > 0.0 && crop.top() > 0.0);
     QVERIFY(crop.right() < 1.0 && crop.bottom() < 1.0);
+}
+
+void GalleryGridWidgetTest::pregradeBadgeUpdates() {
+    GalleryGridWidget grid;
+    QVector<GalleryGridWidget::Entry> entries;
+    entries.append({21, QStringLiteral("C:/photos/pg.jpg"), 0, 0, 0, {}, 0,
+                    false});
+    grid.setImages(entries);
+    QCOMPARE(grid.count(), 1);
+
+    auto* view = grid.findChild<QListView*>();
+    QVERIFY(view != nullptr);
+    QAbstractItemModel* model = view->model();
+    QVERIFY(model != nullptr);
+    const QModelIndex row = model->index(0, 0);
+
+    // No marker -> only the file name is shown.
+    QVERIFY(!model->data(row, Qt::DisplayRole)
+                 .toString()
+                 .contains(QStringLiteral("AI")));
+
+    grid.setPregraded(21, true, true);
+    const QString badged = model->data(row, Qt::DisplayRole).toString();
+    QVERIFY(badged.contains(QStringLiteral("AI")));
+    QVERIFY(badged.contains(QStringLiteral("⚡")));
+
+    // Re-setting with no subject drops the filled dot but keeps the AI tag.
+    grid.setPregraded(21, false, false);
+    const QString plain = model->data(row, Qt::DisplayRole).toString();
+    QVERIFY(plain.contains(QStringLiteral("AI")));
+    QVERIFY(!plain.contains(QStringLiteral("●")));
+    QVERIFY(!plain.contains(QStringLiteral("⚡")));
 }
 
 void DialogSmokeTest::initTestCase() {
@@ -551,13 +605,27 @@ void ImportWorkerTest::importAddsImageAndPreviews() {
 
     const auto images = db.listImages();
     QCOMPARE(images.size(), size_t{1});
+    int64_t importedId = -1;
     if (!images.empty()) {
+        importedId = images[0].id;
         // Thumbnail + standard preview must land in the same import.
         QVERIFY(db.loadPreview(images[0].id, PreviewKind::Thumbnail));
         QVERIFY(db.loadPreview(images[0].id, PreviewKind::Standard));
     }
     // The worker ships the decoded thumbnail back for the filmstrip.
     QVERIFY(thumbSpy.count() >= 1);
+
+    // P-B B-2 pregrade persistence: the background pregrade pass runs after the
+    // batch loop, and flushBatch() leaves a reopened (empty) transaction open on
+    // the connection. If ImportWorker does not commit that transaction before
+    // the pass, CatalogDatabase::close() rolls the markers back and they never
+    // reach disk -- the badge was only ever a session-live signal. Reopen the
+    // catalog so this asserts persistence rather than reading uncommitted state
+    // back from the writing connection.
+    QVERIFY(importedId > 0);
+    db.close();
+    QVERIFY(db.open());
+    QVERIFY(db.getPregrade(importedId).has_value());
 }
 
 // ---------------------------------------------------------------------------
@@ -1740,6 +1808,88 @@ void WheelGuardTest::spinBoxesIgnoreWheel() {
 }
 
 // ---------------------------------------------------------------------------
+// Smart-collection rule builder: pregrade field registration + round-trip
+// ---------------------------------------------------------------------------
+class SmartCollectionsDialogTest : public QObject {
+    Q_OBJECT
+public:
+    explicit SmartCollectionsDialogTest(const std::filesystem::path& workDir)
+        : workDir_(workDir) {}
+
+private slots:
+    void initTestCase();
+    void pregradeFieldsAreEditable();
+    void cleanupTestCase();
+
+private:
+    std::filesystem::path workDir_;
+    std::unique_ptr<CatalogDatabase> db_;
+    int64_t collectionId_ = -1;
+};
+
+void SmartCollectionsDialogTest::initTestCase() {
+    std::error_code ec;
+    std::filesystem::create_directories(workDir_, ec);
+    db_ = std::make_unique<CatalogDatabase>(workDir_ / "smart.db");
+    if (!db_->open())
+        QFAIL("catalog open failed");
+    const int64_t imageId = db_->addImage("C:/photos/smart.jpg", "");
+    QVERIFY(imageId > 0);
+    QVERIFY(db_->setPregrade(imageId, true, 88, true));
+    collectionId_ = db_->createSmartCollection(
+        "subject picks",
+        R"({"rules":[{"field":"pregrade_has_subject","op":"==","value":true}],"match":"all"})",
+        "ALL");
+    QVERIFY(collectionId_ > 0);
+}
+
+void SmartCollectionsDialogTest::pregradeFieldsAreEditable() {
+    SmartCollectionsDialog dlg(db_.get(), nullptr);
+
+    // The field combo is the only combo carrying the new field id as itemData.
+    QComboBox* fieldCombo = nullptr;
+    for (QComboBox* combo : dlg.findChildren<QComboBox*>()) {
+        for (int i = 0; i < combo->count(); ++i) {
+            if (combo->itemData(i).toString() ==
+                QStringLiteral("pregrade_score")) {
+                fieldCombo = combo;
+                break;
+            }
+        }
+        if (fieldCombo != nullptr)
+            break;
+    }
+    QVERIFY(fieldCombo != nullptr);
+
+    const auto hasField = [fieldCombo](const QString& id) {
+        for (int i = 0; i < fieldCombo->count(); ++i)
+            if (fieldCombo->itemData(i).toString() == id)
+                return true;
+        return false;
+    };
+    QVERIFY(hasField(QStringLiteral("pregrade_score")));
+    QVERIFY(hasField(QStringLiteral("pregrade_has_subject")));
+    QVERIFY(hasField(QStringLiteral("pregrade_auto")));
+
+    // Loading the sample collection must select the stored pregrade field,
+    // i.e. setRule() recognised the new id instead of falling back to "rating".
+    QCOMPARE(fieldCombo->currentData().toString(),
+             QStringLiteral("pregrade_has_subject"));
+    QCOMPARE(db_->listImagesInSmartCollection(collectionId_).size(), 1);
+}
+
+void SmartCollectionsDialogTest::cleanupTestCase() {
+    const auto dbPath = db_ ? workDir_ / "smart.db" : std::filesystem::path{};
+    db_.reset();
+    if (!dbPath.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(dbPath, ec);
+        std::filesystem::remove(dbPath.string() + "-wal", ec);
+        std::filesystem::remove(dbPath.string() + "-shm", ec);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1833,6 +1983,10 @@ int main(int argc, char** argv) {
     }
     {
         WheelGuardTest t;
+        status |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        SmartCollectionsDialogTest t(root / "smart_collections");
         status |= QTest::qExec(&t, argc, argv);
     }
 

@@ -1175,6 +1175,45 @@ TEST_CASE("Catalog: predicate evaluation (rating, ALL/ANY, keyword, dates)",
     REQUIRE(evaluatePredicate(*typePred, img6, {}, false));
 }
 
+TEST_CASE("Catalog: predicate evaluation of pregrade fields", "[catalog]") {
+    ImageRecord img;
+    PregradeRecord pg;
+    pg.hasSubject = true;
+    pg.score = 87;
+    pg.suggestAuto = true;
+
+    auto scorePred = json::Value::parse(
+        R"({"match":"all","rules":[{"field":"pregrade_score","op":">=","value":80}]})");
+    REQUIRE(scorePred.has_value());
+    REQUIRE(evaluatePredicate(*scorePred, img, {}, false, pg));
+    pg.score = 60;
+    REQUIRE_FALSE(evaluatePredicate(*scorePred, img, {}, false, pg));
+    // Callers that do not load a marker still see the ungraded sentinel (-1).
+    REQUIRE_FALSE(evaluatePredicate(*scorePred, img, {}, false));
+
+    auto ungradedPred = json::Value::parse(
+        R"({"match":"all","rules":[{"field":"pregrade_score","op":"<","value":0}]})");
+    REQUIRE(ungradedPred.has_value());
+    REQUIRE(evaluatePredicate(*ungradedPred, img, {}, false));
+    REQUIRE_FALSE(evaluatePredicate(*ungradedPred, img, {}, false, pg));
+
+    // Boolean marker fields use the same == / != semantics as has_adjustments.
+    auto subjPred = json::Value::parse(
+        R"({"match":"all","rules":[{"field":"pregrade_has_subject","op":"==","value":true}]})");
+    REQUIRE(subjPred.has_value());
+    REQUIRE(evaluatePredicate(*subjPred, img, {}, false, pg));
+    REQUIRE_FALSE(evaluatePredicate(*subjPred, img, {}, false));
+
+    auto notAutoPred = json::Value::parse(
+        R"({"match":"all","rules":[{"field":"pregrade_auto","op":"!=","value":true}]})");
+    REQUIRE(notAutoPred.has_value());
+    REQUIRE_FALSE(evaluatePredicate(*notAutoPred, img, {}, false, pg));
+    pg.suggestAuto = false;
+    REQUIRE(evaluatePredicate(*notAutoPred, img, {}, false, pg));
+    // An image without a marker has suggestAuto=false, so != true holds.
+    REQUIRE(evaluatePredicate(*notAutoPred, img, {}, false));
+}
+
 TEST_CASE("Catalog: smart collection refresh tracks rating changes", "[catalog]") {
     const auto path = makeTempDb();
     CatalogDatabase db(path);
@@ -1207,6 +1246,41 @@ TEST_CASE("Catalog: smart collection refresh tracks rating changes", "[catalog]"
     REQUIRE(db.refreshSmartCollection(sc) == 2);
     members = db.listImagesInSmartCollection(sc);
     REQUIRE(members.size() == 2);
+}
+
+TEST_CASE("Catalog: smart collection refresh tracks pregrade markers",
+          "[catalog]") {
+    const auto path = makeTempDb();
+    CatalogDatabase db(path);
+    REQUIRE(db.open());
+    const int64_t img1 = db.addImage("/photos/pg1.arw", "");
+    const int64_t img2 = db.addImage("/photos/pg2.arw", "");
+    const int64_t img3 = db.addImage("/photos/pg3.arw", "");
+    REQUIRE(db.setPregrade(img1, true, 90, true));
+    REQUIRE(db.setPregrade(img2, false, 40, false));
+    // img3 stays ungraded (pregrade_score == -1).
+
+    const int64_t sc = db.createSmartCollection(
+        "ai picks",
+        R"({"rules":[{"field":"pregrade_has_subject","op":"==","value":true}],"match":"all"})",
+        "ALL");
+    REQUIRE(sc > 0);
+    REQUIRE(db.listImagesInSmartCollection(sc) == std::vector<int64_t>({img1}));
+
+    // A subject detected on img3 is picked up by a refresh.
+    REQUIRE(db.setPregrade(img3, true, 70, false));
+    REQUIRE(db.refreshSmartCollection(sc) == 2);
+    REQUIRE(db.listImagesInSmartCollection(sc) ==
+            std::vector<int64_t>({img1, img3}));
+
+    // Score rules must include only genuinely graded images, never the -1
+    // sentinel; createSmartCollection performs the initial fill.
+    const int64_t sc2 = db.createSmartCollection(
+        "graded",
+        R"({"rules":[{"field":"pregrade_score","op":">=","value":0}],"match":"all"})",
+        "ALL");
+    REQUIRE(sc2 > 0);
+    REQUIRE(db.listImagesInSmartCollection(sc2).size() == 3);
 }
 
 TEST_CASE("Catalog: smart collection rule change recomputes members",
