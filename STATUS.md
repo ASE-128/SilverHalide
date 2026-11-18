@@ -15,7 +15,7 @@
 
 ## 当前仓库快照（核对日期 2026-11-18；headless 复验更新于 2026-11-17）
 
-- 分支 `main`，与 `SilverHalide/main` 完全同步（2026-11-18 核对 `git rev-list --left-right` = `0 0`），HEAD `86df099`（2026-11-17），无 stash。`86df099` 在 `c37028f` 之上落地 no-AI 构建修复（AI 条件编译 `#ifdef` → `#if`）与文档收口；2026-11-18 继续做文档与遗留收口 + 功能补强（本次实施尚未提交），并已补做 kimi-cu 真机端到端验收（验收中发现并修复了 B-2 预分级标记不落库的既有缺陷，详见「2026-11-18」章节）。
+- 分支 `main`，与 `SilverHalide/main` 完全同步（2026-11-18 推送后 `git rev-list --left-right` = `0 0`），HEAD `9ba7188`（2026-11-18），无 stash。`9ba7188` 在 `86df099`（no-AI 构建修复与文档收口）之上完成 2026-11-18 的文档与遗留收口 + 功能补强（预分级角标/智能筛选、蒙版高亮修复、B-2 预分级落库修复），并已补做 kimi-cu 真机端到端验收（验收中发现并修复了 B-2 预分级标记不落库的既有缺陷，详见「2026-11-18」章节）。
 - 下文各章节标题里的“工作区未提交”均为**写作当时**的状态标记；对应代码现已提交，章节内已逐条补注提交哈希与日期。历史验收数字保持原样，不跨章节合并。
 - **2026-11-07 headless 复验（已完成）**：重跑 `_fix_msvc_deps.ps1` 并重新 configure 后再次修复前缀，`Pipeline.cpp.obj` 由 `#deps 0` 恢复为 `#deps 15 (VALID)`（`CropTransform` 4、`TestCompetitiveP1` 51、`CatalogDatabase` 9 抽样一致）；`ninja -t clean` 后全量重建 **303 步成功**，`ctest` **1/1 Passed**，`lrc_tests.exe` **524 test cases / 979,265 assertions 全通过**（0 失败）。该树现已覆盖 2026-10-29 之后的引擎改动。
 - **2026-11-17 headless 复验（已完成，本次实测）**：对 `build_headless`（`LRC_ENABLE_AI=OFF`）重跑 `_fix_msvc_deps.ps1 -BuildDir build_headless`，`Pipeline.cpp.obj` 显示 `#deps 14 (VALID)`；`ninja -t clean` 后全量重建 **304 步成功**，`ctest --test-dir build_headless --output-on-failure` **1/1 Passed**，`lrc_tests.exe -r compact` 报 **524 test cases / 979,265 assertions 全通过**（0 失败），与 2026-11-07 记录一致。该树覆盖本次 no-AI 构建修复。
@@ -23,7 +23,9 @@
 - 长期注意事项（未变）：每次 **configure 之后** `rules.ninja` 的 `msvc_deps_prefix` 会被重新覆盖成 mojibake，必须再跑一次 `build_headless\_fix_msvc_deps.ps1 -BuildDir build_headless`；既有 `.obj` 仍是 `#deps 0`，首次修复后需一次全量重建才生效。另：`LRC_ENABLE_AI` 恒被 CMake 定义为 0/1，条件编译必须用 `#if`（见 `docs/DEVELOPMENT_EXPERIENCE.md` §11）。
 - 仍需跟进的项：现代 C++ 改造遗留见下文；真机锚点逐条状态见下表。`docs/plans/` 当前无未归档计划。`dist/` 两个安装包均在（AI 版约 980.9 MB、No-AI 版约 406.8 MB，各带 sha256），旧记录里“缺 AI 安装包”的遗留项已解决。
 
-## 2026-11-18 文档收口与功能补强（工作区未提交）
+## 2026-11-18 文档收口与功能补强（已提交 9ba7188，2026-11-18）
+
+> 提交：`9ba7188`（2026-11-18），已推送 `SilverHalide/main`。
 
 按用户确认的方向实施四步，并已补做 **kimi-cu 真机交互验收**（验证口径 = headless `ctest` + Qt 自动化测试 + 真实 GUI 端到端；结论见下方「kimi-cu 真机验收」）：
 
@@ -56,7 +58,7 @@
 
 真机验收暴露出一个会话内看不出、冷启动必然失败的真实 bug：预分级角标只在本会话显示，DB 里 `pregrade_score` 永远为 `-1`，因此冷启动回填永远拿不到数据。
 
-- **根因**：`ImportWorker::flushBatch()` 每次 `COMMIT` 后立刻 `beginTransaction()` 重开一个空事务；导入文件循环结束后该事务一直开着，B-2 预分级 `setPregrade` 的所有 UPDATE 都落在这个**从未提交**的事务里，应用关闭时 `CatalogDatabase::close()` 对悬挂事务执行 `ROLLBACK`，标记随之丢弃。此为已提交的 B-2 代码（`df5e828` / `ImportWorker.cpp`，不在本批未提交改动中）的既有缺陷。
+- **根因**：`ImportWorker::flushBatch()` 每次 `COMMIT` 后立刻 `beginTransaction()` 重开一个空事务；导入文件循环结束后该事务一直开着，B-2 预分级 `setPregrade` 的所有 UPDATE 都落在这个**从未提交**的事务里，应用关闭时 `CatalogDatabase::close()` 对悬挂事务执行 `ROLLBACK`，标记随之丢弃。此为已提交的 B-2 代码（`df5e828` / `ImportWorker.cpp`，原不属本批改动文件）的既有缺陷。
 - **修复**（`src/ui/ImportWorker.cpp`）：在 `emit finishedImport(added)` 前调用 `catalog_.commitTransaction()` 关闭遗留空事务（失败则 `emit importWarning`）；随后每条 `setPregrade` 走自动提交，既保证落盘，又避免在 AI 推理期间长时间持写锁。未重构事务流程。
 - **回归测试**（`tests/lrc_qt_tests.cpp::ImportWorkerTest::importAddsImageAndPreviews`）：导入后 `db.close()` → `db.open()` 再断言 `db.getPregrade(importedId).has_value()`，真正验证落盘而非读回同连接未提交状态。`run_qt_tests.bat` 退出码 **0**。
 - **端到端复验**：删除临时库后重启（空库自动重建）→ 重新导入三图；运行中 DB 即出现 `(1,14,1,1)`，稍后三行全部落库 `(14/1/1)(10/0/1)(34/0/1)`；关闭应用后复验仍为 `(14/10/34)`（WAL 已合并）；再次重启后图库网格冷启动回填显示 `AI ⚡`（jpg/arw）、`AI● ⚡`（rw2），与 DB 完全一致，回填闭环。
